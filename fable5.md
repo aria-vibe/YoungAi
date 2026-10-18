@@ -12071,3 +12071,11 @@ A = 只在提示里找(Strata 默认索引范围), B = 提示 + 已生成都找;
 **修(根上)**: 引擎打开时自己找 —— `v41_vision_sidecar_path`(core_bind_vision.c): `<底座>-<后缀…>.gguf` 逐段去 `-xxx` 试 `<前缀>.vision.gguf`, 最长前缀先命中, 不退进目录名; 找到就按原来 `--vision-gguf` 的路接线(mmap + 元数据 + 记偏移, 物理页零); `--vision-gguf off` 明确不接(vision_gate_spark.sh 文本不变门的"不带"那趟改用它); 显式 FILE 照旧优先。起服侧 19:3x 加的那段删掉(一份实现)。帮助文本写明默认规则与"权重按图读、用完丢、从不常驻"。
 **尺**: `ds4_test --server` 加 1 条(临时目录: 无侧车 false / 退到底座名 / 更长前缀优先 / 目录名里的 - 不算 / 空与 NULL), Mac 与 spark 都 OK。linecount ok。
 **spark 真机验证(21:0x)**: 重启 ds4-train(pid 1050925)→ 杀模型子进程 837664 → `/api/models/load` 装回同一套, 85 s 起来(pid 1050981, 命令行里零个 --vision-gguf); `tests/asst/vision_box_probe.sh probe/spark.jpg "这张图里是什么设备?"` 温 0: 5.9 s, prompt 1016 token(图片 span), 回答原文"图中是一台笔记本电脑和旁边放置的一台 NVIDIA DGX Spark 迷你 AI 工作站设备。" RSS: 图前 426,748 kB → 图后 457,720 kB(+31 MB, 971 MB 的侧车没留在 RSS 里 —— "用完卸载"成立)。未提交(待批)。
+
+## 10-18 21:5x · 用户: "助手页面里面是html, 分享功能丢失了, 昨天还有的" → "分享的应该是URL不是文件"
+
+**查实**: 不是 10-16 网页预览改坏的。10-16 06:46 (92f8c856) 把交付改成"回答里写路径就出下载卡", share 工具描述同步降成"只给发给别人用"; 自动出的卡只有下载/预览。spark audit: 做 PPT 的会话模型还顺手调 share, 18:10 鹈鹕 html 会话(d5b56b7de218)只调了 write_file, 零次 share ⇒ 没有分享键。
+**修**: ① 终稿点名出的文件卡自己带"分享"键(web/studio.html fileCard), 不再靠模型调不调工具; ② 网页分享的是链接不是文件: `POST /api/assistant/share_link` 拍快照进 `~/.ds4/assistant/shares/<口令>/`, 回 `/s/<口令>/<文件名>`, 不要登录、不过期, 安全头同预览(asst_web_serve 抽成两路共用)。快照范围: 子目录网页拷整个子目录; 根上网页只拷自己 + 按文件名引用到的根上文件(不把 pptx/md/inbox 跟着发出去)。同版本再分享复用口令。Safari 手势过期时第一下提示再点。方案稿 docs/assistant_page.md §7。
+**尺**: ds4_asst_test preview 段 52/52(Mac + spark, 新 17 项); make asst-e2e 119/119(新: 分享面板拿到 /s/ 链接不带文件、再点同链接、没登录的新浏览器打开是分享那一刻的网页且锁着; 顺修 10-17 去角标后一直红的"侧栏任务数 1"断言)。
+**spark 真机**: train_ui_spark.sh restart(模型子进程没动); 给 pelican_bike.html 要链接 → `https://47.116.132.99:8443/s/150a9321…/pelican_bike.html` 从 Mac 不带登录取: HTTP/2 200 text/html + CSP sandbox, md5 与工作区原文件同 dae54b45…; 改一位口令 404。
+**没做**: 页面上没有撤销按钮(删 shares/<口令>/ 即失效); 在 localhost/局域网 IP 打开工作台时拼出的链接别人打不开。
