@@ -155,6 +155,15 @@ static void guard_decide(const char *sid, const char *tool, const char *args, as
         if (meta_flag(sid, "taint_priv")) { r->once_only = true; set(r, ASST_ASK, "go online after reading your private files (the address or query could carry them out)"); return; }
         set(r, ASST_ALLOW, "web"); return;
     }
+    if (!strcmp(tool, "market_data")) {   /* 联网只读: 出门的只有代码/名字/关键词(按 web 守: 像密文的拒, 读过私有文件后问一次); 资讯摘要是别人写的字, cls=web 置污点 */
+        snprintf(r->cls, sizeof r->cls, "web"); snprintf(r->target, sizeof r->target, "market data");
+        char *s = NULL; asst_jstr(args, "symbols", &s); snprintf(r->path, sizeof r->path, "%s", s ? s : "");
+        const bool secret = s && asst_secret_like(s);
+        free(s);
+        if (secret) { set(r, ASST_DENY, "this would send something that looks like a password, key or card number to a website"); return; }
+        if (meta_flag(sid, "taint_priv")) { r->once_only = true; set(r, ASST_ASK, "go online after reading your private files (the symbols or keyword could carry them out)"); return; }
+        set(r, ASST_ALLOW, "market data"); return;
+    }
     if (!strcmp(tool, "fetch_image")) {   /* 联网 + 写文件: 出门的只有查询词(按 web 守: 像密文的拒, 读过私有文件后问一次); 落点只许工作区(网上的图不往用户别的目录放) */
         snprintf(r->cls, sizeof r->cls, "web"); snprintf(r->target, sizeof r->target, "web image"); r->rw = true;
         char *q = NULL, *nm = NULL, *in = NULL; asst_jstr(args, "query", &q); asst_jstr(args, "name", &nm); asst_jstr(args, "path", &in);

@@ -380,6 +380,17 @@ char *asst_geo_parse_regeo_free(const char *json, char *err, size_t errn);
 bool asst_geo_loc_get(const char *sid, double *lat, double *lng, long *acc, char *addr, size_t n, long *t);   /* 会话里记住的上次定位(meta.loc); 没有 false */
 char *asst_geo_locate_post(const char *sid, const char *raw);   /* locate 工具的收尾: 设备交回 {lat,lng,acc} → 反查地址 → 记进 meta.loc → 给模型看的文本 */
 
+/* ---------------- 行情(tool_market.c): market_data, 东方财富公开接口, 经火狐取 ---------------- */
+char *asst_market_exec(const char *args, int *ok);
+bool asst_mkt_secid(const char *s, char *out, size_t n);   /* 1.600519 / sh600519 / 600519 → secid; 名字、港美股代码 false(走代码搜索) */
+char *asst_mkt_parse_suggest(const char *json, char *first, size_t fn, char *first_name, size_t nn);   /* 下面五个解析器露出来给单测喂夹具; 认不出 NULL */
+char *asst_mkt_parse_quote(const char *json, bool full);
+char *asst_mkt_parse_kline(const char *json, const char *period_cn);
+char *asst_mkt_parse_fin(const char *json);
+char *asst_mkt_parse_news(const char *text);
+char *asst_mkt_parse_notices(const char *json, const char *code);
+void asst_mkt_set_fetch(char *(*fn)(const char *url, char *err, size_t errn));   /* 单测换成读夹具; NULL = 回到火狐 */
+
 /* ---------------- 交付(asst_file.c): 工作区文件 → 页面下载/分享; 设备传上来的文件 → 工作区 inbox/(方案稿 §13.2) ---------------- */
 #define ASST_FILE_MAX (64u << 20)      /* 单个文件 64 MiB: 与工作台上传料上限同 */
 bool asst_qget(const char *query, const char *key, char *out, size_t n);   /* 查询串取一项(百分号解码) */
