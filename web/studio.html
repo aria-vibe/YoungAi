@@ -2165,7 +2165,8 @@ async function openStream(sid, keep) {
           for (const ln of blk.split("\n")) { if (ln.startsWith("id: ")) id = Number(ln.slice(4)); else if (ln.startsWith("data: ")) data += ln.slice(6); }
           if (!data) continue;
           let e; try { e = JSON.parse(data); } catch (_) { continue; }
-          if (id != null) view.next = id + 1;
+          /* 一个 id 只认一次: 万一两条连接叠在一起(见下面的重连), 同一条 tool 事件应用两遍就是两张一样的文件卡(10-18 用户实撞: 一个 PPT 出了两张下载卡) */
+          if (id != null) { if (id < view.next) continue; view.next = id + 1; }
           applyEv(view, e); schedule();
           if (e.ev === "end") loadSessions();
         }
@@ -2174,6 +2175,9 @@ async function openStream(sid, keep) {
     clearTimeout(stall); ac.signal.removeEventListener("abort", onAbort);
     if (ac.signal.aborted) return;
     await new Promise(r => setTimeout(r, 1500));
+    /* 睡的这 1.5 s 里可能已被新的 openStream 取消(锁屏断线 → 亮屏 visibilitychange): 那时手上没有连接, abort 掐不到什么,
+       不在这里看一眼就会醒来照样重连, 和新流一起往 view 里灌, 每条事件应用两遍 */
+    if (ac.signal.aborted) return;
   }
 }
 function resumeStream() { if (curSid && view && view.sid === curSid && document.visibilityState === "visible") openStream(curSid, true); }
