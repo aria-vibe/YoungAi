@@ -261,6 +261,7 @@ void weights_bind_vision(ds4_weights *w, const ds4_model *m);   /* core_bind_vis
 /* 视觉塔所在的 GGUF(2026-10-13): --vision-gguf 侧车(g_vision_model)或主文件自带; 视觉张量的 abs_offset 都相对它的映射 */
 extern ds4_model *g_vision_model;
 const ds4_model *v41_vision_model(const ds4_engine *e);
+bool v41_vision_sidecar_path(const char *model_path, char *out, size_t n);   /* core_bind_vision.c: 模型旁边的 <底座>.vision.gguf(逐段去 -后缀 试); 没有 false */
 void v41_load_vision_metadata(const ds4_model *vm);   /* core_validate_v41.c: 读 deepseek4.vision.*(缺 block_count = 无视觉塔) */
 void cpu_decode_scratch_free(ds4_cpu_decode_scratch *scratch);
 void cpu_decode_scratch_init(ds4_cpu_decode_scratch *scratch, uint32_t ctx_size);

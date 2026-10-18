@@ -120,6 +120,7 @@ bool tr_model_start_sync(int model_port, FILE *log) {
     argv[na++] = "--trace"; argv[na++] = trace;
     char asr[TR_PATH + 300];
     if (asr_dir(asr, sizeof asr)) { argv[na++] = "--asr"; argv[na++] = asr; }   /* 语音识别模型(docs/assistant_asr.md): 有就带上, 页面据此出麦克风 */
+    /* 视觉塔不用在这里带: 引擎自己按名字接模型旁边的 <底座>.vision.gguf(core_engine_open.c, 10-18); 第 3 行起用户写了 --vision-gguf 照样透传 */
     for (int i = 0; extra[i] && na < 62; i++) argv[na++] = extra[i];   /* 第 3 行起原样透传(--engram-dir / 用户选的别的引擎参数) */
     argv[na] = NULL;
     char slog[TR_PATH + 96]; tr_ui_log_path("server", slog, sizeof slog);

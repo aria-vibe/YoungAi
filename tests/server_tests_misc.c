@@ -1,6 +1,24 @@
 /* server_tests_misc.c — 机械拆分自 ds4_server.c 内嵌测试块 (15843-16176 行): DSML 解码态/stop/杂项。 */
 
 #include "server_tests_internal.h"
+#include <unistd.h>
+
+/* 视觉侧车按名字找(core_bind_vision.c, 10-18): <底座>-<后缀…>.gguf → 逐段去 "-xxx" 试 <前缀>.vision.gguf; 最长的前缀优先; 不退进目录名 */
+bool v41_vision_sidecar_path(const char *model_path, char *out, size_t n);
+void test_v41_vision_sidecar_found_by_name(void) {
+    char dir[] = "/tmp/ds4_vis_XXXXXX"; TEST_ASSERT(mkdtemp(dir) != NULL);
+    char mdl[512], s1[512], s2[512], out[1024];
+    snprintf(mdl, sizeof mdl, "%s/Base-1017-vq8-q4k.gguf", dir); snprintf(s1, sizeof s1, "%s/Base-1017.vision.gguf", dir); snprintf(s2, sizeof s2, "%s/Base.vision.gguf", dir);
+    TEST_ASSERT(!v41_vision_sidecar_path(mdl, out, sizeof out) && !out[0]);   /* 没有侧车 */
+    FILE *f = fopen(s2, "w"); TEST_ASSERT(f != NULL); if (f) fclose(f);
+    TEST_ASSERT(v41_vision_sidecar_path(mdl, out, sizeof out) && !strcmp(out, s2));   /* 退到底座名 */
+    f = fopen(s1, "w"); TEST_ASSERT(f != NULL); if (f) fclose(f);
+    TEST_ASSERT(v41_vision_sidecar_path(mdl, out, sizeof out) && !strcmp(out, s1));   /* 更长的前缀先命中 */
+    char dmdl[512]; snprintf(dmdl, sizeof dmdl, "%s/sub-dir/Other.gguf", dir);
+    TEST_ASSERT(!v41_vision_sidecar_path(dmdl, out, sizeof out));   /* 目录名里的 - 不算 */
+    TEST_ASSERT(!v41_vision_sidecar_path("", out, sizeof out) && !v41_vision_sidecar_path(NULL, out, sizeof out));
+    unlink(s1); unlink(s2); rmdir(dir);
+}
 
 void test_dsml_decode_state_separates_structure_and_payload(void) {
     dsml_decode_tracker tracker;

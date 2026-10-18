@@ -98,6 +98,7 @@ void test_responses_stateless_tool_replay_requires_reasoning(void);
 void test_responses_visible_suffix_matches_client_replay(void);
 void test_exact_dsml_tool_replay_can_be_disabled(void);
 void test_dsml_decode_state_separates_structure_and_payload(void);
+void test_v41_vision_sidecar_found_by_name(void);
 void test_tool_memory_max_ids_prunes_oldest(void);
 void test_tool_separator_whitespace_is_not_content(void);
 void test_dsml_prompt_escapes_tool_supplied_text(void);

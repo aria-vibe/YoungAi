@@ -1,7 +1,7 @@
 #!/bin/bash
 # vision_gate_spark.sh — 视觉塔接入的真机门(2026-10-13, spark)。四步, 每步原始输出落 gguf/v41/vision/gate_<时间>/:
 #   ① 金标门: ./ds4 --image 图 --vision-golden 金标(core_v41_vision_gate.c 四道比: 尺寸账 / 像素 / patch / 塔逐行 cos)
-#   ② 文本不变门: 同一提示温 0 贪心 64 token, 带 / 不带 --vision-gguf 两趟, 输出必须逐字节同(侧车不许碰文本路)
+#   ② 文本不变门: 同一提示温 0 贪心 64 token, 带侧车 / --vision-gguf off 两趟, 输出必须逐字节同(侧车不许碰文本路)
 #   ③ 看图: 温 0 贪心, 真图提问, 回答原样打印(判读交给人: "每次给看原始输出")
 #   ④ 不留进程: 每趟都是一次性 ./ds4, 跑完即退; 生产模型子进程由调用方先停(serve_1m_spark.sh stop), 门过了再 pick + 起
 # 用法: vision_gate_spark.sh [主GGUF] [侧车GGUF] [zchain目录]   默认取 gguf/serve_pick.txt 的前两行 + gguf/v41/DeepSeek-V4.1-Flash.vision.gguf
@@ -32,7 +32,7 @@ done
 # ② 文本不变门
 P="请用三句话解释什么是边际成本。"
 log "== ② 文本不变门(温 0, 64 token)"
-./ds4 "${COMMON[@]}" --temp 0 -n 64 -p "$P" > "$OUT/text_base.txt" 2> "$OUT/text_base.err"
+./ds4 "${COMMON[@]}" --vision-gguf off --temp 0 -n 64 -p "$P" > "$OUT/text_base.txt" 2> "$OUT/text_base.err"   # off: 10-18 起引擎会自己接模型旁边的侧车, "不带"那趟要明确关掉
 ./ds4 "${COMMON[@]}" --vision-gguf "$VIS" --temp 0 -n 64 -p "$P" > "$OUT/text_vis.txt" 2> "$OUT/text_vis.err"
 if cmp -s "$OUT/text_base.txt" "$OUT/text_vis.txt"; then log "文本逐字节同 ✓"; else log "★文本不同★(侧车碰了文本路)"; diff "$OUT/text_base.txt" "$OUT/text_vis.txt" | head -5 | tee -a "$OUT/gate.log"; fi
 log "--- 文本原样: $(head -c 300 "$OUT/text_vis.txt")"

@@ -26,8 +26,25 @@ static ds4_tensor *vneed(const ds4_model *m, const char *name) {
     return t;
 }
 
-ds4_model *g_vision_model = NULL;   /* --vision-gguf 侧车(core_engine_open.c 打开); NULL = 视觉张量(若有)在主文件 */
+ds4_model *g_vision_model = NULL;   /* 视觉侧车(core_engine_open.c 打开: 显式 --vision-gguf 或按名字在模型旁边找到); NULL = 视觉张量(若有)在主文件 */
 const ds4_model *v41_vision_model(const ds4_engine *e) { return g_vision_model ? g_vision_model : &e->model; }
+
+/* 侧车按名字找: 量化件是 <底座>-<量化后缀…>.gguf, 侧车是 <底座>.vision.gguf(v41_base_quant_chain_spark.sh 这么出, HF 仓库这么发);
+ * 从整名起逐段去掉末尾 "-xxx" 试, 第一个存在的就是 —— 名字按机制找, 不写死版本。只在文件名里退, 不退到目录名。
+ * 为什么引擎自己找(10-18 用户: "视觉模型都动态加载的, 用完卸载, 是不是有 bug"): 以前只有起服命令带 --vision-gguf 才接线, 工作台 C 起服漏了 flag,
+ * 整台机器就"没带视觉塔", 图片请求 400 —— 侧车明明躺在模型旁边。接线本身不占内存(只 mmap, 来图按块读, 跑完丢页), 所以有就接。 */
+bool v41_vision_sidecar_path(const char *model_path, char *out, size_t n) {
+    if (!model_path || !model_path[0]) return false;
+    char stem[4096]; snprintf(stem, sizeof stem, "%s", model_path);
+    char *dot = strrchr(stem, '.'); if (dot && !strcmp(dot, ".gguf") && !strchr(dot, '/')) *dot = 0;
+    const char *base = strrchr(stem, '/'); base = base ? base + 1 : stem;
+    for (;;) {
+        snprintf(out, n, "%s.vision.gguf", stem); struct stat st;
+        if (!stat(out, &st) && S_ISREG(st.st_mode)) return true;
+        char *dash = strrchr(stem, '-'); if (!dash || dash <= base) { out[0] = 0; return false; }
+        *dash = 0;
+    }
+}
 
 void weights_bind_vision(ds4_weights *w, const ds4_model *main) {
     const ds4_v41_cfg *v = &g_ds4_v41;
