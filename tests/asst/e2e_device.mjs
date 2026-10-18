@@ -264,7 +264,7 @@ const tasksDir = path.join(ASST, "tasks");
   ok(tk.state === "active" && tk.text === "盯着 e2e 的价格, 降了通知我" && /^[0-9a-f]{12}$/.test(tk.session || ""), "任务文件: active + 原句 + 会话 id");
   const meta = tk.session ? JSON.parse(readFileSync(path.join(ASST, "sessions", tk.session, "meta.json"), "utf8")) : {};
   ok(meta.task === newTask[0].replace(".json", ""), "会话 meta.task 指回任务");
-  ok(await p5.locator("#tk-list .row b", { hasText: "盯着 e2e 的价格" }).count() === 1 && (await p5.locator("#nav-tasks").textContent()) === "1", "列表行出现, 侧栏任务数 1");
+  ok(await p5.locator("#tk-list .row b", { hasText: "盯着 e2e 的价格" }).count() === 1 && (await p5.locator("#nav-tasks, #tab-tasks").count()) === 0, "列表行出现, 任务 tab 不带未完成数角标(10-17 去掉)");
   let done = false;   /* 假模型(工具表里没有设备工具)直接出终稿: 几秒内 runs=1 */
   for (let i = 0; i < 40 && !done; i++) { await sleep(250); try { done = JSON.parse(readFileSync(path.join(tasksDir, newTask[0]), "utf8")).runs === 1; } catch (_) {} }
   const tk2 = JSON.parse(readFileSync(path.join(tasksDir, newTask[0]), "utf8"));
