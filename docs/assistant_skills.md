@@ -12,7 +12,7 @@
 格式照 **Agent Skills 开放标准**(Anthropic 2025 年公开, Claude Code / 各家 agent 通用)的 `SKILL.md` frontmatter 约定。
 **但有一条硬限制(10-14 用户定): 技能不许带脚本。** 文件夹里装不进脚本文件, `SKILL.md` 和随附的 md/txt 里也不许有
 任何脚本语句(命令行、代码块)。所以别处的技能只有"纯说明"的那部分能进来; 像 Anthropic 自己的 `pptx` 技能(靠 pptxgenjs /
-python 脚本干活)会在导入时整份被拒(§1.1 有实测)。仓库自带一份合规的 PPT 技能 `docs/skills/pptx/`, 走本机的 `write_document` 出 .pptx。
+python 脚本干活)会在导入时整份被拒(§1.1 有实测)。仓库自带一份合规的 PPT 技能 `skills/pptx/`, 走本机的 `write_document` 出 .pptx(六种版式 + 五套主题, 版式由内容形状决定, 见 docs/assistant_office.md §3.4)。
 
 ## 1. 怎么装
 
@@ -57,7 +57,7 @@ description: 写部门周报用这个: 按部门汇总本周 jira 导出的 csv,
 
 **实测(10-14, Mac 上的 ds4-train 真服务)**: 把 Anthropic 公开的 `skills/pptx/SKILL.md`(20.8 KB)POST 进来 →
 `400 {"error":"SKILL.md rejected: line 15: command 'python' in inline code; skills may not contain commands or scripts"}`
-(第 15 行是它的"读内容"那格: `python scripts/thumbnail.py deck.pptx`)。仓库自带的 `docs/skills/pptx/` 两个文件都过, 装进来后
+(第 15 行是它的"读内容"那格: `python scripts/thumbnail.py deck.pptx`)。仓库自带的 `skills/pptx/` 两个文件都过, 装进来后
 `use_skill` 工具表里出现 `- pptx: 做 PPT / 幻灯片 / …`。
 
 出错会怎样:
@@ -107,7 +107,7 @@ description: 写部门周报用这个: 按部门汇总本周 jira 导出的 csv,
 src/assistant/asst_skill.c    扫描 skills/ (按名排序, 工具表顺序稳定 ⇒ KV 前缀稳定) / frontmatter 解析(description 支持 > | 折行与引号) /
                               use_skill 的 schema(描述列技能, name 枚举) 与执行(文件夹 + 文件表 + 正文) / 页面接口(列表 / save / delete / 上传随附文件) /
                               ★asst_skill_check 脚本语句检查 + 扩展名白名单(§1.1)
-docs/skills/pptx/             仓库自带的合规 PPT 技能: SKILL.md(怎么把主题变成 .pptx, 走 write_document) + reference/example-deck.md(8 页示例稿)
+skills/pptx/             仓库自带的合规 PPT 技能: SKILL.md(怎么把主题变成 .pptx, 走 write_document) + reference/example-deck.md(12 页示例稿, 六种版式、照片、图标、示意图、图表各出现至少一次)
 src/assistant/asst_tools.c    注册表一行 { "use_skill", NULL, MEM, …, asst_skill_build_tool }; exec 分发到 asst_skill_load
 src/assistant/asst_guard.c    use_skill 放行(cls=skill); 技能夹读放行写拒; asst_guard_mark 读技能不置污点; asst_guard_spec 技能夹只读根
 src/assistant/asst_store.c    asst_init 建 skills/ 并设 asst_skills(Landlock 只给存在的路径立规则)

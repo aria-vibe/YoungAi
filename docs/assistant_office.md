@@ -16,6 +16,8 @@ spark 上开思考一轮 20~60 s（总纲 §3.2 的实测），四轮就是几�
 |---|---|---|---|
 | `write_document(path, markdown, also?)` | `.docx` / `.pdf` / `.pptx`，按扩展名定 | 一份 Markdown（pptx 用 `---` 分页） | 零：全部 C 写 zip + OOXML / PDF |
 | `write_xlsx(path, sheets)` | `.xlsx` | JSON：表名 / 列头 / 行；`=` 开头是公式 | 零 |
+| `render_image(path, html, width?, height?)` | `.png` | 模型**自己写的一页 HTML/SVG**，火狐按像素截一张图（10-18，给 PPT / 文档配图：本机没有文生图模型） | 本机要有火狐；落盘走沙盒子进程 |
+| `fetch_image(query, path, kind?, color?, size?, set?, name?)` | `.jpg` / `.png` | **网上取图**（10-18 用户："设备图片等等交给 web search"）：photo = Bing 图片搜索前几条按顺序试，火狐直开原图、canvas 缩到最长边 1600 转 JPEG，结果带来源页；icon = Iconify 公开接口（20 万开源图标）搜名字，SVG 上色后 canvas 转透明 PNG | 本机要有火狐；查询词按 web 守门（像密文的拒、读过私有文件后问一次），落点只许工作区；真联网探针 `./ds4_asst_test --fetch '<工具参数 JSON>'` |
 | `make_video(path, html, seconds, narration?, music?, portrait?)` | `.mp4` | 模型**自己写的一页 HTML/CSS/JS/SVG 动画**（按时间 t 驱动），逐帧渲染 | 本机要有火狐（渲染，已是上网工具的前提）+ `ffmpeg`（编码）；旁白要有语音程序 |
 
 "干完要交出去"不变：模型随后调 `share(path)`，页面出文件卡 → 系统分享面板 → 钉钉/微信附件。
@@ -137,7 +139,7 @@ HTML 动画 ──office_video──▶ 火狐(BiDi)装虚拟时钟 → 逐帧 t
 | `office_docx.c` | 树 → `document.xml` + `styles.xml` + `numbering.xml` + rels + media + 页脚页码 | 450 |
 | `office_xlsx.c` | sheets → `sheet1.xml`（inlineStr）+ `styles.xml` + 列宽 + 冻结首行 + autoFilter | 400 |
 | `office_calc.c` | 公式求值：SUM/AVERAGE/MIN/MAX/COUNT、四则、单元格/区间引用 → `<v>` 缓存值；不认识的函数不填值并报出 | 250 |
-| `office_pptx.c` + `office_pptx_pkg.c` | 版式判定（标题页/标题+要点/图+要点/表格/章节页）→ 显式文本框；包骨架（theme/master/layout/notesMaster 模板） | 450 + 300 |
+| `office_pptx.c` + `office_pptx_draw.c` + `office_pptx_pkg.c` + `office_pptx_chart.c` | 版式判定（封面/章节/数字卡/卡片格/双栏/金句/内容页，§3.4）；绘图原语（段落/文本框/形状/图(等比或裁满)/表/动画）；包骨架（theme/master/layout/notesMaster 模板 + 五套主题表）；原生图表 | 237 + 194 + 138 + 101 |
 | `office_pdf.c` + `office_pdf_write.c` | 排版（按字形宽度换行、分页、表格、图缩放）；PDF 对象/字体/内容流/xref | 450 + 400 |
 | `office_ttf.c` | TrueType 解析（cmap/loca/glyf/hmtx）+ 按用到的字形子集化 → PDF `FontFile2` | 400 |
 | `office_video.c` | 虚拟时钟注入脚本 + 逐帧驱动（BiDi `script.evaluate` 设 t → `captureScreenshot`）+ 网络拦截（只放工作区 `file://`）+ 控制台错误收集 | 450 |
@@ -176,9 +178,20 @@ Markdown/JSON 和工作区里的图片，解析器有 bug 也只炸子进程，�
 - docx / pdf：A4，边距 2.54 cm，正文 11 pt 行距 1.5，标题 20/16/13 pt，表格 0.5 pt 网格 + 表头加粗浅底，
   代码块等宽 + 浅底，图片宽不超正文宽、等比缩放，页脚居中页码。字体名：西文 Calibri、中文 Microsoft YaHei
   （Mac Office 自带；没有的机器 Word 自己替换，docx 只写名字不嵌字体）。
-- pptx：16:9（12192000 × 6858000 EMU），标题 36 pt、要点 20 pt，图+要点左右各半。
-  **主题 `theme`（10-14 用户："要科技风，出来还是很素"——之前只有一套白底）**：`clean`（白底深蓝标题，默认，产物与改前逐字节同）/ `tech`（深海军蓝 0B1220 底、青色 22D3EE 强调：封面与章节页右下两道圆弧 + 标题下强调条，内容页标题左竖条 + 下划线 + 右下页码，表头深蓝底青字，表格正文显式浅字）/ `warm`（米白底橙色强调，同一套装饰）。
-  表在 `office_pptx_pkg.c` 的 `THEMES[]`：颜色进 theme1.xml 的 clrScheme（dk1=正文 lt1=底），母版 clrMap 把 tx1→dk1，所以没显式上色的文字自动跟主题走；备注页永远用 clean 的主题（深色主题的浅字在白色备注页上看不见）。不认识的主题名 `asst_office.c` 当场拒并列出三个名字；金标 `slides-tech.pptx.golden`。
+- pptx：16:9（12192000 × 6858000 EMU），标题 36 pt、要点 24 pt（5 条以上 20，8 条以上 18），图+要点 42/58 左右分，短表垂直居中。
+  **版式只看内容形状（10-18 用户："样式简单、布局粗糙、配色不行"）**，技能 `skills/pptx/SKILL.md` 教模型写出每种形状：封面（第一页一个标题 + 一行）/ 章节页（只有标题 → 左上大序号）/
+  数字卡（标题 + "表头 + 一行数据"的 2~5 列表 → 一列一张圆角卡，大数字 + 小标签）/ 卡片格（标题 + 2~6 条以 **加粗** 开头的要点 → 序号球 + 引题 + 说明，1 行/2×2/2×3）/
+  双栏（两个 ### → 左右两块面板）/ 金句（只有一段 > 引用 → 大引号 + 大字斜体）/ 其余内容页。对照 Anthropic pptx 技能的 Design Ideas 删掉了标题下划线和左侧竖条（"AI 生成"标志性元素）；正文里的 **加粗** 走强调色；表格去竖线、隔行浅底。
+  **主题 `theme`（10-14 用户："要科技风，出来还是很素"）**五套：`clean`（白底近黑标题 + 青绿 0F766E，默认，不画圆弧）/ `tech`（深海军蓝 0B1220 + 青 22D3EE）/ `warm`（浅沙 FBF7F2 + 赤陶 B85042）/ `forest`（白底 + 森林绿 2C5F2D）/ `berry`（莓红 2B0F1E + 金 E0A458）；
+  每套都写底色 + 右下页码，封面/章节页的两道圆弧只有 clean 不画。表在 `office_pptx_pkg.c` 的 `THEMES[]`：颜色进 theme1.xml 的 clrScheme（dk1=正文 lt1=底），母版 clrMap 把 tx1→dk1，所以没显式上色的文字自动跟主题走；备注页永远用 clean 的主题（深色主题的浅字在白色备注页上看不见）。不认识的主题名 `tool_office.c` 当场拒并列出五个名字；金标 `slides.pptx.golden` / `slides-tech.pptx.golden`（夹具 `slides.md` 11 页覆盖全部版式）。
+  **二期（10-18 用户："动画、渐变等等样式体验需要优化"）**：每页 bg→bg2 45° 线性渐变底；封面/章节页右下径向光晕；卡片浅色主题柔和投影、深色主题强调色 22% 描边；每页 `p:transition` 淡入；
+  数字卡/卡片格/双栏的形状按组登记（`pptx_anim`），页末 `pptx_timing` 写成 PowerPoint 自己存的"上一动画之后、自动开始"结构（主序列下一个点击组带 `onBegin` 指回 id 2，组内 set visibility + 400 ms fade，组间 250 ms，`bldLst` 每形状一条 `bldP animBg=1`）；只登记 p:sp，图和表不动。
+  **原生图表**（`office_pptx_chart.c`）：表头第一格是 bar/line/pie 的 Markdown 表（围栏代码块被技能检查器整份拒，示例稿写不进去，所以用表）→ `ppt/charts/chartN.xml`（strLit/numLit 内嵌数据，不带工作簿；三家都能开）+ 本页 graphicFrame，排法同图片。配色 accent/c2/c3/c4，字色正文色，底透明。
+  **三期（10-18 用户："部分字是黑色和主题不搭；好看的背景图标没有，设备图片交给 web search"）**：每个文字 run 都显式写颜色——之前正文 / 要点 / 引言不写色靠母版 clrMap 推 tx1，LibreOffice / PowerPoint 推得对，手机上 WPS / 微信预览推成黑字，深色主题整页正文黑在深蓝底上；
+  封面 / 章节页带一张图 → 图铺满右 45%、整页高、`a:srcRect` 对称裁满（像素不丢只是不显示），字靠左，不画圆弧不写页码；卡片格每条前面的 `![](图标.png)` → 强调色 14%/22% 淡色圆 + 图标，顶替序号球（Design Ideas 的"图标在彩色圆里"母题；解析出来图和加粗之间夹一个空格文本节点，`card_head` 跳过它）。
+  图从哪来：`fetch_image`（上表）——照片进封面 / 章节页，图标进卡片格，示意图仍由 `render_image` 画；技能 `skills/pptx/SKILL.md` 的"配图"一节按这三条分工写。
+  裁判：Anthropic pptx 技能的 `scripts/office/validate.py`（OOXML schema，`uv run --with lxml --with defusedxml`）三套主题全过；LibreOffice 渲染逐页看过（动画看不到，只能靠 schema）。
+  肉眼看版式：`./ds4_office_test --keep`（五套主题落盘，`--md 文件` 换成任意稿子）再 `scripts/office_preview.sh <pptx>…` 转成每页 JPG（要 LibreOffice + poppler）。
   不依赖版式占位符，文本框显式定位——WPS / Keynote / LibreOffice 打开位置一致。
 - xlsx：表头加粗 + 浅底 + 下边线、冻结 A2、autoFilter；列宽 = 内容最长（中文算 2）钳在 8~60；
   数字右对齐常规格式；`calcPr fullCalcOnLoad=1`，Excel 打开时重算一遍覆盖我们的缓存值。
