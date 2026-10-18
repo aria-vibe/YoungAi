@@ -125,6 +125,8 @@ char *asst_policy_json(void);          /* policy.json 原文(没有给缺省) */
 bool asst_policy_op(const char *body, char *err, size_t errn);   /* 页面改 policy / 撤销永久授权 */
 void asst_approvals_json(ds4_buf *b);
 bool asst_secret_like(const char *s);  /* 卡号(15~19 位且过 Luhn)/ 私钥头 / password= / 本机口令原文 */
+bool asst_url_host(const char *url, char *host, size_t n);   /* http(s) 地址的主机名(sbx_guard.c; user:pass@ 跳过, [v6] 去括号); 不是 http(s) 回 false */
+bool asst_host_private(const char *host);                    /* 本机 / 内网 / 链路本地(sbx_policy.c) */
 
 /* ---------------- 交易审批(sbx_pay.c, 2026-10-16, 方案稿 docs/assistant_approval.md): 云手机上会动手的动作前判"这是不是付款/下单/登录" ---------------- */
 typedef struct { char focus[192], hash[32]; bool secure, ime_shown; int ime_top; } asst_phone_win;   /* 前台: 焦点窗口(包/类全名)、窗口编号(mCurrentFocus 里的; 没焦点窗口时空)、FLAG_SECURE、软键盘 */
@@ -255,6 +257,7 @@ void asst_toolbox_json(ds4_buf *b);    /* {"have":[…],"missing":[…]} 给状�
 char *asst_web_search(const char *query, char *err, size_t errn);
 char *asst_web_visit(const char *url, char *err, size_t errn);
 char *asst_web_text(const char *url, char *err, size_t errn);   /* 页面正文原文(document.body.innerText): 给 JSON 接口用, 不走正文抽取 */
+char *asst_web_js(const char *url, const char *js, bool await, char *err, size_t errn);   /* 开页面后跑一段 JS 拿字符串; await = 表达式回 Promise 就等它(fetch_image 的 canvas 转码) */
 const char *asst_browser_kind(void);   /* "firefox" / "" (本机没有) */
 void asst_browser_shutdown(void);
 /* 渲染原语(make_video 用): 独立标签, w×h 视口, 预载脚本只挂这个标签 */
@@ -316,10 +319,16 @@ char *asst_phone_wx_xml(const char *dump, const char *focus, const uint8_t *rgb,
 
 /* ---------------- 视频(tool_video.c + tool_video_srv.c, 方案稿 docs/assistant_video.md) ---------------- */
 char *asst_video_exec(const char *args, const asst_gres *g, const char *trash, int *ok);   /* 已过守门(g->path = .mp4 绝对路径) */
+char *asst_ff_eval(const char *ctx, const char *expr, bool await, char *err, size_t errn);   /* 火狐页面里跑一句 JS, 回 value 原文(tool_video.c) */
+size_t asst_b64dec(const char *s, uint8_t *o);                                               /* base64 → 字节(截图数据) */
+char *asst_render_exec(const char *args, const asst_gres *g, const char *trash, int *ok);   /* render_image(tool_render.c): HTML → 火狐截图 → PNG 落工作区; 已过守门(g->path = .png 绝对路径) */
+asst_sbx_rc asst_save_bytes(const asst_gres *g, const char *trash, const uint8_t *data, size_t len, char **out);   /* 字节落到 g->path(沙盒子进程; 建父目录; 旧版进 .trash); *out = created / replaced / error: … */
+char *asst_fetch_exec(const char *args, const asst_gres *g, const char *trash, int *ok);    /* fetch_image(tool_fetch.c): 网上找一张照片 / 一个图标, 火狐转码后落工作区 */
 typedef struct asst_vsrv asst_vsrv;   /* 渲染期间的本机只读 HTTP 源: 页面从内存给, 别的只给工作区文件 */
 asst_vsrv *asst_vsrv_start(const char *page, size_t n, char *url, size_t urln, char *err, size_t errn);   /* url = 页面地址 */
 void asst_vsrv_stop(asst_vsrv *s);
 void asst_run_progress(const char *text);   /* asst_run.c: 给正在执行的那张工具卡发一条进度(tool_progress 事件) */
+bool asst_mkdir_p(const char *dir);   /* 逐级建目录(已存在也算成功) */
 void asst_fs_trash(const char *trash, const char *path);   /* 旧版复制进 .trash(覆盖前保全) */
 /* tool_video_audio.c: make_video 的旁白 + 背景乐 → AAC 音轨 */
 typedef struct { double at; char *text; } asst_vline;

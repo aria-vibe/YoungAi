@@ -154,14 +154,14 @@ static bool feed(int fd, const void *p, size_t n, volatile int *done) {
 }
 
 static int b64v(int c) { return c >= 'A' && c <= 'Z' ? c - 'A' : c >= 'a' && c <= 'z' ? c - 'a' + 26 : c >= '0' && c <= '9' ? c - '0' + 52 : c == '+' ? 62 : c == '/' ? 63 : -1; }
-static size_t b64dec(const char *s, uint8_t *o) {
+size_t asst_b64dec(const char *s, uint8_t *o) {
     size_t n = 0; unsigned acc = 0; int bits = 0;
     for (; *s; s++) { const int v = b64v((unsigned char)*s); if (v < 0) continue; acc = (acc << 6) | (unsigned)v; bits += 6; if (bits >= 8) { bits -= 8; o[n++] = (uint8_t)(acc >> bits); } }
     return n;
 }
 
-/* 页面里跑一句, 拿回 result 的 value 原文(数字 / 字符串); 抛异常 → NULL 且 err 里是原因 */
-static char *eval(const char *ctx, const char *expr, bool await, char *err, size_t errn) {
+/* 页面里跑一句, 拿回 result 的 value 原文(数字 / 字符串); 抛异常 → NULL 且 err 里是原因。render_image(tool_render.c)共用 */
+char *asst_ff_eval(const char *ctx, const char *expr, bool await, char *err, size_t errn) {
     ds4_buf q = {0};
     ds4_buf_puts(&q, "{\"expression\":"); ds4_json_escape(&q, expr);
     ds4_buf_puts(&q, ",\"target\":{\"context\":"); ds4_json_escape(&q, ctx); ds4_buf_printf(&q, "},\"awaitPromise\":%s}", await ? "true" : "false");
@@ -199,7 +199,7 @@ char *asst_video_exec(const char *args, const asst_gres *g, const char *trash, i
     ds4_buf q = {0}; ds4_buf_puts(&q, "{\"context\":"); ds4_json_escape(&q, ctx); ds4_buf_puts(&q, ",\"url\":"); ds4_json_escape(&q, url); ds4_buf_puts(&q, ",\"wait\":\"complete\"}");
     char *r = asst_ff_call("browsingContext.navigate", q.ptr, err, sizeof err); ds4_buf_free(&q); free(r);
     /* 字体与图片都到齐再拍第 0 帧: 不等的话前几帧是系统后备字体 / 裂图 */
-    char *ready = r ? eval(ctx, "document.fonts.ready.then(() => Promise.all([...document.images].map(i => i.complete ? 0 : new Promise(f => { i.onload = i.onerror = f; })))).then(() => typeof __ds4)", true, err, sizeof err) : NULL;
+    char *ready = r ? asst_ff_eval(ctx, "document.fonts.ready.then(() => Promise.all([...document.images].map(i => i.complete ? 0 : new Promise(f => { i.onload = i.onerror = f; })))).then(() => typeof __ds4)", true, err, sizeof err) : NULL;
     const bool have_clock = ready && !strcmp(ready, "\"object\""); free(ready);
     if (!have_clock) { asst_ff_tab_close(ctx, script); asst_vsrv_stop(srv); asst_vaudio_free(&aud); return fail(html, "error: the page did not load in the renderer: %s\n", err[0] ? err : "virtual clock missing"); }
 
@@ -225,14 +225,14 @@ char *asst_video_exec(const char *args, const asst_gres *g, const char *trash, i
     for (; i < n; i++) {
         if (stopping()) { snprintf(err, sizeof err, "stopped by the user"); break; }
         char expr[64]; snprintf(expr, sizeof expr, "__ds4.step(%.6f)", i * 1000.0 / FPS);
-        char *v = eval(ctx, expr, false, err, sizeof err);
+        char *v = asst_ff_eval(ctx, expr, false, err, sizeof err);
         if (!v) { if (!err[0]) snprintf(err, sizeof err, "the page stopped responding at %.2f s (endless loop in a script?)", i / (double)FPS); break; }
         free(v);
         ds4_buf c = {0}; ds4_buf_puts(&c, "{\"context\":"); ds4_json_escape(&c, ctx); ds4_buf_puts(&c, ",\"origin\":\"viewport\",\"format\":{\"type\":\"image/png\"}}");
         char *shot = asst_ff_call("browsingContext.captureScreenshot", c.ptr, err, sizeof err), *data = NULL; ds4_buf_free(&c);
         if (!shot || !asst_jstr(shot, "data", &data)) { free(shot); if (!err[0]) snprintf(err, sizeof err, "screenshot failed at frame %d", i); break; }
         free(shot);
-        uint8_t *png = malloc(strlen(data) * 3 / 4 + 4); const uint32_t len = (uint32_t)b64dec(data, png); free(data);
+        uint8_t *png = malloc(strlen(data) * 3 / 4 + 4); const uint32_t len = (uint32_t)asst_b64dec(data, png); free(data);
         const bool fed = feed(pf[1], &len, 4, &t->done) && feed(pf[1], png, len, &t->done); free(png);
         if (!fed) { snprintf(err, sizeof err, "the encoder stopped at frame %d", i); break; }
         if ((i + 1) % FPS == 0 || i + 1 == n) { char p[96]; snprintf(p, sizeof p, "rendered %d/%d frames", i + 1, n); asst_run_progress(p); }
@@ -244,7 +244,7 @@ char *asst_video_exec(const char *args, const asst_gres *g, const char *trash, i
     if (i == n) {   /* 页面报错 + 页面有没有自己跳走(跳走了后面的帧拍的就是别的页) */
         ds4_buf x = {0}; ds4_buf_puts(&x, "(location.href === "); ds4_json_escape(&x, url);
         ds4_buf_puts(&x, " ? '' : 'the page navigated away to ' + location.href + '\\n') + __ds4.errors()");
-        char *raw = eval(ctx, x.ptr, false, e2, sizeof e2); ds4_buf_free(&x);
+        char *raw = asst_ff_eval(ctx, x.ptr, false, e2, sizeof e2); ds4_buf_free(&x);
         const char *p = raw; if (raw && raw[0] == '"') json_string(&p, &perr);
         free(raw);
     }

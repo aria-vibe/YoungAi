@@ -206,7 +206,7 @@ static bool fresh_tab(char *err, size_t errn) {
     return ff_ws.fd >= 0;
 }
 
-static char *run_js(const char *url, const char *js, char *err, size_t errn) {
+static char *run_js(const char *url, const char *js, bool await, char *err, size_t errn) {
     if (!ff_start(err, errn) || !fresh_tab(err, errn)) return NULL;
     /* 导航命令只发不等回复, 等多久我们自己数。让 BiDi 替我们等, 回复一超过 20 s 就 WebSocket 读超时, 整个火狐被当坏连接杀掉重起:
      * 等 "complete" 要页面里每个资源(图片/统计脚本/被墙的 CDN)都到齐; 等 "interactive" 乃至 "none" 也要服务器先回第一个字节,
@@ -250,7 +250,7 @@ static char *run_js(const char *url, const char *js, char *err, size_t errn) {
     usleep(800000);   /* 前端渲染的页面 load 之后还要再画一下; 不等就抓到一个空壳 */
     ds4_buf q = {0};
     ds4_buf_puts(&q, "{\"expression\":"); ds4_json_escape(&q, js);
-    ds4_buf_puts(&q, ",\"target\":{\"context\":"); ds4_json_escape(&q, ff_ctx); ds4_buf_puts(&q, "},\"awaitPromise\":false}");
+    ds4_buf_puts(&q, ",\"target\":{\"context\":"); ds4_json_escape(&q, ff_ctx); ds4_buf_printf(&q, "},\"awaitPromise\":%s}", await ? "true" : "false");
     char *res = bidi("script.evaluate", q.ptr, err, errn);
     ds4_buf_free(&q);
     if (!res) return NULL;
@@ -277,10 +277,11 @@ static const char bing_js[] =
 char *asst_web_search(const char *query, char *err, size_t errn) {
     char *enc = web_url_encode(query);
     ds4_buf u = {0}; ds4_buf_printf(&u, "https://www.bing.com/search?q=%s", enc); free(enc);
-    char *r = run_js(u.ptr, bing_js, err, errn);
+    char *r = run_js(u.ptr, bing_js, false, err, errn);
     ds4_buf_free(&u);
     return r;
 }
+char *asst_web_js(const char *url, const char *js, bool await, char *err, size_t errn) { return run_js(url, js, await, err, errn); }
 
 /* ---------------- 渲染原语(tool_video.c): 独立标签页, 不碰网页工具的 ff_ctx ----------------
  * 视口按像素给(devicePixelRatio 1: 截图就是 w×h); 预载脚本只挂在这个标签上(contexts), 网页工具开的标签不受影响。
@@ -317,5 +318,5 @@ void asst_ff_tab_close(const char *ctx, const char *script) {
     ds4_buf_free(&p);
 }
 
-char *asst_web_visit(const char *url, char *err, size_t errn) { return run_js(url, ds4_web_extract_page_js(), err, errn); }
-char *asst_web_text(const char *url, char *err, size_t errn) { return run_js(url, "document.body ? document.body.innerText : ''", err, errn); }
+char *asst_web_visit(const char *url, char *err, size_t errn) { return run_js(url, ds4_web_extract_page_js(), false, err, errn); }
+char *asst_web_text(const char *url, char *err, size_t errn) { return run_js(url, "document.body ? document.body.innerText : ''", false, err, errn); }

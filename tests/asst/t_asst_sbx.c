@@ -257,8 +257,24 @@ static int phone_look_mode(void) {
     return ok ? 0 : 1;
 }
 
+/* --fetch JSON: 真联网跑一次 fetch_image(10-18): 参数就是工具参数原文, 例 '{"query":"NVIDIA DGX Spark","path":"probe/spark.jpg"}'
+ * 或 '{"query":"server","path":"probe/server.png","kind":"icon","color":"#22D3EE"}'; 落在生产工作区(~/.ds4/assistant/workspace), 打印工具结果原文 */
+static int fetch_mode(const char *args) {
+    char err[512] = ""; char sid[ASST_ID_LEN + 1];
+    if (!asst_init(NULL, err, sizeof err)) { printf("init: %s\n", err); return 1; }
+    asst_session_new(sid, "probe", "fetch an image", false);
+    asst_gres g; asst_guard(sid, "fetch_image", args, &g);
+    if (g.dec != ASST_ALLOW) { printf("guard: %s\n", g.reason); asst_browser_shutdown(); return 1; }
+    int ok = 0; const time_t t0 = time(NULL);
+    char *o = asst_tool_exec(sid, "fetch_image", args, &g, &ok);
+    printf("=== %s (%lds)\n%s", ok ? "ok" : "failed", (long)(time(NULL) - t0), o ? o : "(null)\n"); free(o);
+    asst_browser_shutdown();
+    return ok ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--phone-look")) return phone_look_mode();
+    if (argc > 2 && !strcmp(argv[1], "--fetch")) return fetch_mode(argv[2]);
     if (argc > 2 && !strcmp(argv[1], "--tts")) return tts_mode(argc - 2, argv + 2, false);
     if (argc > 2 && !strcmp(argv[1], "--tts-sbx")) return tts_mode(argc - 2, argv + 2, true);
     if (argc > 2 && !strcmp(argv[1], "--check-args")) return check_args_mode(argc - 2, argv + 2);

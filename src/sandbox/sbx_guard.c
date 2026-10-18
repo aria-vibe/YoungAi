@@ -78,7 +78,7 @@ static void guard_file(const char *sid, bool write, const char *tool, const char
     set(r, ASST_ASK, write ? "write outside workspace" : "read outside workspace");
 }
 
-static bool url_host(const char *url, char *host, size_t n) {
+bool asst_url_host(const char *url, char *host, size_t n) {
     const char *p = !strncasecmp(url, "https://", 8) ? url + 8 : !strncasecmp(url, "http://", 7) ? url + 7 : NULL;
     if (!p) return false;
     const char *at = NULL; for (const char *q = p; *q && *q != '/' && *q != '?' && *q != '#'; q++) if (*q == '@') at = q;
@@ -95,7 +95,7 @@ static void guard_decide(const char *sid, const char *tool, const char *args, as
 void asst_guard(const char *sid, const char *tool, const char *args, asst_gres *r) {
     guard_decide(sid, tool, args, r);
     if (r->dec == ASST_DENY) return;
-    const bool acts = !strcmp(r->cls, "write") || !strcmp(r->cls, "exec") || !strcmp(r->cls, "notify") || !strcmp(r->cls, "phone") || !strcmp(r->cls, "pay") || asst_device_tool(tool) == 2;
+    const bool acts = !strcmp(r->cls, "write") || !strcmp(r->cls, "exec") || !strcmp(r->cls, "notify") || !strcmp(r->cls, "phone") || !strcmp(r->cls, "pay") || asst_device_tool(tool) == 2 || !strcmp(tool, "fetch_image");
     if (acts && asst_plan_waiting(sid)) { r->once_only = false; set(r, ASST_DENY, "the plan is waiting for the user's decision; until they press Start on the plan card only looking things up is allowed"); }
 }
 
@@ -128,7 +128,7 @@ static void guard_decide(const char *sid, const char *tool, const char *args, as
         return;
     }
     if (!strcmp(tool, "read_file") || !strcmp(tool, "list_dir") || !strcmp(tool, "search_files") || !strcmp(tool, "view_image")) { guard_file(sid, false, tool, args, r); return; }
-    if (!strcmp(tool, "write_file") || !strcmp(tool, "edit_file") || asst_office_tool(tool) || !strcmp(tool, "make_video") || !strcmp(tool, "edit_image")) { guard_file(sid, true, tool, args, r); return; }   /* 产出工具 = 写一个文件, 守门口径与 write_file 同 */
+    if (!strcmp(tool, "write_file") || !strcmp(tool, "edit_file") || asst_office_tool(tool) || !strcmp(tool, "make_video") || !strcmp(tool, "render_image") || !strcmp(tool, "edit_image")) { guard_file(sid, true, tool, args, r); return; }   /* 产出工具 = 写一个文件, 守门口径与 write_file 同 */
     if (!strcmp(tool, "run")) {   /* 沙盒里跑, 不审批(10-12 用户: "确保在沙箱当中, 暂时不要审批"): 安全靠沙盒不靠审批 —— 没网络就没有外送通道, 只能写工作区且 .trash 留旧版; 污点态也不降级。
                                    * 硬警告词只标红进审计(它在沙盒里本来就碰不到工作区以外); 像密文的仍拒: 密码不该出现在审计流水里 */
         snprintf(r->cls, sizeof r->cls, "exec"); snprintf(r->path, sizeof r->path, "%s", asst_ws); snprintf(r->target, sizeof r->target, "run");
@@ -146,13 +146,27 @@ static void guard_decide(const char *sid, const char *tool, const char *args, as
         if (!v || !v[0]) { free(v); set(r, ASST_DENY, visit ? "visit_page requires url" : "web_search requires query"); return; }
         snprintf(r->path, sizeof r->path, "%s", v);
         if (visit) {
-            if (!url_host(v, r->target, sizeof r->target)) { free(v); set(r, ASST_DENY, "only http:// and https:// pages can be visited"); return; }
+            if (!asst_url_host(v, r->target, sizeof r->target)) { free(v); set(r, ASST_DENY, "only http:// and https:// pages can be visited"); return; }
             if (asst_host_private(r->target)) { free(v); set(r, ASST_DENY, "local and private-network addresses are not allowed"); return; }
         } else snprintf(r->target, sizeof r->target, "web search");
         const bool secret = asst_secret_like(v);
         free(v);
         if (secret) { set(r, ASST_DENY, "this would send something that looks like a password, key or card number to a website"); return; }
         if (meta_flag(sid, "taint_priv")) { r->once_only = true; set(r, ASST_ASK, "go online after reading your private files (the address or query could carry them out)"); return; }
+        set(r, ASST_ALLOW, "web"); return;
+    }
+    if (!strcmp(tool, "fetch_image")) {   /* 联网 + 写文件: 出门的只有查询词(按 web 守: 像密文的拒, 读过私有文件后问一次); 落点只许工作区(网上的图不往用户别的目录放) */
+        snprintf(r->cls, sizeof r->cls, "web"); snprintf(r->target, sizeof r->target, "web image"); r->rw = true;
+        char *q = NULL, *nm = NULL, *in = NULL; asst_jstr(args, "query", &q); asst_jstr(args, "name", &nm); asst_jstr(args, "path", &in);
+        const bool has_q = (q && q[0]) || (nm && nm[0]);
+        const bool pathok = in && in[0] && asst_path_resolve(in, r->path, sizeof r->path);
+        const bool secret = (q && asst_secret_like(q)) || (nm && asst_secret_like(nm));
+        free(q); free(nm); free(in);
+        if (!has_q) { set(r, ASST_DENY, "fetch_image requires query"); return; }
+        if (!pathok) { set(r, ASST_DENY, "fetch_image requires path"); return; }
+        if (!asst_under(r->path, asst_ws)) { set(r, ASST_DENY, "fetch_image saves inside the workspace only (a relative path)"); return; }
+        if (secret) { set(r, ASST_DENY, "this would send something that looks like a password, key or card number to a website"); return; }
+        if (meta_flag(sid, "taint_priv")) { r->once_only = true; set(r, ASST_ASK, "go online after reading your private files (the query could carry them out)"); return; }
         set(r, ASST_ALLOW, "web"); return;
     }
     set(r, ASST_DENY, "unknown tool");

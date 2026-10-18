@@ -31,7 +31,7 @@ static char *slurp(const char *path, size_t max, size_t *len) {
     return b.ptr;
 }
 
-static bool mkdir_p(const char *dir) {
+bool asst_mkdir_p(const char *dir) {
     char tmp[ASST_PATH]; snprintf(tmp, sizeof tmp, "%s", dir);
     for (char *p = tmp + 1; *p; p++) if (*p == '/') { *p = 0; if (mkdir(tmp, 0755) && errno != EEXIST) return false; *p = '/'; }
     return !mkdir(tmp, 0755) || errno == EEXIST;
@@ -39,7 +39,7 @@ static bool mkdir_p(const char *dir) {
 
 static void trash_copy(const char *trash, const char *path) {
     struct stat st;
-    if (!trash || !trash[0] || stat(path, &st) || !S_ISREG(st.st_mode) || st.st_size > ASST_TRASH_MAX || !mkdir_p(trash)) return;
+    if (!trash || !trash[0] || stat(path, &st) || !S_ISREG(st.st_mode) || st.st_size > ASST_TRASH_MAX || !asst_mkdir_p(trash)) return;
     size_t n; char *data = slurp(path, (size_t)ASST_TRASH_MAX, &n);
     if (!data) return;
     const char *base = strrchr(path, '/'); base = base ? base + 1 : path;
@@ -51,7 +51,7 @@ static void trash_copy(const char *trash, const char *path) {
 
 static bool atomic_write(const char *path, const char *data, size_t n) {
     char dir[ASST_PATH]; snprintf(dir, sizeof dir, "%s", path);
-    char *sl = strrchr(dir, '/'); if (sl && sl != dir) { *sl = 0; if (!mkdir_p(dir)) return false; }
+    char *sl = strrchr(dir, '/'); if (sl && sl != dir) { *sl = 0; if (!asst_mkdir_p(dir)) return false; }
     char tmp[ASST_PATH + 32]; snprintf(tmp, sizeof tmp, "%s.ds4tmp.%ld", path, (long)getpid());
     const int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (fd < 0) return false;

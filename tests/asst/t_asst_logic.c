@@ -278,7 +278,7 @@ static void test_office(void) {
     const char *pc = "{\"path\":\"out/c.pptx\",\"markdown\":\"# x\"}";
     r = G(sid, "write_document", pc); o = asst_tool_exec(sid, "write_document", pc, &r, &ok);
     CHECKL(ok && o && strstr(o, "theme clean"), "no theme = clean: %s", o ? o : "(null)"); free(o);
-    tj = asst_tools_json(NULL); CHECKL(tj && strstr(tj, "\"theme\":{\"type\":\"string\",\"description\":\"Slide look, .pptx only: clean") && strstr(tj, "tech = dark navy"), "write_document schema has theme with the three looks"); free(tj);
+    tj = asst_tools_json(NULL); CHECKL(tj && strstr(tj, "\"theme\":{\"type\":\"string\",\"description\":\"Slide look, .pptx only: clean") && strstr(tj, "tech = dark navy") && strstr(tj, "forest = ") && strstr(tj, "berry = "), "write_document schema has theme with the five looks"); free(tj);
     /* source: 工作区里现成的 .md 一次短调用转成 pdf + docx, 不用把正文重发一遍 */
     snprintf(p, sizeof p, "%s/out/src.md", asst_ws); { FILE *f = fopen(p, "w"); fputs("# 源文件\n\n第一段。\n\n- 甲\n- 乙\n", f); fclose(f); }
     const char *ps = "{\"path\":\"out/src.pdf\",\"source\":\"out/src.md\",\"also\":\"docx\"}";

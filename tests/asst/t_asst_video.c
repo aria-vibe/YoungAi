@@ -51,6 +51,14 @@ static char *video(const char *path, const char *html, const char *seconds, int 
     ds4_buf_free(&a); return o;
 }
 
+static char *render(const char *path, const char *html, int w, int h, int *ok) {
+    ds4_buf a = {0}; ds4_buf_puts(&a, "{\"path\":"); ds4_json_escape(&a, path); ds4_buf_puts(&a, ",\"html\":"); ds4_json_escape(&a, html);
+    ds4_buf_printf(&a, ",\"width\":%d,\"height\":%d}", w, h);
+    asst_gres g; asst_guard(vsid, "render_image", a.ptr, &g);
+    char *o = g.dec == ASST_ALLOW ? asst_tool_exec(vsid, "render_image", a.ptr, &g, ok) : strdup("guard refused");
+    ds4_buf_free(&a); return o;
+}
+
 int asst_test_video(const char *base) {
     asst_session_new(vsid, "v", "make a video", false);
     char *tj = asst_tools_json(NULL);
@@ -151,6 +159,38 @@ int asst_test_video(const char *base) {
     { asst_gres g; asst_guard(vsid, "make_video", a.ptr, &g); o = asst_tool_exec(vsid, "make_video", a.ptr, &g, &ok); }
     CHECKV(!ok && strstr(o, ".wav"), "music that is not a .wav refused: %s", o); free(o);
     ds4_buf_free(&a);
+    /* render_image(tool_render.c, 10-18): 同一条火狐路, 一张静态图。守门与参数 / 真截图逐像素 / 旧版进 .trash / 外网图被拦并报进结果 */
+    tj = asst_tools_json(NULL); CHECKV(strstr(tj, "\"name\":\"render_image\"") != NULL, "render_image listed when Firefox exists"); free(tj);
+    o = render("vt/r.jpg", "<body></body>", 400, 300, &ok); CHECKV(!ok && strstr(o, ".png"), "non-.png path refused: %s", o); free(o);
+    o = render("vt/r.png", "", 400, 300, &ok); CHECKV(!ok && strstr(o, "html is required"), "empty html refused: %s", o); free(o);
+    o = render("vt/r.png", "<body></body>", 10, 300, &ok); CHECKV(!ok && strstr(o, "between 64 and 4096"), "tiny width refused: %s", o); free(o);
+    const char *pic = "<!doctype html><body style='margin:0'><svg width='400' height='300' viewBox='0 0 400 300'><rect width='200' height='300' fill='#f00'/><rect x='200' width='200' height='300' fill='#00f'/></svg></body>";
+    o = render("vt/r.png", pic, 400, 300, &ok);
+    printf("  render_image: %s", o);
+    CHECKV(ok && !strncmp(o, "image: vt/r.png\n", 16) && strstr(o, "created vt/r.png (PNG 400x300") && strstr(o, "No page errors"), "svg rendered to png with image: line");
+    { char rp[4400]; snprintf(rp, sizeof rp, "%s/vt/r.png", asst_ws); size_t rn; char *rd = asst_slurp(rp, &rn); int w = 0, h = 0; uint8_t *rgba = NULL;
+      CHECKV(rd && office_png_decode((const uint8_t *)rd, rn, &w, &h, &rgba) && w == 400 && h == 300 && px(rgba, w, 100, 150, 255, 0, 0) && px(rgba, w, 300, 150, 0, 0, 255), "png on disk is 400x300, red left / blue right");
+      free(rd); free(rgba); }
+    o = render("vt/deep/er/r2.png", pic, 64, 64, &ok); CHECKV(ok && strstr(o, "created vt/deep/er/r2.png (PNG 64x64"), "missing parent folders are created: %s", o); free(o);
+    o = render("vt/r.png", "<body style='margin:0;background:#fff'><img src='http://example.com/x.png' width=10></body>", 400, 300, &ok);
+    CHECKV(ok && strstr(o, "replaced vt/r.png") && strstr(o, ".trash") && strstr(o, "Page errors") && strstr(o, "blocked (no network"), "re-render replaces (old to .trash) and reports the blocked external image: %s", o); free(o);
+    /* fetch_image(tool_fetch.c, 10-18): 守门(查询词 / 落点只许工作区 / 读过私有文件后问)与参数检查都在联网之前, 离线能测; 真联网走 ./ds4_asst_test --fetch */
+    tj = asst_tools_json(NULL); CHECKV(strstr(tj, "\"name\":\"fetch_image\"") != NULL, "fetch_image listed when Firefox exists"); free(tj);
+    { asst_gres g;
+      asst_guard(vsid, "fetch_image", "{\"path\":\"vt/x.jpg\"}", &g); CHECKV(g.dec == ASST_DENY && strstr(g.reason, "requires query"), "fetch without query denied: %s", g.reason);
+      asst_guard(vsid, "fetch_image", "{\"query\":\"server\"}", &g); CHECKV(g.dec == ASST_DENY && strstr(g.reason, "requires path"), "fetch without path denied: %s", g.reason);
+      asst_guard(vsid, "fetch_image", "{\"query\":\"server\",\"path\":\"/tmp/x.jpg\"}", &g); CHECKV(g.dec == ASST_DENY && strstr(g.reason, "inside the workspace"), "fetch outside workspace denied: %s", g.reason);
+      asst_guard(vsid, "fetch_image", "{\"query\":\"password=hunter2\",\"path\":\"vt/x.jpg\"}", &g); CHECKV(g.dec == ASST_DENY && strstr(g.reason, "password"), "secret-looking query denied: %s", g.reason);
+      asst_guard(vsid, "fetch_image", "{\"query\":\"server\",\"path\":\"vt/x.jpg\"}", &g); CHECKV(g.dec == ASST_ALLOW && !strcmp(g.cls, "web") && g.rw, "fetch into workspace allowed as web + write: %s", g.reason);
+      asst_guard(vsid, "fetch_image", "{\"query\":\"server\",\"path\":\"vt/x.png\"}", &g);   /* 守门结果里的 path 就是执行用的 path: 每组参数都要重新过门 */
+      o = asst_tool_exec(vsid, "fetch_image", "{\"query\":\"server\",\"path\":\"vt/x.png\"}", &g, &ok); CHECKV(!ok && strstr(o, "end with .jpg"), "photo into .png refused: %s", o); free(o);
+      asst_guard(vsid, "fetch_image", "{\"query\":\"server\",\"path\":\"vt/x.jpg\",\"kind\":\"sticker\"}", &g);
+      o = asst_tool_exec(vsid, "fetch_image", "{\"query\":\"server\",\"path\":\"vt/x.jpg\",\"kind\":\"sticker\"}", &g, &ok); CHECKV(!ok && strstr(o, "photo or icon"), "unknown kind refused: %s", o); free(o);
+      asst_guard(vsid, "fetch_image", "{\"query\":\"server\",\"path\":\"vt/i.jpg\",\"kind\":\"icon\"}", &g);
+      o = asst_tool_exec(vsid, "fetch_image", "{\"query\":\"server\",\"path\":\"vt/i.jpg\",\"kind\":\"icon\"}", &g, &ok); CHECKV(!ok && strstr(o, "end with .png"), "icon into .jpg refused: %s", o); free(o);
+      asst_guard(vsid, "fetch_image", "{\"query\":\"server\",\"path\":\"vt/i.png\",\"kind\":\"icon\",\"color\":\"cyan\"}", &g);
+      o = asst_tool_exec(vsid, "fetch_image", "{\"query\":\"server\",\"path\":\"vt/i.png\",\"kind\":\"icon\",\"color\":\"cyan\"}", &g, &ok); CHECKV(!ok && strstr(o, "hex color"), "non-hex icon color refused: %s", o); free(o);
+      o = asst_tool_exec(vsid, "fetch_image", "{\"query\":\"server\",\"path\":\"vt/i.png\",\"kind\":\"icon\",\"size\":16}", &g, &ok); CHECKV(!ok && strstr(o, "between 64 and 2048"), "tiny icon refused: %s", o); free(o); }
     printf("asst video: %d passed, %d failed\n", pass, fail);
     return fail;
 }
