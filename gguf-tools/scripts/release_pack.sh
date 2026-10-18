@@ -9,6 +9,7 @@
 #
 # 包里放两条流程要的东西, 不放模型(三百多 GB, 页面里下):
 #   跑模型: ds4-server + ds4-train(主进程: 页面、起服、训练编排全在它的 C 里) + web/ 页面 + hf_install.sh(模型页下载, hf CLI 的包装)
+#   助理: skills/(自带技能 pptx / finance; ds4-train 启动时默认装进 ~/.ds4/assistant/skills, 见 docs/assistant_skills.md §1.2)
 #   改图: ds4-seg(分割程序, 几百 KB; 它读的 41 MB 权重不进包, 模型页下载时从作者的 HF 仓库取到 gguf/hub/model/seg/)
 #   跑训练: ds4(训练器与判决学生都是它) + anchor_metrics(wt2 门的五指标)
 #           + 保持料 hold.jsonl + 判决料 wt2.ids + 当前底座的 FP 教师锚 teacher_g7_wt2_n512_<底座>.bin(265 MB: 要 HF 出厂权重才能出, 拿包的人出不了)
@@ -27,7 +28,7 @@ BASE=$(sed -n 's/^BASE_REPO="[^/]*\/\([^"]*\)".*/\1/p' gguf-tools/scripts/hf_ins
 TEACHER="gguf/v41judge/teacher_g7_wt2_n512_$BASE.bin"
 [ -s "$TEACHER" ] || { echo "缺当前底座的教师锚 $TEACHER(在有 hf/$BASE 出厂权重的机器上: v41_judge.sh gguf/go-onebit/g7/wt2.ids 512 --hf hf/$BASE …)"; exit 1; }
 FILES=(ds4-server ds4-train ds4 ds4-seg gguf-tools/bench/anchor_metrics web/*.html web/*.jpg web/*.png web/manifest.webmanifest web/sw.js LICENSE LICENSE-DeepSeek README.md README.zh-CN.md
-       gguf-tools/scripts/hf_install.sh
+       gguf-tools/scripts/hf_install.sh skills
        gguf-tools/data/posttrain/hold.jsonl gguf/go-onebit/g7/wt2.ids "$TEACHER")
 # 只带一个脚本: 下载(hf CLI 的包装)。起服/训练/门/选轮全在 ds4-train 的 C 里(src/model/model_serve.c model_train_job.c model_train_pick.c), 10-10 起不再随包发脚本。
 [ "$(uname -s)" = Darwin ] && FILES+=(metal/*.metal)

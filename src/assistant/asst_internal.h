@@ -242,6 +242,7 @@ void asst_skills_json(ds4_buf *b);                             /* 页面: {root,
 bool asst_skill_op(const char *body, char *err, size_t errn);  /* 页面: {op: save|delete, name, md}; save 先过 asst_skill_check */
 bool asst_skill_check(const char *text, char *why, size_t n); /* ★技能不许带脚本★: 围栏代码块 / #! / <script> / 命令行 / 行内代码里的命令或脚本文件名 → false + 第几行什么 */
 char *asst_skill_put_file(const char *name, const char *rel, const char *data, size_t n);   /* 页面上传随附文件; NULL = 成功, 否则原因(malloc) */
+int asst_skills_seed(const char *src_root, char *msg, size_t msgn);   /* 仓库自带技能(src_root/<名>/)默认装上, 账本 skills.seeded 管升级/删除(skill_seed.c); 返回装/升级了几个 */
 char *asst_tools_json(const asst_tctx *ctx);   /* OpenAI tools 数组(malloc): 注册表里 avail 为真的行 */
 bool asst_tools_reach(const asst_tctx *ctx);   /* 工具表里有没有能进用户别的 app/账号的工具(share / open_app / 云手机): 决定 system 带不带"设备与账号"记忆 */
 char *asst_tool_args_error(const asst_tctx *ctx, const char *tool, const char *args);   /* 参数不合这一轮的 schema → "error: invalid arguments …"(malloc); 合规 NULL */

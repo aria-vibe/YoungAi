@@ -73,6 +73,8 @@ int main(int argc, char **argv) {
     char aerr[512] = "";
     asst_set_repo(tr_root);   /* 随包资源(gguf/tts 旁白小模型)按仓库根找, 不按 cwd */
     if (asst_init(NULL, aerr, sizeof aerr)) {
+        char sk[TR_PATH + 16], slog[1024] = ""; snprintf(sk, sizeof sk, "%.900s/skills", tr_root);
+        if (asst_skills_seed(sk, slog, sizeof slog) || slog[0]) fprintf(stderr, "ds4-train: 自带技能 %s\n", slog);   /* 仓库/发布包里的 skills/ 默认装上(skill_seed.c) */
         asst_run_start(TR_MODEL_PORT(g_port));
         asst_push_init();    /* 推送密钥(src/assistant/asst_push.c): push/vapid.json, 没有就生成 */
         asst_task_start();   /* 任务调度线程(src/assistant/asst_task.c): 到点往任务会话里发"继续这个任务" */

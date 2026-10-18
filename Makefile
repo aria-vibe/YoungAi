@@ -51,7 +51,7 @@ ASST_OBJS := $(ASST_SRCS:.c=.o)
 SANDBOX_SRCS := $(sort $(wildcard src/sandbox/*.c))
 SANDBOX_OBJS := $(SANDBOX_SRCS:.c=.o)
 # 技能(src/skill/): 装/删/校验 SKILL.md + use_skill 渐进披露; 随包自带的技能在顶层 skills/
-SKILL_OBJS := src/skill/skill.o
+SKILL_OBJS := src/skill/skill.o src/skill/skill_seed.o
 # 推送密码学(src/push/: P-256 / AES-GCM / HKDF / RFC 8291 加密 / VAPID JWT); 纯主机 C, 零依赖; 金标 tests/push/t_push.c
 PUSH_SRCS := $(sort $(wildcard src/push/*.c))
 PUSH_OBJS := $(PUSH_SRCS:.c=.o)
