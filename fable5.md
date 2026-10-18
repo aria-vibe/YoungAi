@@ -12079,3 +12079,8 @@ A = 只在提示里找(Strata 默认索引范围), B = 提示 + 已生成都找;
 **尺**: ds4_asst_test preview 段 52/52(Mac + spark, 新 17 项); make asst-e2e 119/119(新: 分享面板拿到 /s/ 链接不带文件、再点同链接、没登录的新浏览器打开是分享那一刻的网页且锁着; 顺修 10-17 去角标后一直红的"侧栏任务数 1"断言)。
 **spark 真机**: train_ui_spark.sh restart(模型子进程没动); 给 pelican_bike.html 要链接 → `https://47.116.132.99:8443/s/150a9321…/pelican_bike.html` 从 Mac 不带登录取: HTTP/2 200 text/html + CSP sandbox, md5 与工作区原文件同 dae54b45…; 改一位口令 404。
 **没做**: 页面上没有撤销按钮(删 shares/<口令>/ 即失效); 在 localhost/局域网 IP 打开工作台时拼出的链接别人打不开。
+
+## 10-18 22:4x · 用户: "生成PPT 聊天里出了两个一样的下载ppt, 应该是 bug"
+**真因(页面, 不是服务端/模型)**: 58ca17c2b325 事件流里 PPT 只有一次 share + 一条 files(页面本来按 share 去重); 今天 12 条会话拿页面 applyEv 重放, 每轮都只一张卡。重复只在直播时出: openStream 断线后睡 1.5 s 再重连, 睡醒不看 abort —— 锁屏断线 → 亮屏 visibilitychange 开新流并 abort 旧流, 旧流手上没连接, abort 掐不到, 醒来照样重连, 两条流往同一个 view 灌, 每条事件应用两遍(share 两次 = 两张卡)。
+**修**(3976aae5): 睡醒先看 abort; 事件 id < view.next 直接跳过(注释早写了"按 id 续读不会重复", 之前没人守)。
+**尺**: Playwright 模拟锁屏/亮屏(第一条连接抛错, 第二条慢 3 s): 旧码 3 次连接 / 2 张卡, 新码 2 次 / 1 张、条目 42 与干净重放同; make asst-e2e 全过。已 scp 到 spark(页面每次请求现读, 刷新即生效)。
