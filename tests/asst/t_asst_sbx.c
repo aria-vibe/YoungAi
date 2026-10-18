@@ -274,8 +274,20 @@ static int fetch_mode(const char *tool, const char *args) {
     return ok ? 0 : 1;
 }
 
+/* --js URL JS: 火狐开 URL 后在页面里跑一段 JS(回 Promise 就等), 打印返回的字符串。新数据源先拿它探路:
+ * 有的接口直接导航被风控拦(体彩 webapi 10-18 回 "Access Restricted"), 从官网页面里 fetch 才放行 */
+static int js_mode(const char *url, const char *js) {
+    char err[512] = "";
+    if (!asst_init(NULL, err, sizeof err)) { printf("init: %s\n", err); return 1; }   /* 火狐 profile 在助理目录下, 不 init 起不来 */
+    char *o = asst_web_js(url, js, true, err, sizeof err);
+    printf("%s\n", o ? o : err); free(o);
+    asst_browser_shutdown();
+    return o ? 0 : 1;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1 && !strcmp(argv[1], "--phone-look")) return phone_look_mode();
+    if (argc > 3 && !strcmp(argv[1], "--js")) return js_mode(argv[2], argv[3]);
     if (argc > 2 && !strcmp(argv[1], "--fetch")) return fetch_mode("fetch_image", argv[2]);
     if (argc > 3 && !strcmp(argv[1], "--tool")) return fetch_mode(argv[2], argv[3]);
     if (argc > 2 && !strcmp(argv[1], "--tts")) return tts_mode(argc - 2, argv + 2, false);
@@ -305,6 +317,7 @@ int main(int argc, char **argv) {
     { extern int asst_test_image(void); g_fail += asst_test_image(); }     /* 改图工具(10-15): 合成图 recolor/crop/draw, 分割模型在就走它 */
     { extern int asst_test_preview(void); g_fail += asst_test_preview(); } /* 网页预览(10-16): 口令子树 / 越界 404 / CSP sandbox 头 */
     { extern int asst_test_market(const char *base); g_fail += asst_test_market(base); }   /* 行情工具夹具 + 自带技能默认装上(10-18) */
+    { extern int asst_test_lottery(const char *base); g_fail += asst_test_lottery(base); } /* 彩票工具夹具 + 自带 lottery 技能(10-18) */
     { extern int asst_test_video(const char *base); g_fail += asst_test_video(base); }   /* 要火狐; 没有就 SKIP。在 logic 之后: 它建好了助理根目录 */
     { extern int studio_auth_test(const char *base); g_fail += studio_auth_test(base); }
     { extern int studio_net_test(const char *base); g_fail += studio_net_test(base); }

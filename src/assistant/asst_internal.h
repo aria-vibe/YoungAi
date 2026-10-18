@@ -391,6 +391,18 @@ char *asst_mkt_parse_news(const char *text);
 char *asst_mkt_parse_notices(const char *json, const char *code);
 void asst_mkt_set_fetch(char *(*fn)(const char *url, char *err, size_t errn));   /* 单测换成读夹具; NULL = 回到火狐 */
 
+/* ---------------- 彩票(tool_lottery.c 开奖 / tool_lottery_match.c 竞彩): lottery_data, 体彩中心 + 中彩网官方接口, 火狐开官网页面后在页面里 fetch ---------------- */
+char *asst_lottery_exec(const char *args, int *ok);
+char *asst_lot_jc(bool results, const char *sport, const char *league, const char *date, long days, char *err, size_t errn);   /* 竞彩在售 / 赛果 */
+char *asst_lot_fetch(const char *page, const char *api, char *err, size_t errn);   /* 在 page 里 fetch(api) 的原文 */
+char *asst_lot_unexpected(const char *site, const char *raw);   /* 解析不了 → error 文本(认得出防火墙拦截页) */
+bool asst_lot_num(const char *s, double *v);                     /* "1,234.5" → 数; "---"/空 false */
+char *asst_lot_parse_spt(const char *json, const char *game);   /* 下面四个解析器露出来给单测喂夹具; 认不出 NULL。game = ssq/dlt/… 或中文名 */
+char *asst_lot_parse_cwl(const char *json, const char *game);
+char *asst_lot_parse_jc_matches(const char *json, bool basketball, const char *league);
+char *asst_lot_parse_jc_results(const char *json, bool basketball, const char *league);
+void asst_lot_set_fetch(char *(*fn)(const char *page, const char *api, char *err, size_t errn));   /* 单测换成读夹具; NULL = 回到火狐 */
+
 /* ---------------- 交付(asst_file.c): 工作区文件 → 页面下载/分享; 设备传上来的文件 → 工作区 inbox/(方案稿 §13.2) ---------------- */
 #define ASST_FILE_MAX (64u << 20)      /* 单个文件 64 MiB: 与工作台上传料上限同 */
 bool asst_qget(const char *query, const char *key, char *out, size_t n);   /* 查询串取一项(百分号解码) */

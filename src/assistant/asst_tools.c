@@ -126,6 +126,18 @@ static const asst_tool TOOLS[] = {
                           S("symbols", "One or more names or codes, comma separated (quote takes up to 20, the others use the first); for news, the keyword") ","
                           S("period", "history only: day (default), week or month") "," I("count", "history: candles (default 30, max 250); news / notices: items (default 10, max 30); financials: report periods (default 4, max 12)"),
                           "\"what\""), NET, 0, NULL, true, NULL, false },
+    /* 彩票(tool_lottery*.c, 10-18): 体彩中心 + 中彩网官方接口; 号码按玩法分段、奖级算好、篮球比分翻成主:客再给模型; 怎么用写在仓库自带技能 skills/lottery */
+    { "lottery_data", TOOL("lottery_data", "Official China lottery data, from the China Sports Lottery (sporttery.cn) and China Welfare Lottery (cwl.gov.cn) sites. "
+                          "what=draws: recent draw results of one game (numbers, sales, jackpot pool; the newest draw also lists every prize level with winners and prize per ticket, and for the football pools the matches with scores). "
+                          "Games, Welfare: ssq 双色球, fc3d 福彩3D, qlc 七乐彩, kl8 快乐8; Sports: dlt 大乐透, pl3 排列3, pl5 排列5, qxc 七星彩, sfc 胜负彩/任选9场, bqc 6场半全场, jqc 4场进球. "
+                          "what=matches: 竞彩 football or basketball matches on sale now with the official fixed odds (football 胜平负 and 让球; basketball 胜负, 让分, 大小分). "
+                          "what=results: 竞彩 match results for recent days (score, half-time or quarters, outcome, handicap outcome). "
+                          "Times are Beijing time. Never state a number, a draw or a score it did not return; past numbers do not predict the next draw.",
+                          "\"what\":{\"type\":\"string\",\"enum\":[\"draws\",\"matches\",\"results\"],\"description\":\"Which data\"},"
+                          S("game", "draws only: ssq, fc3d, qlc, kl8, dlt, pl3, pl5, qxc, sfc, bqc or jqc (Chinese names work too)") "," S("issue", "draws only: one draw number, e.g. 2026119 (Welfare) or 26118 (Sports); omit for the latest") ","
+                          I("count", "draws only: how many recent draws (default 5, max 30)") "," S("sport", "matches / results: football (default) or basketball") ","
+                          S("league", "matches / results: keep only these leagues, comma separated, by their Chinese names as the lottery writes them, e.g. 英超,西甲 or 美职篮 (NBA)") "," S("date", "results only: last day, like 2026-10-18 (default today)") "," I("days", "results only: days ending at date (default 3, max 7)"),
+                          "\"what\""), NET, 0, NULL, true, NULL, false },
     { "nearby", TOOL("nearby", "Places around a location (restaurants, shops, hotels, stations, ...). Use this, not web_search, for anything 'nearby' / 'around here'. Coordinates come from locate (or the last fix shown in the user's message); omit lat/lng to use that last fix. With a map data source configured the result is real POIs (name, distance, address, phone, rating, coordinates); without one it is a web search scoped to the user's street, so names come from review sites and distances are not given.",
                       S("query", "What to look for, e.g. 美食 / 咖啡 / 药店 / 地铁站") "," N("lat", "Latitude (default: last fix)") "," N("lng", "Longitude (default: last fix)") "," I("radius", "Search radius in meters (default 1500)"), "\"query\""), NET, 0, NULL, true, NULL, false },
     /* 设备工具: 在用户正在用的那台设备上执行; wait=1 的等设备交回结果, wait=0 的是交出去的动作(页面出按钮, 浏览器要手势才许分享/开新页, 结果立刻回"已交给设备") */
@@ -312,6 +324,7 @@ char *asst_tool_exec(const char *sid, const char *tool, const char *args, const 
     char trash[ASST_PATH + 16]; snprintf(trash, sizeof trash, "%s/.trash", asst_ws);
     if (!strcmp(tool, "fetch_image")) return asst_fetch_exec(args, g, trash, ok);   /* 主进程驱动火狐搜图 + 转码, 落盘在沙盒子进程(tool_fetch.c) */
     if (!strcmp(tool, "market_data")) return asst_market_exec(args, ok);            /* 主进程驱动火狐取接口 JSON, 不落盘(tool_market.c) */
+    if (!strcmp(tool, "lottery_data")) return asst_lottery_exec(args, ok);          /* 同上, 在官网页面里 fetch(tool_lottery.c) */
     if (t->site == NET) {
         char err[512] = "";
         char *r = !strcmp(tool, "web_search") ? asst_web_search(g->path, err, sizeof err) : asst_web_visit(g->path, err, sizeof err);

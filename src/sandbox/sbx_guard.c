@@ -164,6 +164,11 @@ static void guard_decide(const char *sid, const char *tool, const char *args, as
         if (meta_flag(sid, "taint_priv")) { r->once_only = true; set(r, ASST_ASK, "go online after reading your private files (the symbols or keyword could carry them out)"); return; }
         set(r, ASST_ALLOW, "market data"); return;
     }
+    if (!strcmp(tool, "lottery_data")) {   /* 联网只读, 而且出门的只有玩法代号、校验过的纯数字期号和日期(工具里拼网址前就校验); league 只在本地筛, 不出门 ——
+                                            * 没有能带走私有内容的口子, 所以读过私有文件后也不必问。结果是别人网站的字(队名), cls=web 置污点 */
+        snprintf(r->cls, sizeof r->cls, "web"); snprintf(r->target, sizeof r->target, "lottery data");
+        set(r, ASST_ALLOW, "lottery data"); return;
+    }
     if (!strcmp(tool, "fetch_image")) {   /* 联网 + 写文件: 出门的只有查询词(按 web 守: 像密文的拒, 读过私有文件后问一次); 落点只许工作区(网上的图不往用户别的目录放) */
         snprintf(r->cls, sizeof r->cls, "web"); snprintf(r->target, sizeof r->target, "web image"); r->rw = true;
         char *q = NULL, *nm = NULL, *in = NULL; asst_jstr(args, "query", &q); asst_jstr(args, "name", &nm); asst_jstr(args, "path", &in);
