@@ -12,7 +12,9 @@
 格式照 **Agent Skills 开放标准**(Anthropic 2025 年公开, Claude Code / 各家 agent 通用)的 `SKILL.md` frontmatter 约定。
 **但有一条硬限制(10-14 用户定): 技能不许带脚本。** 文件夹里装不进脚本文件, `SKILL.md` 和随附的 md/txt 里也不许有
 任何脚本语句(命令行、代码块)。所以别处的技能只有"纯说明"的那部分能进来; 像 Anthropic 自己的 `pptx` 技能(靠 pptxgenjs /
-python 脚本干活)会在导入时整份被拒(§1.1 有实测)。仓库自带一份合规的 PPT 技能 `skills/pptx/`, 走本机的 `write_document` 出 .pptx(六种版式 + 五套主题, 版式由内容形状决定, 见 docs/assistant_office.md §3.4)。
+python 脚本干活)会在导入时整份被拒(§1.1 有实测)。仓库自带两份合规技能, **ds4-train 起来时默认装上**(§1.2):
+`skills/pptx/` 走本机的 `write_document` 出 .pptx(六种版式 + 五套主题, 版式由内容形状决定, 见 docs/assistant_office.md §3.4);
+`skills/finance/` 教助理用 `market_data` 工具查股票、指数、财报、公告、资讯(§7)。
 
 ## 1. 怎么装
 
@@ -66,6 +68,25 @@ description: 写部门周报用这个: 按部门汇总本周 jira 导出的 csv,
 - 正文里写了一句 `bash x.sh` → 保存整份被拒, 弹出 "SKILL.md rejected: line N: command 'bash' …"; 把步骤改成"用 write_document / read_file …"这类工具名就过。
 - 技能改了, **进行中的对话看不到**: 工具表每轮重拼所以下一轮就带新描述, 但模型已经读过的旧正文不会自动刷新; 新对话最干净。
 
+### 1.2 仓库自带的技能: 默认装上
+
+不用做任何事: ds4-train 每次启动, 把 `<仓库根或发布包>/skills/` 下的每个技能装进 `~/.ds4/assistant/skills/`, 启动日志一行
+`ds4-train: 自带技能 installed finance;`。装法和页面导入是同一个口(§1.1 的检查照过), 自带的也不许带命令。
+
+账本 `~/.ds4/assistant/skills.seeded`(一行 "名字 指纹") 记"装的是哪一版", 决定以后怎么办:
+
+| 情形 | 启动时做什么 |
+|---|---|
+| 没装过 | 装, 记账 |
+| 装过、你没改过、仓库出了新版 | 旧的挪进 `trash/skills/<名>-<秒>-replaced`, 装新版 |
+| 你在技能页改过 | 不动(你的版本优先, 仓库升级也不盖) |
+| 你删了 | 不再装回来 |
+| 账本里没有、但盘上已有同名(早先手动导入过) | 内容和仓库一样就补记账(以后跟着升级); 不一样就不动、不记账 |
+
+出错会怎样: 自带技能里混进一行命令 → 日志里 `xxx/SKILL.md skipped: line N: command '…'`, 这个技能不装, 别的照装。
+改过的技能想回到仓库版: 页面上删掉它, 再从仓库 `skills/<名>` 用"导入文件夹"装一次(删除会被账本记住, 不会自动回来)。
+发布包里带 `skills/`(release_pack.sh), 解压直接起也会装。
+
 ## 2. 模型那头怎么用(渐进披露)
 
 ```
@@ -107,7 +128,9 @@ description: 写部门周报用这个: 按部门汇总本周 jira 导出的 csv,
 src/assistant/asst_skill.c    扫描 skills/ (按名排序, 工具表顺序稳定 ⇒ KV 前缀稳定) / frontmatter 解析(description 支持 > | 折行与引号) /
                               use_skill 的 schema(描述列技能, name 枚举) 与执行(文件夹 + 文件表 + 正文) / 页面接口(列表 / save / delete / 上传随附文件) /
                               ★asst_skill_check 脚本语句检查 + 扩展名白名单(§1.1)
+src/skill/skill_seed.c        ★仓库自带技能默认装上(§1.2): 账本 skills.seeded + 目录指纹(FNV-1a 64); ds4-train 启动时 asst_skills_seed(<根>/skills) 显式调(不放 asst_init: 单测拿临时根, 自动装会改掉"没装 → 没有 use_skill"的前提)
 skills/pptx/             仓库自带的合规 PPT 技能: SKILL.md(怎么把主题变成 .pptx, 走 write_document) + reference/example-deck.md(12 页示例稿, 六种版式、照片、图标、示意图、图表各出现至少一次)
+skills/finance/          仓库自带的金融技能(§7): SKILL.md 一份, 认标的 → 按问题选查法 → 读数常识 → 回答怎么写
 src/assistant/asst_tools.c    注册表一行 { "use_skill", NULL, MEM, …, asst_skill_build_tool }; exec 分发到 asst_skill_load
 src/assistant/asst_guard.c    use_skill 放行(cls=skill); 技能夹读放行写拒; asst_guard_mark 读技能不置污点; asst_guard_spec 技能夹只读根
 src/assistant/asst_store.c    asst_init 建 skills/ 并设 asst_skills(Landlock 只给存在的路径立规则)
@@ -137,3 +160,43 @@ POST /api/assistant/skill_file?name=<技能>&path=<相对路径>   原始体 = �
 - 模型自己写技能(`skill-creator` 那类): 和 §3 第二行冲突; 要做也只能走"模型写到工作区 → 用户在技能页导入"。
 - 技能里的 `allowed-tools` 等扩展字段: 守门是确定性的, 不按技能开关权限。
 - 从网上一键安装(市场/URL): 外部资源必须用户先同意(铁律 10-13), 导入文件夹就是那个"同意"动作。
+
+## 7. 金融技能 finance + 行情工具 market_data(10-18)
+
+用户原话: "参考我的交易智能体, 实现一个金融 skill 默认加入当前项目的 skill, 先把股票财经这些基础查询的能力封装进去"。
+
+**分工**: 技能不许带脚本, 取数这只手只能是工具。所以拆两半:
+- `market_data` 工具(`src/assistant/tools/tool_market.c`, 注册表一行, 守门按 web): 取数、把东财的 f2/f3 编号字段翻成中文、金额换成亿/万、标币种、算好 K 线区间涨跌。
+- `skills/finance/SKILL.md`: 认准标的、哪类问题用哪几种查法、读数常识(交易时间、手、涨跌停、前复权、财报累计口径)、回答格式。
+
+数据源和交易智能体(`~/git/quant_trading_flow-main`)是同一家东方财富公开接口, 不要 key, 请求经火狐走:
+
+| what | 接口 | 覆盖 | 一次给什么 |
+|---|---|---|---|
+| search | searchapi suggest | 全市场 | 名字/拼音/代码 → 最多 10 条候选 + secid |
+| quote | push2 ulist(未登录会 302 到 push2delay) | A 股/港股/美股/指数/基金 | 最多 20 只: 最新价、涨跌、开高低收、量额、振幅换手量比、市盈率市净率市值、更新时间(北京时间) |
+| history | push2his kline | 同上 | 日/周/月 K(前复权), 默认 30 根最多 250, 带区间涨跌和最高最低 |
+| financials | datacenter `RPT_F10_FINANCE_MAINFINADATA` | 沪深京 A 股 | 默认 4 期最多 12: 营收/归母/扣非及累计同比、单季同比、EPS、BPS、每股经营现金流、ROE、毛利率、净利率、负债率 |
+| news | search-api-web(JSONP, 按相关度) | 任意关键词 | 默认 10 条最多 30: 时间、标题、媒体、摘要、链接 |
+| notices | np-anotice | 沪深京 A 股 | 默认 10 条: 日期、标题、栏目、原文链接 |
+| market | push2 ulist 固定九个指数 | 上证/深证/创业板/沪深300/科创50/恒生/道指/纳指100/标普 | 一行一个, 沪深指数带上涨/下跌/平盘家数 |
+
+和交易智能体不一样的两处(都是 10-18 实测撞出来的):
+- 财务没用它那张 `RPT_PCF10_FINANCEMAINFINADATA`: 不管 pageSize 都只回最新一期, 看不了趋势。换成 F10 页面同源的 `RPT_F10_FINANCE_MAINFINADATA`, 一期一行, 还多了单季同比和净利率。
+- 资讯按相关度不按时间排: 按时间排, 前几条全是顺带提一句"茅台"的别家新闻。
+
+代码怎么认: `1.600519` 原样; `sh600519`/`sz000001`/`bj830799` 按前缀; 6 位纯数字 6/9/5 开头沪市其余深市(北交所在东财也是 `0.`)——
+**所以 000001 是平安银行**, 要上证指数得给名字或 `sh000001`; 名字、港股 5 位、美股代码走代码搜索取第一条。几只一起查用逗号(中文逗号、顿号也认)。
+
+出错会怎样:
+- 名字对不上任何标的 → 结果末尾 `not resolved (left out above): xxx: no stock, index or fund matches`, 其余照出; 一只都没解析出来就是 error。
+- 港美股查 financials/notices → error 里直说只有 A 股, 指路 news / web_search。
+- 接口改版或被风控 → `error: unexpected response from Eastmoney …: <原文开头 200 字>`, 模型照实说取不到。
+- 港股、美股的金额是港元、美元: 结果第一行写 `币种 港元/美元`。没标之前苹果"总市值 50125 亿"会被当成人民币讲。
+- 行情可能有延时(港美股常见 15 分钟), 每只都带"更新于 … 北京时间"; 周末查到的就是上个交易日收盘。
+
+验证:
+- 离线: `./ds4_asst_test` 里 `asst market` 71 项(10-18 Mac 与 spark 都 71/71): 代码规则、六个解析器(夹具是当天真返回)、整条执行路(取数换成读夹具)、守门、技能账本五种情形、仓库 `skills/` 两个技能都过脚本检查。
+- 真接口(要火狐和外网): `./ds4_asst_test --tool market_data '{"what":"quote","symbols":"贵州茅台,00700,AAPL"}'`, 七种 what 在 Mac 和 spark 上都跑通(一次 3~13 秒)。
+- 真服务: ds4-train 起来日志 `自带技能 installed finance;`, `GET /api/assistant/skills` 列出 finance。
+- 待跑: spark 真模型问"茅台最近怎么样" → 审计里先 `use_skill(finance)` 再 `market_data`, 终稿数字和工具结果逐个对得上。

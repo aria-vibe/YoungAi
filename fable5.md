@@ -12084,3 +12084,11 @@ A = 只在提示里找(Strata 默认索引范围), B = 提示 + 已生成都找;
 **真因(页面, 不是服务端/模型)**: 58ca17c2b325 事件流里 PPT 只有一次 share + 一条 files(页面本来按 share 去重); 今天 12 条会话拿页面 applyEv 重放, 每轮都只一张卡。重复只在直播时出: openStream 断线后睡 1.5 s 再重连, 睡醒不看 abort —— 锁屏断线 → 亮屏 visibilitychange 开新流并 abort 旧流, 旧流手上没连接, abort 掐不到, 醒来照样重连, 两条流往同一个 view 灌, 每条事件应用两遍(share 两次 = 两张卡)。
 **修**(3976aae5): 睡醒先看 abort; 事件 id < view.next 直接跳过(注释早写了"按 id 续读不会重复", 之前没人守)。
 **尺**: Playwright 模拟锁屏/亮屏(第一条连接抛错, 第二条慢 3 s): 旧码 3 次连接 / 2 张卡, 新码 2 次 / 1 张、条目 42 与干净重放同; make asst-e2e 全过。已 scp 到 spark(页面每次请求现读, 刷新即生效)。
+
+## 10-18 23:xx · 用户: "参考我的交易智能体, 实现一个金融 skill 默认加入当前项目的 skill, 先把股票财经这些基础查询的能力封装进去"
+**拆法**: 技能不许带脚本(10-14), 取数只能是工具 ⇒ 新工具 `market_data`(src/assistant/tools/tool_market.c, 注册表一行, 守门按 web) + 自带技能 `skills/finance/SKILL.md` + ds4-train 启动默认装自带技能(src/skill/skill_seed.c, 账本 skills.seeded: 没装过装 / 没改过跟着升级 / 改过不动 / 删了不装回)。方案稿 docs/assistant_skills.md §1.2 §7。
+**数据源**: 与交易智能体同一家东财公开接口, 经火狐: suggest(认标的) / ulist(批量行情) / push2his kline / F10 主要指标 / np-anotice 公告 / search-api-web 资讯 / 九个主要指数。七种 what。
+**和交易智能体不一样的两处(实测撞出)**: ① 它的 RPT_PCF10_FINANCEMAINFINADATA 不管 pageSize 只回最新一期 → 换 RPT_F10_FINANCE_MAINFINADATA(多期 + 单季同比 + 净利率); ② 资讯按时间排前几条全是顺带提一句的别家新闻 → 按相关度。
+**撞到并修**: 港美股金额没标币种(苹果"总市值 50125 亿"会被当人民币) → 结果头标 币种 港元/美元; strtok 分隔表放中文逗号会把汉字续字节当分隔符 → 先换成 ','; 升级挪旧版与页面删除同一秒撞名 rename 失败 → 加 -replaced 后缀。
+**尺**: ds4_asst_test 全套绿, 新 `asst market` 71/71(Mac 与 spark 同); make linecount 过; 真接口 `--tool market_data` 七种 what Mac + spark 都通(3~13 s); Mac 真 ds4-train 起服日志 `自带技能 installed finance;`, /api/assistant/skills 列出 finance; 本机早先手动导入的 pptx 与仓库版不同 → 按设计没动。已同步 spark 源码(先核 7 个改动文件 spark 版 = Mac 改前版, 4 个新文件 spark 没有), 23:12 spark 重编 ds4-train + train_ui_spark.sh restart(模型子进程 1050981 没动, frpc 在): 日志 `自带技能 installed finance;`, spark 上早先导入的 pptx 与仓库版相同 → 补记账, 技能接口列 finance + pptx。
+**没做**: 真模型问答(要换 spark 生产 ds4-train); 场外基金净值、港美股财报这类进阶数据。未提交。

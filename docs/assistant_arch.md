@@ -72,6 +72,7 @@
 | `run` | SBX | exec | 永远 | **原 `bash` 改名并改规矩**，见 §4 |
 | `web_search` `visit_page` | NET | web | 有火狐 | 不变 |
 | `nearby` | NET | geo | 有火狐 | **坐标改成参数**（模型从 `locate` 拿），不再偷读运行线程的全局；key 有无在内部降级 |
+| `market_data` | NET | web | 有火狐 | 10-18 **新**：东方财富公开接口的行情/K 线/财务/公告/资讯/大盘（`tool_market.c`），怎么组合着用写在自带技能 `skills/finance`（`docs/assistant_skills.md` §7） |
 | `locate` | DEV, wait | dev | caps 有 `geolocation` | **新**：定位改成工具（§3.2 讲代价） |
 | `read_clipboard` `pick_file` | DEV, wait | dev | caps | 不变 |
 | `copy_text` `share` `open_url` `navigate` `call` | DEV | dev | caps | 不变 |
