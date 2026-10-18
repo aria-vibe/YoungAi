@@ -12092,3 +12092,10 @@ A = 只在提示里找(Strata 默认索引范围), B = 提示 + 已生成都找;
 **撞到并修**: 港美股金额没标币种(苹果"总市值 50125 亿"会被当人民币) → 结果头标 币种 港元/美元; strtok 分隔表放中文逗号会把汉字续字节当分隔符 → 先换成 ','; 升级挪旧版与页面删除同一秒撞名 rename 失败 → 加 -replaced 后缀。
 **尺**: ds4_asst_test 全套绿, 新 `asst market` 71/71(Mac 与 spark 同); make linecount 过; 真接口 `--tool market_data` 七种 what Mac + spark 都通(3~13 s); Mac 真 ds4-train 起服日志 `自带技能 installed finance;`, /api/assistant/skills 列出 finance; 本机早先手动导入的 pptx 与仓库版不同 → 按设计没动。已同步 spark 源码(先核 7 个改动文件 spark 版 = Mac 改前版, 4 个新文件 spark 没有), 23:12 spark 重编 ds4-train + train_ui_spark.sh restart(模型子进程 1050981 没动, frpc 在): 日志 `自带技能 installed finance;`, spark 上早先导入的 pptx 与仓库版相同 → 补记账, 技能接口列 finance + pptx。
 **没做**: 真模型问答(要换 spark 生产 ds4-train); 场外基金净值、港美股财报这类进阶数据。未提交。
+
+## 10-18 23:5x · 用户: "实现一个彩票 skill 默认加入当前项目的 skill, 先把近期查询封装了, 包含体彩, 福彩, 到各大赛事"(中途补: "百度都能查到的")
+**拆法**: 同金融: 新工具 `lottery_data`(tool_lottery.c 开奖 287 行 + tool_lottery_match.c 竞彩 187 行, 注册表一行, 守门 web 直接放行) + 自带技能 `skills/lottery/SKILL.md`, 走已有的启动默认装。方案稿 docs/assistant_skills.md §8。
+**数据源选官方不选百度**: 用户提百度能查到; 百度卡片是转载 + HTML, 改版就挂。体彩中心 webapi.sporttery.cn(大乐透/排列3/5/七星彩/胜负彩任九/半全场/进球彩 + 竞彩 uniform 在售与赛果) + 中彩网 cwl.gov.cn(双色球/3D/七乐彩/快乐8), JSON 原样。三种 what: draws / matches / results。
+**撞到的墙**: ① Mac 出口乌克兰(VPN), 两家主页都 567 拦截 → 只能在 spark(南京电信)验; ② 直接导航接口被拦("Access Restricted"/空页), curl 也拦 → 火狐先开官网首页再页面内 fetch 才放行; 为此给 ds4_asst_test 加 `--js URL JS` 探针模式; ③ 福彩带 systemType=PC 参数防火墙断连(NetworkError) → 去掉; ④ 旧 jc/ 赛果路径页面内也"禁止访问" → 只用 uniform/; ⑤ 篮球比分原文客:主 → 翻成主:客(否则主客输赢全反); ⑥ 足球赛果 h/d/a 赔率玩法不明 → 不输出, 让球结果按比分自己算。
+**尺**: Mac 与 spark ds4_asst_test 全套绿, 新 `asst lottery` 44/44(夹具 = 当晚 spark 官方真返回); make linecount 过; spark 真接口 11 玩法 draws + 足/篮 matches/results 全通(3~4 s/次), 双色球 2026119 期 12 22 23 25 27 30+04 与官方一致, 篮球加时场各节+加时合计对上终比分。spark 同步(先核 4 个改动文件 spark 版 = HEAD) + 重编 + 23:5x train_ui_spark.sh restart(模型子进程 1050981 没动, frpc 重新起): 日志 `自带技能 installed lottery;`, skills.seeded 多 lottery 一行。
+**没做**: 真模型问答; 北京单场、彩票站/兑奖地点; 对奖规则表(大乐透奖级近年改过, 不凭记忆写, 技能让模型打开当期公告看)。未提交。

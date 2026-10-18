@@ -14,7 +14,8 @@
 任何脚本语句(命令行、代码块)。所以别处的技能只有"纯说明"的那部分能进来; 像 Anthropic 自己的 `pptx` 技能(靠 pptxgenjs /
 python 脚本干活)会在导入时整份被拒(§1.1 有实测)。仓库自带两份合规技能, **ds4-train 起来时默认装上**(§1.2):
 `skills/pptx/` 走本机的 `write_document` 出 .pptx(六种版式 + 五套主题, 版式由内容形状决定, 见 docs/assistant_office.md §3.4);
-`skills/finance/` 教助理用 `market_data` 工具查股票、指数、财报、公告、资讯(§7)。
+`skills/finance/` 教助理用 `market_data` 工具查股票、指数、财报、公告、资讯(§7);
+`skills/lottery/` 教助理用 `lottery_data` 工具查体彩福彩开奖、竞彩足球篮球的赔率和赛果(§8)。
 
 ## 1. 怎么装
 
@@ -200,3 +201,43 @@ POST /api/assistant/skill_file?name=<技能>&path=<相对路径>   原始体 = �
 - 真接口(要火狐和外网): `./ds4_asst_test --tool market_data '{"what":"quote","symbols":"贵州茅台,00700,AAPL"}'`, 七种 what 在 Mac 和 spark 上都跑通(一次 3~13 秒)。
 - 真服务: ds4-train 起来日志 `自带技能 installed finance;`, `GET /api/assistant/skills` 列出 finance。
 - 待跑: spark 真模型问"茅台最近怎么样" → 审计里先 `use_skill(finance)` 再 `market_data`, 终稿数字和工具结果逐个对得上。
+
+## 8. 彩票技能 lottery + 彩票工具 lottery_data(10-18)
+
+用户原话: "实现一个彩票 skill 默认加入当前项目的 skill, 先把近期查询封装了, 包含体彩, 福彩, 到各大赛事"。
+拆法和 §7 一样: `lottery_data` 工具取数(`src/assistant/tools/tool_lottery.c` 开奖 + `tool_lottery_match.c` 竞彩), `skills/lottery/SKILL.md` 教用法。
+
+怎么用(不经模型直接跑, 要火狐和**中国大陆出口**):
+
+```
+./ds4_asst_test --tool lottery_data '{"what":"draws","game":"ssq"}'                 # 双色球最近 5 期 + 最新一期奖级
+./ds4_asst_test --tool lottery_data '{"what":"draws","game":"dlt","issue":"26118"}' # 大乐透某一期
+./ds4_asst_test --tool lottery_data '{"what":"matches","league":"英超,西甲"}'        # 竞彩足球在售 + 赔率
+./ds4_asst_test --tool lottery_data '{"what":"results","sport":"basketball"}'       # 竞彩篮球最近 3 天赛果
+```
+
+| what | 数据源(都是官方) | 覆盖 | 一次给什么 |
+|---|---|---|---|
+| draws | 体彩中心 `webapi.sporttery.cn` getHistoryPageListV1; 中彩网 `cwl.gov.cn` findDrawNotice | 福彩 ssq 双色球 / fc3d 3D / qlc 七乐彩 / kl8 快乐8; 体彩 dlt 大乐透 / pl3 / pl5 / qxc 七星彩 / sfc 胜负彩(含任九) / bqc 半全场 / jqc 进球彩 | 默认 5 期最多 30, 或 issue 指定一期: 号码按玩法分段(红蓝球、前后区、前六位+第七位)、销售额、奖池; 最新一期带全部奖级(注数 + 每注税前奖金, 写到元)、一等奖中奖地、公告链接; 足彩三种带每场对阵比分 |
+| matches | `uniform/{football,basketball}/getMatchCalculatorV1` | 竞彩足球、篮球在售场次 | 场次编号、联赛、主客队与排名、开赛时间; 足球胜平负 + 让球, 篮球胜负 + 让分 + 大小分 |
+| results | `uniform/{football,basketball}/getUniformMatchResultV1`(一页 100 场) | 同上, date 往前 days 天(默认 3 最多 7) | 比分(篮球翻成主:客)、半场或各节和加时、胜负、按比分算的让球/让分结果; 没完赛的写"还没有赛果" |
+
+league 只在本地按中文简称/全称筛, 不发出去; 期号和日期拼进网址前校验成纯数字/`YYYY-MM-DD`。所以守门直接放行(cls=web), 读过私有文件后也不问。
+
+为什么不用百度或 500 彩票网这类转载站: 它们给的是 HTML 卡片, 改版就挂, 也是二手数。官方接口给 JSON, 字段稳定, 号码就是开奖公告上的。
+
+**出错会怎样**(都是 10-18 实测撞到的):
+- **机器走海外出口 → 全部拿不到。** 两家防火墙只放中国大陆地址: Mac 那天出口在乌克兰, 连体彩主页都回 HTTP 567 "请求已被拦截"。
+  工具认得出拦截页, 报 `error: sporttery.cn refused the request (…overseas proxy or VPN)`, 模型照实说取不到。spark(南京电信)全通。
+- **直接打接口也会被拦**: curl 或火狐地址栏直开接口地址, 体彩回 "Access Restricted"、福彩回空页。所以工具先开官网首页, 在页面里 `fetch` 接口。
+- 福彩接口带上网上常见的 `systemType=PC` 参数 → 防火墙直接断连, 页面里报 `NetworkError`。不要加。
+- 篮球比分接口原文是**客队在前**(皇马主场 119:84 赢, 接口写 `"84:119"`), 工具已翻成主:客; 改解析时别丢了这一步, 不然主客输赢全反。
+- 足球赛果行里那组 h/d/a 赔率没注明是哪个玩法的, 工具不输出, 免得模型拿错的赔率讲"爆冷"。
+- 旧路径 `jc/football/getMatchResultV1` 在页面里也回"禁止访问", 只有 `uniform/` 下的赛果接口能用。
+- 3D 官方不给奖级明细(固定奖金玩法), 结果里写明; 七乐彩一等奖没人中时不出"中奖地"一行。
+
+验证(10-18):
+- 离线: `./ds4_asst_test` 里 `asst lottery` 44 项(Mac 与 spark 都 44/44): 夹具是当晚 spark 从两家官方取的真返回(`tests/asst/fixtures/lottery/`), 覆盖七个解析器、期号 5↔7 位互换、数量上限、日期跨月、非法期号/日期/玩法在发请求前拒、拦截页识别、守门、技能过脚本检查并能 use_skill。
+- 真接口: spark 上 11 个玩法 draws + 足球/篮球的 matches 与 results 全跑通, 一次 3~4 秒; 号码与当天官方公告一致(双色球 2026119 期 12 22 23 25 27 30 + 04)。
+- 默认装上: spark 生产 `train_ui_spark.sh restart` 后日志 `ds4-train: 自带技能 installed lottery;`, 账本 `skills.seeded` 多一行 lottery。
+- 待跑: 真模型问"今晚双色球开了什么""明天英超有哪些比赛" → 审计里先 `use_skill(lottery)` 再 `lottery_data`, 终稿号码与工具结果逐个对得上。
