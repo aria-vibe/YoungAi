@@ -12003,3 +12003,71 @@ A = 只在提示里找(Strata 默认索引范围), B = 提示 + 已生成都找;
 - **spark 上传(走 Mac 17897 隧道, 日志 /tmp/hf_small_1017.log)**: `stage` 摆出的目录没有 ③, `bin/ds4`(17,760,336 B)/ `bin/ds4-server`(19,450,400 B)与 GitHub release 包里的逐字节同, install.sh = 8a1c7fa。`small` 20:02:34→20:03:04, `tts` 两个语音各 40 s(62,634,336 / 62,634,368 B)+ install.sh, `verify` **VERIFY_OK 409 个文件同大小**, CHAIN_EXIT 0。
 - **远端核对**: 412 个文件(发布目录 409 + tts 2 + HF 的 .gitattributes), tts / bin / README / LICENSE / install.sh 大小与本地一致, posttrain 条目 0; 从 Mac `curl https://huggingface.co/wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017/resolve/main/install.sh` 200 且与提交版逐字节同(文档里"只要 API"那条不再 404)。GitHub v0.4.0-rc 说明里"新仓库缺文件"那条已知问题删掉, ③ 那条改成"这一版没有发布后训练文件, --posttrain 直接报错"。
 - 注意: release 包里随带的 hf_install.sh 是 7ac8a74 版(POSTTRAIN 还指旧 ③); 包里它只给模型页下载用, 下载不走 --posttrain, 没重打包。
+
+## 10-18 19:xx · 用户: "spark 助手用 skill 生成的 PPT 样式简单、布局粗糙、配色不行, 优先从 PPT 的 skill 角度优化"
+
+**先把话说直**: 技能(`skills/pptx/SKILL.md`)只管内容和 theme 名, 版式/颜色/字号全在 C 渲染器(`src/office/office_pptx*.c`), 只改技能改不出样子。把 10-14 的金标 tech 版渲染成图看了一遍:
+正文 20 磅挤在左上角、下面六成空白; 标题下划线 + 左侧竖条正是 Anthropic pptx 技能 Design Ideas 里点名的"AI 生成标志性元素"(NEVER use accent lines under titles / vertical sidebar stripes); 表格是 Office 默认黑框; 没有任何"视觉元素"。
+所以两头一起改: 渲染器加版式 + 技能教模型写出这些版式。
+
+**渲染器(版式只看内容形状, 不加任何标记语法)**:
+| 版式 | 触发 | 画法 |
+|---|---|---|
+| 封面 | 第一页一个标题 + 至多一段 | 48 磅居中 + 右下圆弧(arcs 主题); 去掉了标题下的强调短条 |
+| 章节 | 只有标题 | 左上 96 磅序号 01/02(强调色) + 40 磅标题 |
+| 数字卡 | 标题 + "表头 + 一行数据" 2~5 列 | 一列一张圆角卡撑满正文区, 44 磅强调色数字 + 18 磅标签 |
+| 卡片格 | 标题 + 2~6 条每条以 **加粗** 开头、不嵌套 | 序号球(强调色底 + 底色字) + 加粗引题 + 说明; ≤3 条一行, 4 条 2×2, 5~6 条 2×3 |
+| 双栏 | 两个 ### | 两块面板, 小标题强调色 24 磅, 正文 20 磅 |
+| 金句 | 只有一段 > 引用 | 120 磅大引号 + 28 磅斜体 |
+| 内容页 | 其它 | 正文 24/20/18 磅按条数; ≤4 块垂直居中(水平仍左对齐); 图+字 58/42; 表格去竖线、表头实底、隔行 panel 色、单独一张短表垂直居中、有引言紧贴引言 |
+正文 **加粗** 走强调色(技能限一页两处 = 重点数字); 项目符号强调色; 页码所有主题都有。母版标题 36 磅。
+`office_pptx.c` 258 → 拆成 `office_pptx.c`(201, 版式) + `office_pptx_draw.c`(141, 原语), 共享状态 `pptx_sw` 与几何常量进 `office_internal.h`。
+
+**配色五套**(`THEMES[]`, 一个主色 + 一个锐利强调色): clean 白底近黑标题 + 青绿 0F766E(不再是"默认蓝", 不画圆弧) / tech 0B1220 + 22D3EE / warm 浅沙 FBF7F2 + 赤陶 B85042(Anthropic 表里的 Warm Terracotta; 原来的米白 + 橙是它点名的"别默认用奶油色") / forest 白 + 2C5F2D / berry 2B0F1E + 金 E0A458。`write_document` 的 theme 描述与技能表同步五套。
+
+**技能**: SKILL.md 重写 — "六种版式: 写成什么形状就排成什么样子"一张表(写法 / 排法 / 何时用), 节奏规矩(相邻页不同版式; 10 页里数字卡/卡片格/双栏至少各一次; 纯要点页 ≤1/3), 加粗 = 强调色一页两处, 数字卡/卡片格的字数规矩, 结尾用金句或卡片格不写谢谢页; 主题五套按题材选。
+示例稿换成 10 页六种版式各至少一次。脚本语句检查过(`ds4_asst_test` 自带 pptx 技能装得进 + use_skill)。
+
+**尺**: 夹具 `slides.md` 扩成 11 页覆盖全部版式, 金标两份重建(docx/xlsx/pdf 金标逐字节没动); `t_office.c` 加 7 条结构断言(序号 01 / 3 张卡 + 44 磅 / 4 球 4 卡无 buChar / 两栏 / 大引号 / 表无竖线无下划线) + `--md 文件` 把任意稿子出五套主题; 新脚本 `scripts/office_preview.sh` = soffice → pdftoppm 每页 JPG。
+本机: `ds4_office_test` 116/116, `ds4_asst_test` 全绿(视频那套第一趟 "encoder stopped at frame 3" 偶发, 复跑 24/24, 与本次无关), linecount ok。五套主题 × 11 页 + 示例稿 forest/tech 版逐页看过。
+未提交(待批)。
+
+## 10-18 21:xx · 用户: "PPT 素材图片太少了可以调用工具生成, 动画, 渐变等等样式体验需要优化"
+
+**先查实**: 助理工具表里没有任何文生图工具(edit_image 只改图, view_image 只看), 有的是火狐(make_video 走它逐帧截图)。所以"调用工具生成图"= 新工具 `render_image`: 模型把图写成一页 HTML/SVG, 火狐按像素截一张 PNG 落工作区, 结果带 `image:` 行让模型当场看; 零新依赖, 不碰外部资源(铁律 10-13)。文生图模型另议(要用户点头)。
+
+**三件事**:
+1. `render_image(path .png, html, width, height; 默认 1600×900, 64~4096)` — `src/assistant/tools/tool_render.c`(83 行): 本机只读 HTTP 源 + BiDi `captureScreenshot`(和 make_video 同路, `asst_ff_eval` / `asst_b64dec` 从 tool_video.c 抽成共用); 等字体和图加载完再拍; 落盘在沙盒子进程(旧版进 .trash); 页面错误(含"blocked (no network)")原文进结果句。守门归产出工具(sbx_guard.c 写路径类), 火狐缺席就不在工具表(need_browser)。
+2. 渲染器二期(`office_pptx_draw.c` / `office_pptx.c`): 每页 bg→bg2 45° 线性渐变底(五套主题各加 bg2); 封面/章节页右下径向光晕; 卡片浅色主题柔和投影、深色主题强调色 22% 细描边; 每页淡入切换; 数字卡/卡片格/双栏的形状按组登记(`pptx_anim`), 页末 `pptx_timing` 写成 PowerPoint 自己存"上一动画之后、自动开始"的结构(主序列下一个点击组, 组 stCondLst 带 `onBegin` 指回 id 2 ⇒ 不用点鼠标; 组内 set visibility + 400 ms fade; 组间 250 ms; bldLst 每形状 bldP animBg=1); 只登记 p:sp, 图和表不动。
+3. 原生图表 `office_pptx_chart.c`(120 行): 表头第一格 bar/line/pie(也认 柱/折线/饼)的 Markdown 表 → `ppt/charts/chartN.xml`(strLit/numLit 内嵌数据, 不带工作簿) + 本页 graphicFrame, 排法同图片(字左图右 / 整页)。配色 accent/c2/c3/c4, 字色正文色, 底透明。第一版用 ```chart 围栏, 撞两堵墙: 技能检查器整份拒围栏(示例稿写不进去), 千分位逗号和 CSV 分隔符打架; 换成表头触发两个问题一起没了, 围栏信息串的改动撤掉(一件事一处)。
+
+**裁判**: Anthropic pptx 技能的 `scripts/office/validate.py`(OOXML schema, `uv run --with lxml --with defusedxml` 临时环境, 不装进项目)— 五套主题夹具 + 示例稿 tech/clean 七份全 PASSED; LibreOffice 把 tech 版再导出一次, slide8 里 p:transition / p:timing / 12 个 entr 效果都在(说明它真解析了, 不是原样带过); 渲染逐页看过(动画看不见, 只能靠 schema + 往返)。
+单测: `t_office` 加 8 条(图表部件与内容类型 / 千分位 1,385→1385 / 切换 + 12 bldP + 4 afterEffect + 8 withEffect + delay 750 + onBegin / 章节页有切换无 build / 渐变 / 阴影只在卡片不在表 / tech 卡片描边无阴影), `t_asst_video` 加 7 条 render_image(列表 / 三种拒 / 真截图 400×300 逐像素 红左蓝右 / 覆盖进 .trash / 外网图被拦报回)。本机 office 123、asst video 31、logic 241 全绿, linecount ok。
+**技能**: 配图一节(每份至少两张, 画什么 / 怎么画 / 尺寸 / 底色跟主题 / 不编路径), 图表一节(表头触发), 节奏加"图或图表至少三页"; 示例稿 12 页加流程图页(路径示意)和折线图表页。
+未提交(待批)。spark 的 ds4-train 仍是旧二进制, 重启才生效。
+
+## 10-18 19:3x · 用户: "生成图片保存400" —— spark 真跑 render_image 撞两个 bug
+
+事件日志(sessions/9d6a44016fb9/events.jsonl)原文: 第一次 `render_image` → `error: cannot write …/workspace/figures/architecture.png: No such file or directory`; 第二次成功 `created figures/architecture.png (PNG 1600x900, 190 KB)`; 紧接着 `model HTTP 400: invalid JSON request`, 整轮 `end reason=error`。
+**根因**: ① 工具不建父目录。② spark 的 ds4-server 是 C 起服(model_serve.c)拉的, 命令行没带 `--vision-gguf`(gguf/v41 里放着 `DeepSeek-V4.1-Flash-1017.vision.gguf` 0.97 GB 没人用; 10-13 脚本起服时带过), 服务端对 image_url 在解析阶段就 400; 更糟的是图片块存进了 messages.jsonl, 该会话之后每一轮都带图 ⇒ 永远 400。拍照/改图/云手机截图回传同样会死, 不只 render_image。
+**修**: ① `tool_render.c` 落盘前 `asst_mkdir_p`(tool_fs.c 的 mkdir_p 改成共用)。② `model_llm.c` 拆 `llm_once`, 400 且请求体里有 image_url 块 → `asst_llm_strip_images` 把每块换成一句 "[image omitted: this model has no vision tower …]" 重发一次(无状态: 服务端解析阶段就拒, 第一发不花推理); 历史里的图也一并换掉, 坏会话自愈。③ `model_serve.c` 起模型子进程时按机制找视觉塔: 量化件名逐段去掉末尾 "-xxx" 试 `<前缀>.vision.gguf`, 第一个存在的带上 `--vision-gguf`(serve_pick 第 3 行自己写了就不动); 只在下次起子进程时生效, 内存 +1 GB mmap(spark 当前 available 7 GB, 看门狗在)。
+尺: t_asst_logic 加 2 条(去图逐字节 / 无图不动), t_asst_video 加 1 条(嵌套目录真截图)。本机 logic 255 / video 32 全绿。
+
+## 10-18 20:xx · 用户: "部分字是黑色和主题不搭; 图确实生成了, 但好看的背景图标没有, 最起码有一些设备图片等等, 这些交给 web search"
+
+**黑字根因**(拉回 spark 的 YoungAi.pptx 逐页查 XML): 正文 / 要点 / 引言的 run 没写 `a:solidFill`(`inlines(... color=NULL)` 三处), 靠母版 clrMap 推 tx1=dk1。LibreOffice / PowerPoint 推得对(所以本机渲染一直是白字), 手机上的 WPS / 微信预览不认, 推成黑字 —— 深色主题整页正文黑在深蓝底上。修: `inlines` 里 color 空就填 `t->text`, 每个 run 都显式带色; 金标 diff 只多了 `<a:srgbClr val="E2E8F0"/>` 这类行(tech 正文色), 其它零变, 已重生成。
+**取图**: 新工具 `fetch_image`(`src/assistant/tools/tool_fetch.c`, 145 行; 用户明说"交给 web search", 两个源都是公开接口, 不新增账号/密钥):
+- photo: Bing 图片搜索(大图筛选)前几条按顺序试, 火狐直开原图地址(页面就是这张图, 同源 canvas 不染色), 缩到最长边 1600 转 JPEG; 短边 < 480 的跳过, 一张都不行把每条原因列出来。结果带原图地址 + 所在网页 + 标题, 版权一句话提醒。本机探针: "NVIDIA DGX Spark desktop AI supercomputer" 8 s 拿到 cnx-software 的 1576×1160 产品实拍。
+- icon: Iconify 公开接口(api.iconify.design, 20 万开源图标; 许可 MIT / Apache / CC-BY)搜名字 → `.svg?color=#..&height=N` → 火狐 canvas 转透明 PNG。坑: SVG 文档里 `document.createElement('canvas')` 建的是 SVG 命名空间元素, 没有 getContext —— 改 `createElementNS(xhtml)`。本机探针: mdi:server 青色 512、logos:nvidia 彩色、fluent-emoji-flat:rocket 256 三种都出图; 结果列 12 个候选, `name` 指定换一个。
+- 守门(`sbx_guard.c`): 查询词按 web 守(像密文的拒, 读过私有文件后问一次), 落点只许工作区; 计划等待态按"动作"拦。`asst_web_js`(tool_browser.c run_js 开 awaitPromise)、`asst_save_bytes`(tool_render.c 落盘子进程共用)、`asst_url_host` 三个原语公开。
+**渲染器三期**(`office_pptx.c` 237 行 / `office_pptx_draw.c` 194 行): 封面 / 章节页带一张图 → 图铺满右 45%、整页高, `a:srcRect` 对称裁满(像素不丢), 字靠左, 不画圆弧不写页码; 卡片格每条前面的 `![](图标.png)` → 强调色 14%/22% 淡色圆 + 图标顶替序号球(Design Ideas 的"图标在彩色圆里"母题); 解析出来图和 **加粗** 之间夹一个空格文本节点, `card_head` 跳过它(没跳过时整页退成要点, 10-18 实撞)。`pptx_picture` 加 fill 参数并回形状 id。
+**尺**: t_office +8(5 张图入包 / 封面 srcRect + 无光晕 + 左对齐 / 3 pic + 3 ellipse + 无序号 / 章节页 srcRect + 无页码 / 每个 run 带色), 131 全绿; t_asst_video +12(列出 / 守门四拒一放 / 扩展名 / kind / 颜色 / 尺寸), 43 全绿; `./ds4_asst_test --fetch '<JSON>'` 真联网探针(t_asst_sbx.c); `--md` 模式改成按稿子目录找图并打印缺图报告。linecount ok。
+**技能**: SKILL.md 配图一节改成三源表(照片 → 封面/章节页, 图标 → 卡片格, 示意图 → render_image), 图标颜色给五套主题的强调色, 品牌 logo 不进圆; 示例稿封面加照片、三件事页加图标。
+用 spark 上真照片 + 三个图标拼的四页稿 tech / clean 两套 LibreOffice 看过: 封面半幅实拍、卡片圆里图标、章节页同封面。未提交(待批)。
+
+## 10-18 21:xx · 用户: "视频(视觉)模型都动态加载的, 用完卸载, 是不是有什么 bug, 解决一下"
+
+**查实**: 视觉塔 10-13 的设计就是不常驻 —— 侧车只 mmap 不注册, 来图按块从映射读进临时设备张量, 跑完释放并 `MADV_DONTNEED` 丢页(`core_v41_vision.c`), 这一段没 bug。真 bug 在接线: 侧车只有起服命令带 `--vision-gguf` 才打开(`core_engine_open.c`), 工作台 C 起服(`model_serve.c`)从来没带过, 于是 spark 的 ds4-server 3 小时前起来就"没视觉塔", 助理一发图服务端 400 —— 侧车 `DeepSeek-V4.1-Flash-1017.vision.gguf` 就躺在模型旁边。19:3x 那次我在起服侧补 flag, 治标: 只对下一次起服有效, 而且规则写在起服那一层, 命令行 / 脚本 / hf_install 各自一套。
+**修(根上)**: 引擎打开时自己找 —— `v41_vision_sidecar_path`(core_bind_vision.c): `<底座>-<后缀…>.gguf` 逐段去 `-xxx` 试 `<前缀>.vision.gguf`, 最长前缀先命中, 不退进目录名; 找到就按原来 `--vision-gguf` 的路接线(mmap + 元数据 + 记偏移, 物理页零); `--vision-gguf off` 明确不接(vision_gate_spark.sh 文本不变门的"不带"那趟改用它); 显式 FILE 照旧优先。起服侧 19:3x 加的那段删掉(一份实现)。帮助文本写明默认规则与"权重按图读、用完丢、从不常驻"。
+**尺**: `ds4_test --server` 加 1 条(临时目录: 无侧车 false / 退到底座名 / 更长前缀优先 / 目录名里的 - 不算 / 空与 NULL), Mac 与 spark 都 OK。linecount ok。
+**spark 真机验证(21:0x)**: 重启 ds4-train(pid 1050925)→ 杀模型子进程 837664 → `/api/models/load` 装回同一套, 85 s 起来(pid 1050981, 命令行里零个 --vision-gguf); `tests/asst/vision_box_probe.sh probe/spark.jpg "这张图里是什么设备?"` 温 0: 5.9 s, prompt 1016 token(图片 span), 回答原文"图中是一台笔记本电脑和旁边放置的一台 NVIDIA DGX Spark 迷你 AI 工作站设备。" RSS: 图前 426,748 kB → 图后 457,720 kB(+31 MB, 971 MB 的侧车没留在 RSS 里 —— "用完卸载"成立)。未提交(待批)。
