@@ -86,29 +86,35 @@ static bool send_all(int fd, const char *p, size_t n) {
     return true;
 }
 
-bool asst_llm_chat(int port, const char *messages, const char *tools, const asst_llm_cb *cb, asst_llm_out *o) {
-    memset(o, 0, sizeof *o);
+/* 请求体里的图片块(asst_image.c 拼的 image_url data URL, base64 里没有引号, 所以 "}} 就是块尾)→ 一句说明文字。
+ * 为什么: 模型子进程不带视觉塔时服务端对 image_url 回 400 "invalid JSON request", 以前整轮就断了(10-18 spark 实撞: render_image 画完图回传就死);
+ * 图片块还存在会话历史里, 之后每一轮都带着, 一个会话永远 400。去图后模型至少拿到路径和文字, 轮次继续。 */
+bool asst_llm_strip_images(ds4_buf *body) {
+    static const char HEAD[] = ",{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:", NOTE[] = ",{\"type\":\"text\",\"text\":\"[image omitted: this model has no vision tower and cannot see pictures; the file path is in the text]\"}";
+    bool any = false; ds4_buf out = {0}; const char *p = body->ptr, *end = body->ptr + body->len;
+    ds4_buf_putc(body, 0); body->len--;
+    for (;;) {
+        const char *h = strstr(p, HEAD); if (!h) break;
+        const char *t = strstr(h + sizeof HEAD - 1, "\"}}"); if (!t) break;
+        ds4_buf_append(&out, p, (size_t)(h - p)); ds4_buf_puts(&out, NOTE); p = t + 3; any = true;
+    }
+    if (any) { ds4_buf_append(&out, p, (size_t)(end - p)); ds4_buf_free(body); *body = out; } else ds4_buf_free(&out);
+    return any;
+}
+
+/* 一次 POST: 返回 HTTP 状态(传输层失败 0, o->err 已填); 200 的 SSE 边收边喂回调 */
+static int llm_once(int port, const ds4_buf *body, const asst_llm_cb *cb, asst_llm_out *o) {
     const int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { snprintf(o->err, sizeof o->err, "socket: %s", strerror(errno)); return false; }
+    if (fd < 0) { snprintf(o->err, sizeof o->err, "socket: %s", strerror(errno)); return 0; }
     struct sockaddr_in a; memset(&a, 0, sizeof a); a.sin_family = AF_INET; a.sin_port = htons((uint16_t)port); a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    if (connect(fd, (struct sockaddr *)&a, sizeof a)) { close(fd); snprintf(o->err, sizeof o->err, "model is not running (nothing on 127.0.0.1:%d; it may be training or not loaded)", port); return false; }
+    if (connect(fd, (struct sockaddr *)&a, sizeof a)) { close(fd); snprintf(o->err, sizeof o->err, "model is not running (nothing on 127.0.0.1:%d; it may be training or not loaded)", port); return 0; }
     int one = 1; setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
-    ds4_buf body = {0};
-    /* ★助理默认开思考★(2026-10-12 用户定"Agent 默认开启"): 不思考模式下模型把过渡句当思考段, 收口位 24 次采样 8 次吐游离 </think>、1 次 EOS
-     * 直接收工没终稿; 开思考后同任务 12 步 43 次工具调用每步都正常收口并交出带链接的终稿(fable5 10-12)。代价是每步多 1.5k~3.5k 思考 token(约 1 分钟)。
-     * 思考段原文随 reasoning_content 回传(asst_run.c), 服务端按官方模板把同一轮里的 <think>…</think> 原样渲染回去, KV 前缀才接得上。 */
-    /* 不带 reasoning_effort = 官方默认 high(75)。10-18 试过 low(50): 鹈鹕照样进环, 用户令还原; 服务端的 low=50 档留着(以前 low 被折成 75 是错的)。 */
-    ds4_buf_printf(&body, "{\"model\":\"deepseek-v4-flash\",\"stream\":true,\"think\":true,\"max_tokens\":%d,\"stream_options\":{\"include_usage\":true},\"messages\":%s",
-                   ASST_MAX_TOKENS, messages);
-    if (tools && tools[0]) ds4_buf_printf(&body, ",\"tools\":%s", tools);
-    ds4_buf_putc(&body, '}');
     ds4_buf req = {0};
-    ds4_buf_printf(&req, "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", port, body.len);
-    ds4_buf_append(&req, body.ptr, body.len);
-    ds4_buf_free(&body);
+    ds4_buf_printf(&req, "POST /v1/chat/completions HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: close\r\n\r\n", port, body->len);
+    ds4_buf_append(&req, body->ptr, body->len);
     const bool sent = send_all(fd, req.ptr, req.len);
     ds4_buf_free(&req);
-    if (!sent) { close(fd); snprintf(o->err, sizeof o->err, "send to model failed"); return false; }
+    if (!sent) { close(fd); snprintf(o->err, sizeof o->err, "send to model failed"); return 0; }
     ds4_buf head = {0}, pending = {0};
     bool in_body = false; int status = 0;
     char buf[16384];
@@ -139,5 +145,26 @@ bool asst_llm_chat(int port, const char *messages, const char *tools, const asst
         free(m); free(e);
     }
     ds4_buf_free(&head); ds4_buf_free(&pending);
+    return status;
+}
+
+bool asst_llm_chat(int port, const char *messages, const char *tools, const asst_llm_cb *cb, asst_llm_out *o) {
+    memset(o, 0, sizeof *o);
+    ds4_buf body = {0};
+    /* ★助理默认开思考★(2026-10-12 用户定"Agent 默认开启"): 不思考模式下模型把过渡句当思考段, 收口位 24 次采样 8 次吐游离 </think>、1 次 EOS
+     * 直接收工没终稿; 开思考后同任务 12 步 43 次工具调用每步都正常收口并交出带链接的终稿(fable5 10-12)。代价是每步多 1.5k~3.5k 思考 token(约 1 分钟)。
+     * 思考段原文随 reasoning_content 回传(asst_run.c), 服务端按官方模板把同一轮里的 <think>…</think> 原样渲染回去, KV 前缀才接得上。 */
+    /* 不带 reasoning_effort = 官方默认 high(75)。10-18 试过 low(50): 鹈鹕照样进环, 用户令还原; 服务端的 low=50 档留着(以前 low 被折成 75 是错的)。 */
+    ds4_buf_printf(&body, "{\"model\":\"deepseek-v4-flash\",\"stream\":true,\"think\":true,\"max_tokens\":%d,\"stream_options\":{\"include_usage\":true},\"messages\":%s",
+                   ASST_MAX_TOKENS, messages);
+    if (tools && tools[0]) ds4_buf_printf(&body, ",\"tools\":%s", tools);
+    ds4_buf_putc(&body, '}');
+    int status = llm_once(port, &body, cb, o);
+    if (status == 400 && !o->stopped && asst_llm_strip_images(&body)) {   /* 没视觉塔的模型拒带图请求: 去图重发一次(服务端在解析阶段就拒, 第一发不花推理) */
+        asst_llm_out_free(o); memset(o, 0, sizeof *o);
+        status = llm_once(port, &body, cb, o);
+    }
+    ds4_buf_free(&body);
+    (void)status;
     return !o->err[0];
 }

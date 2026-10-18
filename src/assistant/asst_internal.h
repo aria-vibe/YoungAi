@@ -406,6 +406,7 @@ typedef struct {
 } asst_llm_out;
 bool asst_llm_chat(int port, const char *messages, const char *tools, const asst_llm_cb *cb, asst_llm_out *o);
 void asst_llm_out_free(asst_llm_out *o);
+bool asst_llm_strip_images(ds4_buf *body);   /* 请求体里的 image_url 块 → 一句"看不到图"的文字; 换了返回 true(model_llm.c, 400 重发用; 单测直接调) */
 bool asst_sse_feed(ds4_buf *pending, const char *data, size_t n, const asst_llm_cb *cb, asst_llm_out *o);   /* 喂原始字节, 按 \n\n 切事件解析(单测直接喂录好的流) */
 
 /* ---------------- 运行(asst_run.c): 一条工人线程, FIFO ---------------- */

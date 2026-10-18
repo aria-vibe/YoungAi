@@ -115,6 +115,13 @@ static void test_sse(void) {
         "data: {\"id\":\"c1\",\"choices\":[],\"usage\":{\"prompt_tokens\":1234,\"completion_tokens\":56}}\n\n"
         "data: [DONE]\n\n";
     const size_t n = strlen(stream);
+    {   /* 去图重发(model_llm.c, 10-18): image_url 块换成一句文字, 其余字节不动; 没图的请求体原样不动 */
+        ds4_buf body = {0}; ds4_buf_puts(&body, "{\"messages\":[{\"role\":\"tool\",\"content\":[{\"type\":\"text\",\"text\":\"image: a.png\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/png;base64,iVBORw0KGgo=\"}},{\"type\":\"image_url\",\"image_url\":{\"url\":\"data:image/jpeg;base64,/9j/4A==\"}}]},{\"role\":\"user\",\"content\":\"hi\"}]}");
+        CHECKL(asst_llm_strip_images(&body) && !strstr(body.ptr, "image_url") && !strstr(body.ptr, "base64") && strstr(body.ptr, "\"text\":\"image: a.png\"},{\"type\":\"text\",\"text\":\"[image omitted") && strstr(body.ptr, "cannot see pictures; the file path is in the text]\"},{\"type\":\"text\",\"text\":\"[image omitted") && strstr(body.ptr, "]\"}]},{\"role\":\"user\",\"content\":\"hi\"}]}"), "image blocks stripped to notes: %s", body.ptr);
+        ds4_buf_free(&body); ds4_buf_puts(&body, "{\"messages\":[{\"role\":\"user\",\"content\":\"no pictures\"}]}"); const size_t n0 = body.len;
+        CHECKL(!asst_llm_strip_images(&body) && body.len == n0 && !strcmp(body.ptr, "{\"messages\":[{\"role\":\"user\",\"content\":\"no pictures\"}]}"), "no image blocks: untouched");
+        ds4_buf_free(&body);
+    }
     for (size_t step = 1; step <= 97; step += 16) {
         asst_llm_out o; memset(&o, 0, sizeof o); ds4_buf pend = {0};
         for (size_t off = 0; off < n; off += step) asst_sse_feed(&pend, stream + off, off + step <= n ? step : n - off, NULL, &o);
