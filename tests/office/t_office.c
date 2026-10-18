@@ -15,6 +15,7 @@
 
 static int fails, passes;
 static bool keep;   /* --keep: 不删临时目录 */
+static const char *md_in;   /* --md FILE: 用这份 Markdown 代替夹具出五套主题的 pptx(只落盘, 不比金标; 看技能示例稿排成什么样) */
 #define CHECK(cond, ...) do { if (cond) passes++; else { fails++; printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } while (0)
 #define FIX "tests/fixtures/office/"
 #define NOW 1760000000   /* 2025-10-09T08:53:20Z: 常量时间 → 产物逐字节可比 */
@@ -194,6 +195,7 @@ static void test_build(bool update) {
 }
 
 /* ---------------- ⑦ PDF + PPTX ---------------- */
+static int count_sub(const char *s, const char *sub) { int n = 0; const size_t k = strlen(sub); for (const char *p = strstr(s, sub); p; p = strstr(p + k, sub)) n++; return n; }
 static bool has_bytes(const uint8_t *p, size_t n, const char *s) { const size_t k = strlen(s); for (size_t i = 0; i + k <= n; i++) if (!memcmp(p + i, s, k)) return true; return false; }
 static void test_pdf_pptx(bool update) {
     char tmp[256]; snprintf(tmp, sizeof tmp, "/tmp/ds4_office_pdf_%ld", (long)getpid()); mkdir(tmp, 0755);
@@ -264,7 +266,7 @@ static void test_pdf_pptx(bool update) {
         free(pe); office_report_free(&re);
     }
     office_node_free(d); free(md);
-    /* pptx: 夹具 slides.md → 6 页(标题页/要点+备注/表格/图+要点/有序+引用+代码/章节页) */
+    /* pptx: 夹具 slides.md → 12 页(封面/要点+备注/表格/图+要点/有序+引用+代码/章节页/数字卡/卡片格/双栏/金句/要点+图表/章节页) */
     char *sm = (char *)slurp(FIX "slides.md", &n); office_node *sd = office_md_parse(sm);
     office_opts op = { tmp, NULL, NOW, NULL, NULL, NULL }; office_report rp = {0}; size_t pn;
     uint8_t *px = office_pptx_build(sd, &op, &rp, &pn);
@@ -273,16 +275,40 @@ static void test_pdf_pptx(bool update) {
     char f2[300]; snprintf(f2, sizeof f2, "%s/slides.pptx", tmp); put(f2, px, pn);
     external_checks(f2, tmp, NULL);
     char p1[400]; snprintf(p1, sizeof p1, "%s/x/ppt/presentation.xml", tmp); size_t wn; char *pres = (char *)slurp(p1, &wn);
-    CHECK(pres && strstr(pres, "r:id=\"rId7\"") && !strstr(pres, "r:id=\"rId8\"/></p:sldIdLst>") && strstr(pres, "notesMasterIdLst"), "6 slides + notes master listed");
+    CHECK(pres && strstr(pres, "r:id=\"rId13\"/></p:sldIdLst>") && strstr(pres, "notesMasterIdLst"), "12 slides + notes master listed");
     snprintf(p1, sizeof p1, "%s/x/ppt/notesSlides/notesSlide2.xml", tmp); char *ns = (char *)slurp(p1, &wn);
     CHECK(ns && strstr(ns, "讲稿：强调不用装任何工具"), "slide 2 speaker notes");
     snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide4.xml", tmp); char *s4 = (char *)slurp(p1, &wn);
     CHECK(s4 && strstr(s4, "<p:pic>") && strstr(s4, "r:embed=\"rId2\"") && strstr(s4, "营收连续两季增长"), "slide 4 has picture + bullets");
     snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide3.xml", tmp); char *s3 = (char *)slurp(p1, &wn);
     CHECK(s3 && strstr(s3, "<a:tbl>") && strstr(s3, "<a:gridCol") && strstr(s3, "1,385"), "slide 3 has a table");
+    /* 10-18 新版式: 章节页序号 / 数字卡(一列一张圆角卡 + 大数字) / 卡片格(序号球) / 双栏(两块面板 + 强调色小标题) / 金句(大引号) */
+    snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide6.xml", tmp); char *s6 = (char *)slurp(p1, &wn);
+    CHECK(s6 && strstr(s6, "<a:t>01</a:t>") && strstr(s6, "第二部分") && !strstr(s6, "<a:tbl>"), "slide 6 is a section page with ordinal 01");
+    snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide7.xml", tmp); char *s7 = (char *)slurp(p1, &wn);
+    CHECK(s7 && count_sub(s7, "prst=\"roundRect\"") == 3 && !strstr(s7, "<a:tbl>") && strstr(s7, "sz=\"4400\" b=\"1\"") && strstr(s7, "1,385 万"), "slide 7: one-row table becomes 3 stat cards");
+    snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide8.xml", tmp); char *s8 = (char *)slurp(p1, &wn);
+    CHECK(s8 && count_sub(s8, "prst=\"roundRect\"") == 4 && count_sub(s8, "prst=\"ellipse\"") == 4 && strstr(s8, "<a:t>4</a:t>") && strstr(s8, "渠道下沉") && !strstr(s8, "buChar"), "slide 8: bold-led bullets become a 2x2 card grid");
+    snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide9.xml", tmp); char *s9 = (char *)slurp(p1, &wn);
+    CHECK(s9 && count_sub(s9, "prst=\"roundRect\"") == 2 && strstr(s9, "<a:t>自研</a:t>") && strstr(s9, "<a:t>外采</a:t>") && count_sub(s9, "buChar") == 4, "slide 9: two ### headings become two columns");
+    snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide10.xml", tmp); char *s10 = (char *)slurp(p1, &wn);
+    CHECK(s10 && strstr(s10, "sz=\"12000\"") && strstr(s10, "i=\"1\"") && strstr(s10, "干得稳"), "slide 10: lone quote becomes a quote page");
+    CHECK(!strstr(s3, "lnL><a:solidFill") && strstr(s3, "<a:lnL><a:noFill/>") && count_sub(s3, "prst=\"rect\"") <= 3, "table has no vertical lines and the title has no underline/side bar");
+    /* 10-18 二期: 原生图表(表头 bar → ppt/charts/chart1.xml, 本页 graphicFrame 引用, 字左图右) / 每页渐变底 + 淡入切换 / 卡片格 12 个形状逐组淡入 / 封面光晕 */
+    snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide11.xml", tmp); char *s11 = (char *)slurp(p1, &wn);
+    snprintf(p1, sizeof p1, "%s/x/ppt/charts/chart1.xml", tmp); char *ch1 = (char *)slurp(p1, &wn);
+    CHECK(s11 && strstr(s11, "<c:chart ") && strstr(s11, "r:id=\"rId2\"") && strstr(s11, "11.7%") && !strstr(s11, "<a:tbl>"), "slide 11: bar table becomes a graphicFrame, not a table");
+    CHECK(ch1 && strstr(ch1, "<c:barChart>") && count_sub(ch1, "<c:ser>") == 2 && strstr(ch1, "<c:v>1385</c:v>") && strstr(ch1, "<c:v>Q3</c:v>") && strstr(ch1, "val=\"0F766E\"") && strstr(ch1, "<c:legendPos val=\"b\"/>"), "chart1.xml: 2 bar series, numbers parsed (1,385 → 1385), theme colors, legend");
+    snprintf(p1, sizeof p1, "%s/x/[Content_Types].xml", tmp); char *ct = (char *)slurp(p1, &wn);
+    CHECK(ct && strstr(ct, "/ppt/charts/chart1.xml") && strstr(ct, "drawingml.chart+xml"), "content types list the chart part");
+    CHECK(s8 && strstr(s8, "<p:transition spd=\"med\"><p:fade/></p:transition>") && strstr(s8, "<p:timing>") && count_sub(s8, "<p:bldP ") == 12 && count_sub(s8, "nodeType=\"afterEffect\"") == 4 && count_sub(s8, "nodeType=\"withEffect\"") == 8 && strstr(s8, "<p:cond delay=\"750\"/>") && strstr(s8, "evt=\"onBegin\""), "slide 8: fade transition + 4 card groups fade in one after another, auto-start");
+    CHECK(s6 && strstr(s6, "<p:transition") && !strstr(s6, "<p:timing>") && strstr(s6, "<a:gradFill") && strstr(s6, "<a:lin ang=\"2700000\""), "section page: transition but no build; gradient background");
+    CHECK(s3 && strstr(s3, "<a:outerShdw") == NULL && strstr(s7, "<a:outerShdw"), "clean theme: table has no shadow, stat cards do");
+    free(s11); free(ch1); free(ct);
+    free(s6); free(s7); free(s8); free(s9); free(s10);
     free(pres); free(ns); free(s4); free(s3); free(px); office_report_free(&rp);
     /* 主题(10-14): 同一份夹具 theme=tech → 每页写底色 0B1220、封面有圆弧、内容页有页码与强调条、表头青字深底、链接青色; clean 的金标上面已经比过(一字节不变) */
-    CHECK(office_pptx_theme_ok(NULL) && office_pptx_theme_ok("") && office_pptx_theme_ok("tech") && office_pptx_theme_ok("warm") && !office_pptx_theme_ok("neon") && !strcmp(office_pptx_themes(), "clean, tech, warm"), "theme names");
+    CHECK(office_pptx_theme_ok(NULL) && office_pptx_theme_ok("") && office_pptx_theme_ok("tech") && office_pptx_theme_ok("warm") && office_pptx_theme_ok("forest") && office_pptx_theme_ok("berry") && !office_pptx_theme_ok("neon") && !strcmp(office_pptx_themes(), "clean, tech, warm, forest, berry"), "theme names");
     office_opts ot = { tmp, NULL, NOW, NULL, NULL, "tech" }; office_report rt = {0}; size_t tn;
     uint8_t *pt = office_pptx_build(sd, &ot, &rt, &tn);
     CHECK(pt && tn > pn, "tech pptx built %zu bytes (clean %zu)", tn, pn);
@@ -290,14 +316,41 @@ static void test_pdf_pptx(bool update) {
     snprintf(f2, sizeof f2, "%s/slides-tech.pptx", tmp); put(f2, pt, tn);
     external_checks(f2, tmp, NULL);
     snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide1.xml", tmp); char *t1 = (char *)slurp(p1, &wn);
-    CHECK(t1 && strstr(t1, "<p:bg><p:bgPr><a:solidFill><a:srgbClr val=\"0B1220\"/>") && strstr(t1, "prst=\"ellipse\"") && strstr(t1, "val=\"F8FAFC\"") && !strstr(t1, "1F3864"), "tech cover: dark background, arcs, light title");
+    CHECK(t1 && strstr(t1, "<p:bg><p:bgPr><a:gradFill") && strstr(t1, "val=\"0B1220\"") && strstr(t1, "val=\"16213F\"") && strstr(t1, "name=\"Glow 2\"") && strstr(t1, "path=\"circle\"") && strstr(t1, "prst=\"ellipse\"") && strstr(t1, "val=\"F8FAFC\"") && !strstr(t1, "1F3864"), "tech cover: gradient dark background, glow, arcs, light title");
+    snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide8.xml", tmp); char *t8 = (char *)slurp(p1, &wn);
+    CHECK(t8 && !strstr(t8, "<a:outerShdw") && strstr(t8, "<a:ln w=\"9525\"><a:solidFill><a:srgbClr val=\"22D3EE\"><a:alpha val=\"22000\"/>"), "tech cards: accent outline instead of shadow on a dark theme"); free(t8);
     snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide3.xml", tmp); char *t3 = (char *)slurp(p1, &wn);
-    CHECK(t3 && strstr(t3, "val=\"0F2A44\"") && strstr(t3, "val=\"7DD3FC\"") && strstr(t3, "<a:t>3</a:t>") && strstr(t3, "val=\"22D3EE\"") && !strstr(t3, "D9E2F3"), "tech table slide: themed header, page number, accent bar");
+    CHECK(t3 && strstr(t3, "val=\"1E293B\"") && strstr(t3, "val=\"7DD3FC\"") && strstr(t3, "<a:t>3</a:t>") && strstr(t3, "val=\"162133\"") && !strstr(t3, "F1F5F9"), "tech table slide: themed header, page number, banded rows");
     snprintf(p1, sizeof p1, "%s/x/ppt/theme/theme1.xml", tmp); char *th = (char *)slurp(p1, &wn);
     CHECK(th && strstr(th, "<a:dk1><a:srgbClr val=\"E2E8F0\"/></a:dk1><a:lt1><a:srgbClr val=\"0B1220\"/></a:lt1>"), "tech theme1: text/bg swapped so unstyled runs come out light");
     snprintf(p1, sizeof p1, "%s/x/ppt/theme/theme2.xml", tmp); char *th2 = (char *)slurp(p1, &wn);
     CHECK(th2 && strstr(th2, "<a:lt1><a:srgbClr val=\"FFFFFF\"/></a:lt1>"), "notes theme stays white");
     free(t1); free(t3); free(th); free(th2); free(pt); office_report_free(&rt);
+    /* 10-18 三期(用户: "部分字是黑色和主题不搭; 好看的背景图标没有, 设备图片交给 web search"): 封面 / 章节页带图 → 右半幅裁满(srcRect), 不画圆弧、不写页码;
+     * 卡片格每条前面的 ![](图) → 淡色圆 + 图标顶替序号球; 每个 run 都显式写颜色(手机端 WPS / 微信预览不认主题 tx1, 深色主题正文出黑字) */
+    { const char *md3 = "# 封面\n\n副标题\n\n![机器](chart.png)\n\n---\n\n## 三件事\n\n- ![](chart.png) **一** 说明一\n- ![](chart.png) **二** 说明二\n- ![](chart.png) **三** 说明三\n\n---\n\n# 章节\n\n![配图](chart.png)\n\n---\n\n## 要点\n\n- 甲\n- 乙 **重点**\n";
+      office_node *d3 = office_md_parse(md3); office_opts o3 = { tmp, NULL, NOW, NULL, NULL, "tech" }; office_report r3 = {0}; size_t n3;
+      uint8_t *p3 = office_pptx_build(d3, &o3, &r3, &n3);
+      CHECK(p3 && r3.images == 5 && !r3.missing_images, "photo + icon deck built: %d images, %d missing", r3.images, r3.missing_images);
+      snprintf(f2, sizeof f2, "%s/photo.pptx", tmp); put(f2, p3, n3); external_checks(f2, tmp, NULL);
+      snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide1.xml", tmp); char *q1 = (char *)slurp(p1, &wn);
+      CHECK(q1 && strstr(q1, "<a:srcRect ") && strstr(q1, "<p:pic>") && !strstr(q1, "Glow") && strstr(q1, "<a:t>封面</a:t>") && !strstr(q1, "algn=\"ctr\""), "cover with a photo: cropped half-bleed picture, no arcs, left-aligned title");
+      snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide2.xml", tmp); char *q2 = (char *)slurp(p1, &wn);
+      CHECK(q2 && count_sub(q2, "<p:pic>") == 3 && count_sub(q2, "prst=\"ellipse\"") == 3 && count_sub(q2, "prst=\"roundRect\"") == 3 && !strstr(q2, "<a:t>1</a:t>") && strstr(q2, "<a:t>一</a:t>") && !strstr(q2, "buChar"), "icon cards: 3 pictures in tinted circles instead of numbered balls");
+      snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide3.xml", tmp); char *q3 = (char *)slurp(p1, &wn);
+      CHECK(q3 && strstr(q3, "<a:srcRect ") && strstr(q3, "<a:t>01</a:t>") && !strstr(q3, "<a:t>3</a:t>"), "section page with a photo: half-bleed, ordinal, no page number over the photo");
+      snprintf(p1, sizeof p1, "%s/x/ppt/slides/slide4.xml", tmp); char *q4 = (char *)slurp(p1, &wn);
+      CHECK(q4 && !strstr(q4, "\"></a:rPr>") && count_sub(q4, "val=\"E2E8F0\"") >= 2 && strstr(q4, "val=\"22D3EE\""), "every text run carries an explicit color (body text light on the dark theme, bold = accent)");
+      free(q1); free(q2); free(q3); free(q4); free(p3); office_report_free(&r3); office_node_free(d3); }
+    if (keep) {   /* 肉眼看版式用: 其余三套主题也落盘(不进金标; scripts/office_preview.sh 转成图); --md 时换成那份稿子出全部五套 */
+        const char *all[] = { "clean", "tech", "warm", "forest", "berry" }; office_node *src = sd;
+        char mdir[300] = ""; if (md_in) { size_t mn; char *mm = (char *)slurp(md_in, &mn); src = mm ? office_md_parse(mm) : NULL; free(mm);
+            snprintf(mdir, sizeof mdir, "%s", md_in); char *sl = strrchr(mdir, '/'); if (sl) *sl = 0; else snprintf(mdir, sizeof mdir, "."); }   /* 稿子里的图按稿子所在目录找 */
+        for (int i = (md_in ? 0 : 2); src && i < 5; i++) { office_opts ox = { md_in ? mdir : tmp, NULL, NOW, NULL, NULL, all[i] }; office_report rx = {0}; size_t xn; uint8_t *pxx = office_pptx_build(src, &ox, &rx, &xn);
+            if (md_in && !i && (rx.missing_images || rx.notes.len)) printf("md report: images %d missing %d\n%s", rx.images, rx.missing_images, rx.notes.ptr ? rx.notes.ptr : "");
+            snprintf(f2, sizeof f2, "%s/%s-%s.pptx", tmp, md_in ? "md" : "slides", all[i]); put(f2, pxx, xn); free(pxx); office_report_free(&rx); }
+        if (src != sd) office_node_free(src);
+    }
     office_node_free(sd); free(sm);
     char cmd[512]; if (keep) printf("kept: %s\n", tmp); else { snprintf(cmd, sizeof cmd, "rm -rf '%s'", tmp); if (system(cmd)) {} }
 }
@@ -323,7 +376,7 @@ static void test_png(void) {
 
 int main(int argc, char **argv) {
     bool update = false;
-    for (int i = 1; i < argc; i++) { if (!strcmp(argv[i], "--update-golden")) update = true; else if (!strcmp(argv[i], "--keep")) keep = true; }
+    for (int i = 1; i < argc; i++) { if (!strcmp(argv[i], "--update-golden")) update = true; else if (!strcmp(argv[i], "--keep")) keep = true; else if (!strcmp(argv[i], "--md") && i + 1 < argc) md_in = argv[++i]; }
     test_flate(); test_md(); test_calc(); test_build(update); test_png(); test_pdf_pptx(update);
     printf("office: %d passed, %d failed\n", passes, fails);
     return fails ? 1 : 0;
