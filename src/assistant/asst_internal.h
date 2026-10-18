@@ -394,6 +394,19 @@ bool asst_preview_path(const char *path);       /* "/p/" 前缀 */
 bool asst_preview_issue(const char *path, long now, char *url, size_t un, char *err, size_t errn);   /* 工作区里的 .html → "/p/<口令>/<文件名>" */
 int asst_preview_get(const char *method, const char *path, const char *host, long now, ds4_buf *hdr, ds4_buf *body);   /* 纯判定 + 取字节; hdr 收 200 时的类型与安全头(单测直接调) */
 void asst_preview_serve(int fd, const char *method, const char *path, const char *host);   /* 主进程接管钩子: 写完整响应并关 fd */
+bool asst_page_resolve(const char *in, char *abs, size_t an, char *err, size_t errn);   /* 工作区里、不在 . 开头目录下、真存在的 .html/.htm → 绝对路径 */
+bool asst_rand_hex32(char tok[33]);              /* 128 位随机口令(/dev/urandom) */
+void asst_url_name(const char *prefix, const char *tok, const char *abs, char *url, size_t un);   /* prefix + 口令 + "/" + 百分号编码的文件名 */
+int asst_web_serve(const char *root, bool flat, const char *enc, const char *host, ds4_buf *hdr, ds4_buf *body);   /* root 里的文件 + CSP sandbox 安全头; 越界 404 */
+void asst_web_respond(int fd, int code, ds4_buf *hdr, ds4_buf *body);   /* 写完整响应、释放两个 buf、关 fd */
+
+/* ---------------- 网页分享(asst_share.c, 方案稿 docs/assistant_page.md §7): GET /s/<口令>/<路径>, 不要登录、不过期, 只读分享那一刻的快照 ---------------- */
+#define ASST_SHARE_MAX_BYTES (64u << 20)   /* 一份快照最多 64 MiB / 2000 个文件: 网页放在大目录里(比如 inbox/)时宁可拒, 不把整个目录发出去 */
+#define ASST_SHARE_MAX_FILES 2000
+bool asst_share_path(const char *path);          /* "/s/" 前缀 */
+bool asst_share_issue(const char *path, char *url, size_t un, char *err, size_t errn);   /* 工作区里的 .html → 拍快照 → "/s/<口令>/<文件名>"; 同一版本再分享复用同一个口令 */
+int asst_share_get(const char *method, const char *path, const char *host, ds4_buf *hdr, ds4_buf *body);   /* 纯判定 + 取字节(单测直接调) */
+void asst_share_serve(int fd, const char *method, const char *path, const char *host);   /* 主进程接管钩子 */
 
 /* ---------------- 模型客户端(model_llm.c): 127.0.0.1:<模型端口> 的流式 chat/completions ---------------- */
 #define ASST_MAX_CALLS 16

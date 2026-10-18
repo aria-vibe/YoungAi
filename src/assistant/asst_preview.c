@@ -40,19 +40,38 @@ static bool dot_seg(const char *rel) { return rel[0] == '.' || strstr(rel, "/.")
 
 bool asst_preview_path(const char *path) { return !strncmp(path, "/p/", 3); }
 
-bool asst_preview_issue(const char *in, long now, char *url, size_t un, char *err, size_t errn) {
-    char abs[ASST_PATH]; struct stat st;
-    if (!in || !in[0] || !asst_path_resolve(in, abs, sizeof abs) || !asst_under(abs, asst_ws)) { snprintf(err, errn, "only .html files inside the workspace can be previewed"); return false; }
+bool asst_page_resolve(const char *in, char *abs, size_t an, char *err, size_t errn) {
+    struct stat st;
+    if (!in || !in[0] || !asst_path_resolve(in, abs, an) || !asst_under(abs, asst_ws)) { snprintf(err, errn, "only .html files inside the workspace can be previewed or shared"); return false; }
     const char *rel = abs + strlen(asst_ws); if (*rel == '/') rel++;
     const char *ext = strrchr(abs, '.');
-    if (!*rel || dot_seg(rel) || !ext || (strcasecmp(ext, ".html") && strcasecmp(ext, ".htm"))) { snprintf(err, errn, "only .html files inside the workspace can be previewed"); return false; }
+    if (!*rel || dot_seg(rel) || !ext || (strcasecmp(ext, ".html") && strcasecmp(ext, ".htm"))) { snprintf(err, errn, "only .html files inside the workspace can be previewed or shared"); return false; }
     if (stat(abs, &st) || !S_ISREG(st.st_mode)) { snprintf(err, errn, "no such file"); return false; }
+    return true;
+}
+
+bool asst_rand_hex32(char tok[33]) {
     unsigned char rnd[16]; const int fd = open("/dev/urandom", O_RDONLY);
     const bool rok = fd >= 0 && read(fd, rnd, sizeof rnd) == (ssize_t)sizeof rnd;
     if (fd >= 0) close(fd);
-    if (!rok) { snprintf(err, errn, "no randomness for the preview token"); return false; }
+    if (rok) for (int i = 0; i < 16; i++) snprintf(tok + 2 * i, 3, "%02x", rnd[i]);
+    return rok;
+}
+
+void asst_url_name(const char *prefix, const char *tok, const char *abs, char *url, size_t un) {
+    size_t k = (size_t)snprintf(url, un, "%s%s/", prefix, tok);
+    for (const unsigned char *p = (const unsigned char *)strrchr(abs, '/') + 1; *p && k + 4 < un; p++) {   /* 文件名百分号编码(中文名照样能开) */
+        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || strchr("._-~", *p)) url[k++] = (char)*p;
+        else k += (size_t)snprintf(url + k, un - k, "%%%02X", *p);
+    }
+    url[k] = 0;
+}
+
+bool asst_preview_issue(const char *in, long now, char *url, size_t un, char *err, size_t errn) {
+    char abs[ASST_PATH];
+    if (!asst_page_resolve(in, abs, sizeof abs, err, errn)) return false;
     pv_ent e; memset(&e, 0, sizeof e);
-    for (int i = 0; i < 16; i++) snprintf(e.tok + 2 * i, 3, "%02x", rnd[i]);
+    if (!asst_rand_hex32(e.tok)) { snprintf(err, errn, "no randomness for the preview token"); return false; }
     snprintf(e.root, sizeof e.root, "%s", abs);
     *strrchr(e.root, '/') = 0;
     e.flat = !strcmp(e.root, asst_ws);
@@ -65,12 +84,7 @@ bool asst_preview_issue(const char *in, long now, char *url, size_t un, char *er
     }
     PV[slot] = e;
     pthread_mutex_unlock(&pv_mu);
-    size_t k = (size_t)snprintf(url, un, "/p/%s/", e.tok);
-    for (const unsigned char *p = (const unsigned char *)strrchr(abs, '/') + 1; *p && k + 4 < un; p++) {   /* 文件名百分号编码(中文名照样能开) */
-        if ((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') || strchr("._-~", *p)) url[k++] = (char)*p;
-        else k += (size_t)snprintf(url + k, un - k, "%%%02X", *p);
-    }
-    url[k] = 0;
+    asst_url_name("/p/", e.tok, abs, url, un);
     return true;
 }
 
@@ -83,30 +97,23 @@ static void host_src(const char *host, char *out, size_t n) {
     out[k] = 0;
 }
 
-int asst_preview_get(const char *method, const char *path, const char *host, long now, ds4_buf *hdr, ds4_buf *body) {
-    if (strcmp(method, "GET")) return 405;
-    if (!asst_root[0] || !asst_preview_path(path)) return 404;
-    const char *p = path + 3, *sl = strchr(p, '/');
-    if (!sl || sl - p != 32) return 404;
-    pv_ent e; bool hit = false;
-    pthread_mutex_lock(&pv_mu);
-    for (int i = 0; i < ASST_PV_MAX; i++) if (PV[i].tok[0] && PV[i].exp > now && !memcmp(PV[i].tok, p, 32)) { e = PV[i]; hit = true; break; }
-    pthread_mutex_unlock(&pv_mu);
-    if (!hit) return 404;
+/* 预览(/p/)和分享(/s/, asst_share.c)共用: 口令已验过, root 是放行的目录, enc 是 URL 里口令后面那段(百分号编码)。
+ * root 里 . 开头的段都不给(.trash/.web 内部目录; 分享快照的 .src 来源记录), realpath 后还得在 root 里(软链跳出去不行) */
+int asst_web_serve(const char *root, bool flat, const char *enc, const char *host, ds4_buf *hdr, ds4_buf *body) {
     char rel[ASST_PATH]; size_t k = 0;
-    for (const char *q = sl + 1; *q && k + 1 < sizeof rel; q++) {   /* 百分号解码; 解出 NUL 整条作废 */
+    for (const char *q = enc; *q && k + 1 < sizeof rel; q++) {   /* 百分号解码; 解出 NUL 整条作废 */
         int ch = (unsigned char)*q;
         if (ch == '%' && hexv(q[1]) >= 0 && hexv(q[2]) >= 0) { ch = hexv(q[1]) * 16 + hexv(q[2]); q += 2; }
         if (!ch) return 404;
         rel[k++] = (char)ch;
     }
     rel[k] = 0;
-    if (!rel[0] || rel[0] == '/' || dot_seg(rel) || (e.flat && strchr(rel, '/'))) return 404;
+    if (!rel[0] || rel[0] == '/' || dot_seg(rel) || (flat && strchr(rel, '/'))) return 404;
     char want[ASST_PATH * 2], real[4096]; struct stat st;
-    snprintf(want, sizeof want, "%s/%s", e.root, rel);
-    if (!realpath(want, real) || !asst_under(real, e.root) || !asst_under(real, asst_ws)) return 404;
-    const char *wr = real + strlen(asst_ws); if (*wr == '/') wr++;
-    if (dot_seg(wr) || (e.flat && strchr(wr, '/'))) return 404;   /* 软链指进 .trash 或子目录 */
+    snprintf(want, sizeof want, "%s/%s", root, rel);
+    if (!realpath(want, real) || !asst_under(real, root)) return 404;
+    const char *wr = real + strlen(root); if (*wr == '/') wr++;
+    if (dot_seg(wr) || (flat && strchr(wr, '/'))) return 404;   /* 软链指进 .trash 或子目录 */
     if (stat(real, &st) || !S_ISREG(st.st_mode) || (unsigned long long)st.st_size > ASST_FILE_MAX) return 404;
     size_t n = 0; char *data = asst_slurp(real, &n);
     if (!data) return 404;
@@ -121,18 +128,35 @@ int asst_preview_get(const char *method, const char *path, const char *host, lon
     return 200;
 }
 
+int asst_preview_get(const char *method, const char *path, const char *host, long now, ds4_buf *hdr, ds4_buf *body) {
+    if (strcmp(method, "GET")) return 405;
+    if (!asst_root[0] || !asst_preview_path(path)) return 404;
+    const char *p = path + 3, *sl = strchr(p, '/');
+    if (!sl || sl - p != 32) return 404;
+    pv_ent e; bool hit = false;
+    pthread_mutex_lock(&pv_mu);
+    for (int i = 0; i < ASST_PV_MAX; i++) if (PV[i].tok[0] && PV[i].exp > now && !memcmp(PV[i].tok, p, 32)) { e = PV[i]; hit = true; break; }
+    pthread_mutex_unlock(&pv_mu);
+    if (!hit) return 404;
+    return asst_web_serve(e.root, e.flat, sl + 1, host, hdr, body);
+}
+
 static void send_all(int fd, const char *p, size_t n) {
     while (n) { const ssize_t w = send(fd, p, n, 0); if (w <= 0) return; p += w; n -= (size_t)w; }
 }
 
-void asst_preview_serve(int fd, const char *method, const char *path, const char *host) {
-    ds4_buf hdr = {0}, body = {0}, h = {0};
-    const int code = asst_preview_get(method, path, host, (long)time(NULL), &hdr, &body);
-    if (code != 200) ds4_buf_puts(&hdr, "Content-Type: text/plain; charset=utf-8\r\n");
+void asst_web_respond(int fd, int code, ds4_buf *hdr, ds4_buf *body) {
+    ds4_buf h = {0};
+    if (code != 200) ds4_buf_puts(hdr, "Content-Type: text/plain; charset=utf-8\r\n");
     ds4_buf_printf(&h, "HTTP/1.1 %d %s\r\n%sContent-Length: %zu\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n",
-                   code, code == 200 ? "OK" : code == 405 ? "Method Not Allowed" : "Not Found", hdr.ptr ? hdr.ptr : "", body.len);
+                   code, code == 200 ? "OK" : code == 405 ? "Method Not Allowed" : "Not Found", hdr->ptr ? hdr->ptr : "", body->len);
     send_all(fd, h.ptr, h.len);
-    if (body.len) send_all(fd, body.ptr, body.len);
-    ds4_buf_free(&hdr); ds4_buf_free(&body); ds4_buf_free(&h);
+    if (body->len) send_all(fd, body->ptr, body->len);
+    ds4_buf_free(hdr); ds4_buf_free(body); ds4_buf_free(&h);
     close(fd);
+}
+
+void asst_preview_serve(int fd, const char *method, const char *path, const char *host) {
+    ds4_buf hdr = {0}, body = {0};
+    asst_web_respond(fd, asst_preview_get(method, path, host, (long)time(NULL), &hdr, &body), &hdr, &body);
 }

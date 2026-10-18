@@ -1174,7 +1174,7 @@ const I18N = {
     a_end_stopped: "已停止", a_end_error: "出错了", a_usage: "提示 {0} · 生成 {1} token", s_running: "进行中", s_waiting_approval: "等你批准", s_waiting_device: "等设备回答", s_queued: "排队中…", ph_busy: "助理正在干活, 点停止可打断",
     dec_device: "设备答复了", dev_doing: "这台设备正在做…", dev_other: "在等发消息的那台设备回答; 它不在了就用这台:", dev_mine: "用这台设备回答", dev_tap_read_clipboard: "需要你点一下才能读剪贴板:", dev_tap_pick_file: "请选一个文件:", dev_tap_pick_photo: "请选一张照片:",
     dev_btn_read_clipboard: "读取剪贴板", dev_btn_pick_file: "选择文件", dev_btn_pick_photo: "选择照片", dev_tap_locate: "需要你点一下才能定位:", dev_btn_locate: "定位", dev_no_api: "这个浏览器不支持", dev_http: "位置、剪贴板、分享、麦克风这些能力浏览器只在 https(或本机地址)下开放; 现在是 http 打开的, 助理拿不到位置、读不了剪贴板、分享不了文件, 也没有语音输入",
-    dl_download: "下载", dl_share: "分享", dl_preview: "预览", dl_open: "打开",file_fail: "取文件失败: {0}", share_fail: "分享没成: {0}", share_type_blocked: "这个浏览器不让分享 .{0} 文件, 点文件卡上的「下载」, 再从文件夹里发", copied_answer: "回答已复制到剪贴板", attach_fail: "附件没传上: {0}", attach_title: "附件",
+    dl_download: "下载", dl_share: "分享", dl_preview: "预览", dl_open: "打开",file_fail: "取文件失败: {0}", share_fail: "分享没成: {0}", link_ready: "链接已生成, 再点一次「分享」发出去", link_copied: "链接已复制, 粘贴发给别人就能打开", share_type_blocked: "这个浏览器不让分享 .{0} 文件, 点文件卡上的「下载」, 再从文件夹里发", copied_answer: "回答已复制到剪贴板", attach_fail: "附件没传上: {0}", attach_title: "附件",
     mic_title: "语音输入", kb_title: "切换到文字输入", mic_hold: "按住 说话", mic_release: "松开 发送", mic_cancel_zone: "松开 取消", mic_recog: "识别中…",
     ov_hint: "松开发送, 上滑取消", ov_cancel: "松开手指, 取消发送", ov_left: "还能说 {0} 秒", mic_short: "说话时间太短",
     mic_denied: "麦克风权限被拒了, 去浏览器设置里打开", mic_fail: "语音识别没成: {0}", mic_empty: "没听到话",
@@ -1341,7 +1341,7 @@ const I18N = {
     a_end_stopped: "Stopped", a_end_error: "Error", a_usage: "prompt {0} · generated {1} tokens", s_running: "Running", s_waiting_approval: "Waiting for you", s_waiting_device: "Waiting for your device", s_queued: "Queued…", ph_busy: "The assistant is working; press Stop to interrupt",
     dec_device: "Answered by your device", dev_doing: "This device is doing it…", dev_other: "Waiting for the device that sent the message; if it's gone, use this one:", dev_mine: "Answer from this device", dev_tap_read_clipboard: "Tap to let it read the clipboard:", dev_tap_pick_file: "Pick a file:", dev_tap_pick_photo: "Pick a photo:",
     dev_btn_read_clipboard: "Read clipboard", dev_btn_pick_file: "Choose file", dev_btn_pick_photo: "Choose photo", dev_tap_locate: "Tap to share your position:", dev_btn_locate: "Locate", dev_no_api: "Not supported by this browser", dev_http: "Browsers only expose location, clipboard, sharing and the microphone over https (or this machine's own address); this page was opened over http, so the assistant can't get your location, read the clipboard, share files, or take voice input",
-    dl_download: "Download", dl_share: "Share", dl_preview: "Preview", dl_open: "Open",file_fail: "Could not fetch the file: {0}", share_fail: "Share failed: {0}", share_type_blocked: "This browser won't share .{0} files; use Download on the file card and send it from your files", copied_answer: "Answer copied to the clipboard", attach_fail: "Upload failed: {0}", attach_title: "Attach",
+    dl_download: "Download", dl_share: "Share", dl_preview: "Preview", dl_open: "Open",file_fail: "Could not fetch the file: {0}", share_fail: "Share failed: {0}", link_ready: "Link is ready; tap Share again to send it", link_copied: "Link copied; anyone you send it to can open it", share_type_blocked: "This browser won't share .{0} files; use Download on the file card and send it from your files", copied_answer: "Answer copied to the clipboard", attach_fail: "Upload failed: {0}", attach_title: "Attach",
     mic_title: "Voice input", kb_title: "Switch to keyboard", mic_hold: "Hold to talk", mic_release: "Release to send", mic_cancel_zone: "Release to cancel", mic_recog: "Recognizing…",
     ov_hint: "Release to send, slide up to cancel", ov_cancel: "Release to cancel", ov_left: "{0} s left", mic_short: "Too short",
     mic_denied: "Microphone access was denied; allow it in the browser settings", mic_fail: "Speech recognition failed: {0}", mic_empty: "Didn't hear anything",
@@ -2294,7 +2294,7 @@ inputEl.onfocus = () => { if (isApp()) devicePos(); };   /* 预热定位: 手机
    位置不再随消息预附: 定位是 locate 工具(wait=true, 这台设备自动做), 服务端把结果记进会话, 之后的事实行带"上次定位", 模型不用反复调。
    模型调设备工具 → 一条 device 事件: wait=true 的(定位/剪贴板/选文件)这台设备自动做、做不了(iOS 要手势)就出按钮, 结果 POST /device 回去;
    wait=false 的(分享/打开/导航/拨打/复制/开 app)是交出去的动作, 卡上一个按钮, 用户点了才执行(浏览器要手势); 怎么拼地图/app 链接按平台在这里定(mapUrl / APPS), 模型只给"去哪""开什么"。
-   出: 只有模型调了 share(path) 才出文件卡(下载 / 预览; 分享按钮就是动作本身); 页面不扫工作区、不给每条回答加按钮 —— 交不交、交什么是模型按情形定的。
+   出: 模型调了 share(path) 或在回答里写出工作区路径(files 事件)才出文件卡(下载 / 分享 / 预览); 页面不扫工作区、不给每条回答加按钮 —— 交不交、交什么是模型按情形定的。
    这些 API 浏览器只在 https 或本机地址下给: http 打开时 isSecureContext=false, 输入框上方提示一行。 */
 const clientId = lsGet("ds4.asst.client", null) || (() => { const id = Math.random().toString(36).slice(2, 12) + Date.now().toString(36); lsSet("ds4.asst.client", id); return id; })();
 const secure = !!window.isSecureContext;
@@ -2548,25 +2548,42 @@ function shareable(f) {
   if (TEXT_EXT.test(f.name)) return new File([f], f.name.replace(/\.[^.]+$/, "") + ".txt", { type: "text/plain" });
   throw new Error(t("share_type_blocked", f.name.split(".").pop()));
 }
+function filePrep(s, p) {   /* s = 记取文件状态的对象(share 调用的条目 / 文件卡的 it.pv[路径]), 流式重建不丢, 只取一次 */
+  if (s.shareFile) return;
+  s.shareFile = fileBlob(p).then(f => (s.shareReady = f));
+  s.shareFile.catch(() => {});   /* 取失败的原因留到点击时再报, 这里不吵 */
+}
+async function shareWith(s, d) {
+  if (s.shareFile) {
+    const f = shareable(s.shareReady || await s.shareFile);   /* 一般早就取好了, 不 await; 没取好才等(此时 Safari 可能因手势过期拒, 再点一次即可) */
+    if (navigator.canShare && !navigator.canShare({ files: [f] })) throw new Error(t("share_type_blocked", f.name.split(".").pop()));
+    d.files = [f];
+  }
+  await navigator.share(d);
+}
+/* 网页分享的是链接不是文件(10-18 用户: "分享的应该是URL不是文件"): 把 .html 当文件发进微信, 对方点开是一坨源码或打不开。
+   服务端拍一份快照发 /s/<口令>/<文件名>(asst_share.c: 不要登录、不过期), 这里拼上页面自己的地址交给系统分享 ——
+   经穿透打开时就是公网地址, 收到的人直接能开; 在 localhost 打开时拼出来的也是 localhost, 发给别人打不开。
+   链接要等服务端拍完快照才有, 不在画卡时就要(每张网页卡都拍一份没人要的快照); 点了再要, Chrome 手势有 5 秒宽限能直接弹面板,
+   Safari 手势当场过期会拒(NotAllowedError) —— 链接已经存在条目上了, 提示再点一次, 第二次同步弹出。没有分享面板的浏览器(电脑上的 Firefox)改成复制链接。 */
+const isPage = p => /\.html?$/i.test(p || "");
+const canSharePage = () => secure && !!(navigator.share || (navigator.clipboard && navigator.clipboard.writeText));
+async function sharePage(s, p, d) {
+  const fresh = !s.link;
+  if (fresh) { const r = await aFetch("share_link", { path: p }); if (r.error) throw new Error(r.error); s.link = new URL(r.url, location.origin).href; }
+  if (!navigator.share) { await navigator.clipboard.writeText(s.link); toast(t("link_copied")); return; }
+  try { await navigator.share({ ...d, url: s.link }); }
+  catch (e) { if (fresh && e && e.name === "NotAllowedError") { toast(t("link_ready")); return; } throw e; }
+}
 function sharePrep(it) {
-  if (it.name !== "share" || it.shareFile) return;
-  const p = deliverPath(it) || (argsOf(it) || {}).path; if (!p) return;
-  it.shareFile = fileBlob(p).then(f => (it.shareReady = f));
-  it.shareFile.catch(() => {});   /* 取失败的原因留到点击时再报, 这里不吵 */
+  if (it.name !== "share") return;
+  const p = deliverPath(it) || (argsOf(it) || {}).path; if (p && !isPage(p)) filePrep(it, p);
 }
 async function runAction(it) {   /* 剪贴板 / 分享: 在用户点击的同步段里开始(都要手势) */
-  const a = argsOf(it) || {};
+  const a = argsOf(it) || {}, d = { title: a.title || undefined, text: a.text || undefined }, page = deliverPath(it);
   if (it.name === "copy_text") { await navigator.clipboard.writeText(a.text || ""); toast(t("copied_answer")); }
-  else if (it.name === "share") {
-    const d = { title: a.title || undefined, text: a.text || undefined };
-    sharePrep(it);
-    if (it.shareFile) {
-      const f = shareable(it.shareReady || await it.shareFile);   /* 一般早就取好了, 不 await; 没取好才等(此时 Safari 可能因手势过期拒, 再点一次即可) */
-      if (navigator.canShare && !navigator.canShare({ files: [f] })) throw new Error(t("share_type_blocked", f.name.split(".").pop()));
-      d.files = [f];
-    }
-    await navigator.share(d);
-  }
+  else if (it.name === "share" && isPage(page)) await sharePage(it, page, d);
+  else if (it.name === "share") { sharePrep(it); await shareWith(it, d); }
   else throw new Error(t("dev_no_api"));
 }
 function actionLabel(it) { const a = argsOf(it) || {}; return it.name === "navigate" ? a.query || "" : it.name === "call" ? a.number || "" : it.name === "open_url" ? (a.url || "").replace(/^https?:\/\//, "").slice(0, 60) : it.name === "open_app" ? ((APPS[a.app] || {}).label || a.app || "") + (a.query ? " · " + a.query.slice(0, 30) : "") : it.name === "share" ? (a.path || a.title || (a.text || "").slice(0, 40)) : (a.text || "").slice(0, 40); }
@@ -2644,10 +2661,19 @@ function fileCard(p, it) {
   const w = node("div", "deliver"); w.appendChild(node("span", "fname", p));
   const btn = (label, fn) => { const b = node("button", "", label); b.onclick = () => fn().catch(e => toast(t("file_fail", e.message || e), true)); w.appendChild(b); };
   btn(t("dl_download"), async () => { const f = await fileBlob(p); const a = document.createElement("a"); a.href = URL.createObjectURL(f); a.download = f.name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 60000); });
-  const kind = /\.(png|jpe?g|gif|webp)$/i.test(p) ? "img" : /\.html?$/i.test(p) ? "page" : /\.(md|txt|csv|json)$/i.test(p) ? "text" : "";
-  if (!kind) return w;
   if (!it.pv) it.pv = {};
   const s = it.pv[p] || (it.pv[p] = { open: false, data: null, loading: false });
+  /* 分享: 回答里写出路径出的卡(files 事件)自己带; share 调用出的卡不带, 上面设备卡那颗就是。
+     10-16 起模型写路径就出卡、不再每个文件都调 share, 卡上没分享键, 网页这类文件就转发不出去了(10-18 用户: "分享功能丢失了")。
+     卡一画出来就先取文件: navigator.share 只认点击同步段, 见 sharePrep 上面那段; 网页不取文件, 分享的是链接(sharePage) */
+  if (it.kind === "files" && (isPage(p) ? canSharePage() : secure && navigator.share)) {
+    if (!isPage(p)) filePrep(s, p);   /* 网页分享链接, 不取文件(见 sharePage) */
+    const sb = node("button", "", t("dl_share")); w.appendChild(sb);
+    const d = { title: p.split("/").pop() };
+    sb.onclick = () => (isPage(p) ? sharePage(s, p, d) : shareWith(s, d)).catch(e => { if (!e || e.name !== "AbortError") toast(t("share_fail", e && e.message ? e.message : e), true); });
+  }
+  const kind = /\.(png|jpe?g|gif|webp)$/i.test(p) ? "img" : /\.html?$/i.test(p) ? "page" : /\.(md|txt|csv|json)$/i.test(p) ? "text" : "";
+  if (!kind) return w;
   const b = node("button", "pvbtn", t("dl_preview")); w.appendChild(b);
   /* 网页(docs/assistant_page.md): 不走 /api/assistant/file(同源, 那里 html 永远是纯文本), 先 POST preview 要一个 /p/<口令>/ 地址,
      服务端响应头 CSP sandbox 把它放进不透明源; iframe 再带同样的 sandbox 属性(双保险)。口令 60 分钟过期, 所以每次展开都重新要, 不缓存。
@@ -2678,7 +2704,7 @@ function fileCard(p, it) {
     s.loading = false; s.paint();
   };
   paint();
-  return w;   /* 分享按钮不在这里: share 这个动作本身在上面的设备卡上(deviceBox), 点了开系统分享面板 */
+  return w;
 }
 function devNote() { const n = $("dev-note"); n.textContent = t("dev_http"); n.classList.toggle("on", isApp() && !secure); }
 devNote();

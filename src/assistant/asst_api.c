@@ -145,6 +145,13 @@ int asst_api(const asst_req *rq, ds4_buf *out, const char **ctype) {
         ds4_buf_puts(out, "{\"url\":"); ds4_json_escape(out, url); ds4_buf_printf(out, ",\"ttl_s\":%ld}", ASST_PV_TTL_S);
         return 200;
     }
+    if (!strcmp(r, "share_link")) {   /* 网页卡的分享 {path} → {url}: 拍快照发一个不过期、不要登录的 /s/<口令>/…(asst_share.c); 页面拼上自己的地址交给系统分享 */
+        char *path = NULL; asst_jstr(rq->body, "path", &path);
+        char url[ASST_PATH + 64]; const bool ok = asst_share_issue(path, url, sizeof url, err, sizeof err); free(path);
+        if (!ok) return jerr(out, 400, err);
+        ds4_buf_puts(out, "{\"url\":"); ds4_json_escape(out, url); ds4_buf_putc(out, '}');
+        return 200;
+    }
     if (!strcmp(r, "presence")) {   /* 页面可见性心跳 {client, visible, endpoint}: 正看着页面的那台设备的推送先压着(asst_notify.c / asst_push.c) */
         char *client = NULL, *endpoint = NULL; bool vis = false; asst_jstr(rq->body, "client", &client); asst_jbool(rq->body, "visible", &vis); asst_jstr(rq->body, "endpoint", &endpoint);
         asst_presence_set(client ? client : "", vis, endpoint); free(client); free(endpoint);

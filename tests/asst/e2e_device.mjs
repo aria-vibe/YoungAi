@@ -163,6 +163,12 @@ const vid = path.join(ASST, "workspace", "e2e_share.mp4"); writeFileSync(vid, Bu
 const vshare = await page.evaluate(async () => { try { await navigator.share({ files: [shareable(await fileBlob("e2e_share.mp4"))] }); return window.__shares.at(-1).files[0]; } catch (e) { return { error: e.name + ": " + e.message }; } });
 rmSync(vid, { force: true });
 ok(vshare && vshare.name === "e2e_share.mp4" && vshare.type === "video/mp4" && vshare.size === 21, "mp4 分享贴 video/mp4, 过 Chromium 白名单: " + JSON.stringify(vshare));
+/* 终稿点名出的卡(files 事件)自己带分享键(10-18 用户: 网页文件卡上分享没了); share 出的卡不带, 设备卡那颗就是 */
+const deliverShare = await page.evaluate(() => [...document.querySelectorAll(".deliver")].map(c => [...c.querySelectorAll("button")].some(b => b.textContent === "分享")));
+ok(JSON.stringify(deliverShare) === "[false,true]", "分享键: share 的 .md 卡没有, 终稿点名的 .pdf 卡有: " + JSON.stringify(deliverShare));
+await page.locator(".deliver").nth(1).locator("button", { hasText: "分享" }).click(); await sleep(400);
+const pshare = await page.evaluate(() => window.__shares.at(-1).files[0]);
+ok(pshare && pshare.name === "附近美食报告.pdf" && pshare.type === "application/pdf" && pshare.size === readFileSync(pdf).length, "文件卡分享键交出 pdf, 字节不变: " + JSON.stringify(pshare));
 ok(await page.evaluate(() => Object.keys(FILE_TYPES).length && "avif bmp css csv ehtml flac gif htm html ico jfif jpeg jpg m4a m4v mp3 mp4 mpeg mpg oga ogg ogm ogv opus pdf pja pjpeg png shtm shtml svg svgz text tif tiff txt wav weba webm webp xbm".split(" ").every(e => CHROME_SHARE_EXT.test("a." + e) && FILE_TYPES[e])), "FILE_TYPES 覆盖 Chromium 分享扩展名表的每一项");
 ok(await page.evaluate(() => { const ds = [...document.querySelectorAll("details.think")]; return ds.length > 0 && ds.every(d => !d.open && d.querySelector("summary").textContent === "思考过程"); }), "思考过程边想边展开, 正文出来后自动收起");
 /* 第二条消息: 附件按钮上传 → 事实行带上次定位 + 附件行; 本机有火狐时上次定位后面多一段反查出的地址(没火狐只有坐标), 两种都认 */
@@ -504,7 +510,7 @@ const tasksDir = path.join(ASST, "tasks");
    要的是: 前三样全被挡、后两样能用(后者验 CSP 的 'self' + 显式主机在不透明源里照样认同主机)。"打开"的新标签页同一个响应头照样锁着 ---- */
 {
   const ctx9 = await browser.newContext({ ...devices["iPhone 13"], locale: "zh-CN" });
-  const dir = path.join(ASST, "workspace", "e2e-page");
+  const dir = path.join(ASST, "workspace", "e2e-page"), shareToks = [];
   try {
     mkdirSync(path.join(dir, "img"), { recursive: true });
     writeFileSync(path.join(dir, "app.js"), "window.__app = true;\n");
@@ -553,9 +559,30 @@ fetch("/api/assistant/sessions").then(() => out.push("fetch:open"), () => out.pu
     ok(["ls:blocked", "fetch:blocked", "js:loaded", "img:loaded"].every(x => res3.split(" ").includes(x)), "Host 被改写(CSP 显式主机对不上)时只靠 'self' 资源照样加载: " + res3);
     const miss = await fetch(`http://127.0.0.1:${PORT}${fr.href.replace("index.html", "../top.html")}`);
     ok(miss.status === 404, "同一口令越出目录 → 404");
+    /* 分享(10-18 用户: "分享的应该是URL不是文件"): 终稿点名出的网页卡点分享 → 系统面板收到 /s/<口令>/ 链接、不带文件;
+       没登录的新浏览器打开这个链接照样能看、照样锁着; 之后改了网页, 已发出去的链接内容不变(快照); 再点一次发的是同一个链接 */
+    await p9.evaluate(() => { window.__sh = []; navigator.share = async d => { window.__sh.push({ url: d.url, title: d.title, files: d.files }); };
+      const c = fileCard("e2e-page/index.html", { kind: "files" }); c.id = "sh-e2e"; document.body.appendChild(c); });
+    const sbtns = await p9.evaluate(() => [...document.querySelectorAll("#sh-e2e button")].map(b => b.textContent));
+    ok(sbtns.join() === "下载,分享,预览", "终稿点名的网页卡: 下载 / 分享 / 预览: " + JSON.stringify(sbtns));
+    await p9.locator("#sh-e2e button", { hasText: "分享" }).click();
+    await p9.waitForFunction(() => window.__sh.length > 0, null, { timeout: 8000 });
+    await p9.locator("#sh-e2e button", { hasText: "分享" }).click(); await sleep(300);
+    const sh = await p9.evaluate(() => window.__sh);
+    const shm = /^http:\/\/127\.0\.0\.1:\d+\/s\/([0-9a-f]{32})\/index\.html$/.exec(sh[0].url || "");
+    if (shm) shareToks.push(shm[1]);
+    ok(shm && !sh[0].files && sh[0].title === "index.html" && sh.length === 2 && sh[1].url === sh[0].url, "分享交给系统的是链接 /s/<口令>/index.html, 不带文件; 再点同一个链接: " + JSON.stringify(sh));
+    writeFileSync(path.join(dir, "index.html"), "<p>改过了</p>");
+    const ctxAnon = await browser.newContext(); const anon = await ctxAnon.newPage();
+    await anon.goto(sh[0].url);
+    await anon.waitForFunction(() => document.getElementById("r") && document.getElementById("r").textContent !== "running", null, { timeout: 8000 });
+    const res4 = await anon.evaluate(() => document.getElementById("r").textContent);
+    ok(["ls:blocked", "origin:null", "fetch:blocked", "js:loaded", "img:loaded"].every(x => res4.split(" ").includes(x)), "没登录的浏览器打开链接: 是分享那一刻的网页, 同目录 js 与图都在, 照样锁着: " + res4);
+    await ctxAnon.close();
     if (SHOTS) { mkdirSync(SHOTS, { recursive: true }); await p9.locator("#pv-e2e").scrollIntoViewIfNeeded(); await p9.screenshot({ path: path.join(SHOTS, "page-preview.png") }); }
   } catch (e) { ok(false, "网页预览段抛错: " + e.message.split("\n")[0]); }
   rmSync(dir, { recursive: true, force: true });
+  for (const tk of shareToks) rmSync(path.join(ASST, "shares", tk), { recursive: true, force: true });
   await ctx9.close();
 }
 await browser.close();

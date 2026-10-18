@@ -26,6 +26,17 @@ static int get(const char *url, const char *suffix, const char *host, long now, 
     return code;
 }
 
+/* 分享链接取 url(+ 后缀): 状态码, 可选拷出响应头与正文 */
+static int sget(const char *url, const char *suffix, char *hdr, size_t hn, char *body, size_t bn) {
+    char p[ASST_PATH * 2]; snprintf(p, sizeof p, "%s%s", url, suffix);
+    ds4_buf h = {0}, b = {0};
+    const int code = asst_share_get("GET", p, "h", &h, &b);
+    if (hdr) snprintf(hdr, hn, "%s", h.ptr ? h.ptr : "");
+    if (body) snprintf(body, bn, "%.*s", (int)b.len, b.ptr ? b.ptr : "");
+    ds4_buf_free(&h); ds4_buf_free(&b);
+    return code;
+}
+
 int asst_test_preview(void) {
     const long now = (long)time(NULL);
     wr("site/index.html", "<!doctype html><title>t</title><script src=app.js></script>");
@@ -92,6 +103,32 @@ int asst_test_preview(void) {
     CHECK(asst_file_get("site/index.html", &fb, &ct) == 200 && ct && !strncmp(ct, "text/plain", 10), "/api/assistant/file still serves html as text/plain");
     ds4_buf_free(&fb);
     CHECK(!strcmp(asst_web_ctype("a/b.css"), "text/css; charset=utf-8") && !strcmp(asst_web_ctype("a.d/b"), "application/octet-stream"), "web ctype by extension only");
+
+    /* 分享链接(asst_share.c, 10-18): 快照 + 不过期 + 不要登录 */
+    char su[ASST_PATH + 64], su2[ASST_PATH + 64], body[256];
+    CHECK(asst_share_issue("site/index.html", su, sizeof su, err, sizeof err), "share site/index.html");
+    CHECK(!strncmp(su, "/s/", 3) && strlen(su) == 3 + 32 + strlen("/index.html") && !strcmp(su + 35, "/index.html"), "share url = /s/<32 hex>/index.html");
+    char sb[ASST_PATH + 64]; snprintf(sb, sizeof sb, "%.*s", 36, su);
+    CHECK(sget(su, "", hdr, sizeof hdr, NULL, 0) == 200 && strstr(hdr, "Content-Type: text/html") && strstr(hdr, "sandbox allow-scripts allow-modals;") && strstr(hdr, "connect-src 'none'"), "shared page 200 with the same sandbox headers");
+    CHECK(sget(sb, "app.js", NULL, 0, body, sizeof body) == 200 && !strcmp(body, "document.title='ok'"), "folder copied: sibling js");
+    CHECK(sget(sb, "img/logo.png", NULL, 0, NULL, 0) == 200, "folder copied: subfolder image");
+    CHECK(sget(sb, ".secret.js", NULL, 0, NULL, 0) == 404 && sget(sb, ".src", NULL, 0, NULL, 0) == 404, "dot files neither copied nor served");
+    CHECK(sget(sb, "leak.txt", NULL, 0, NULL, 0) == 404, "symlink out of the folder not copied");
+    CHECK(sget(sb, "../" , NULL, 0, NULL, 0) == 404 && sget(sb, "%2e%2e/%2e%2e/workspace/top.html", NULL, 0, NULL, 0) == 404, ".. out of the snapshot refused");
+    CHECK(asst_share_issue("site/index.html", su2, sizeof su2, err, sizeof err) && !strcmp(su, su2), "same version shared again → same link");
+    wr("site/app.js", "document.title='v2'");
+    CHECK(asst_share_issue("site/index.html", su2, sizeof su2, err, sizeof err) && strcmp(su, su2), "changed file → new link");
+    CHECK(sget(sb, "app.js", NULL, 0, body, sizeof body) == 200 && !strcmp(body, "document.title='ok'"), "old link still shows what was shared");
+    char bad2[ASST_PATH + 64]; snprintf(bad2, sizeof bad2, "%s", su); bad2[3] = bad2[3] == 'a' ? 'b' : 'a';
+    CHECK(sget(bad2, "", NULL, 0, NULL, 0) == 404 && sget("/s/../workspace/", "top.html", NULL, 0, NULL, 0) == 404, "wrong / malformed token → 404");
+    { ds4_buf h = {0}, b = {0}; CHECK(asst_share_get("POST", su, "h", &h, &b) == 405, "share POST → 405"); ds4_buf_free(&h); ds4_buf_free(&b); }
+    wr("pic.png", "PNG2");
+    wr("card.html", "<img src=\"pic.png\"><a href='./notes.md'>n</a><a href=\"https://x.com/a\">x</a><img src=\"inbox/photo.jpg\">");
+    CHECK(asst_share_issue("card.html", su, sizeof su, err, sizeof err), "share workspace-root page");
+    snprintf(sb, sizeof sb, "%.*s", 36, su);
+    CHECK(sget(su, "", NULL, 0, NULL, 0) == 200 && sget(sb, "pic.png", NULL, 0, NULL, 0) == 200 && sget(sb, "notes.md", NULL, 0, NULL, 0) == 200, "root page: itself + files it references by name");
+    CHECK(sget(sb, "top.html", NULL, 0, NULL, 0) == 404 && sget(sb, "inbox/photo.jpg", NULL, 0, NULL, 0) == 404, "root page: other root files and subfolders not copied");
+    CHECK(!asst_share_issue("notes.md", su, sizeof su, err, sizeof err) && !asst_share_issue(".trash/old.html", su, sizeof su, err, sizeof err) && !asst_share_issue("/etc/hosts", su, sizeof su, err, sizeof err), "non-html / .trash / outside refused");
 
     printf("preview: %d passed, %d failed\n", pass, fail);
     return fail;
