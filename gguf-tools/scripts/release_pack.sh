@@ -14,7 +14,7 @@
 #   跑训练: ds4(训练器与判决学生都是它) + anchor_metrics(wt2 门的五指标)
 #           + 保持料 hold.jsonl + 判决料 wt2.ids + 当前底座的 FP 教师锚 teacher_g7_wt2_n512_<底座>.bin(265 MB: 要 HF 出厂权重才能出, 拿包的人出不了)
 # 二进制是在本机编的, 只能发给同平台机器: spark 上打的(linux-aarch64, CUDA 架构 = GB10)给 DGX Spark 用; Mac 上打的(darwin-arm64, Metal)给
-# Apple Silicon 用 —— Mac 包多带 metal/*.metal(着色器源, 引擎运行时按相对路径拼接加载), 且★Mac 上从没跑过真模型★(要 ≥128 GB 统一内存的机器, 手头只有 16 GB)。
+# Apple Silicon 用 —— Mac 包多带 metal/*.metal(着色器源, 引擎运行时按相对路径拼接加载), 整模型要 ≥128 GB 统一内存: 贡献者在 128 GB M5 Max 上跑过(#3, 2026-10-19), 我们手头的 Mac 只有 16 GB, 包只验到"页面起得来"。
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"; cd "$ROOT"
 OUT="${1:-$ROOT/dist}"
