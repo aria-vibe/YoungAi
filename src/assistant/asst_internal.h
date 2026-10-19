@@ -238,8 +238,10 @@ bool asst_skill_name_ok(const char *name);
 int asst_skill_count(void);
 bool asst_skill_build_tool(const asst_tctx *c, ds4_buf *b);   /* use_skill 的 schema: 描述里列已装技能(名字: 描述), name 枚举; 一个没装 → false(工具表里没这行) */
 char *asst_skill_load(const char *name);                       /* use_skill 的执行: 文件夹路径 + 文件表 + 正文(malloc) */
-void asst_skills_json(ds4_buf *b);                             /* 页面: {root, skills:[{name, description, md, files:[{path,size}]}]} */
-bool asst_skill_op(const char *body, char *err, size_t errn);  /* 页面: {op: save|delete, name, md}; save 先过 asst_skill_check */
+void asst_skills_json(ds4_buf *b);                             /* 页面: {root, skills:[{name, enabled, description, md, files:[{path,size}]}]} */
+bool asst_skill_op(const char *body, char *err, size_t errn);  /* 页面: {op: save|delete, name, md} / {op: enable, name, on}; save 先过 asst_skill_check */
+bool asst_skill_enabled(const char *name);                     /* 装着且开着(文件夹里没有 .disabled); 关掉的不进 use_skill 工具表、点名也拒, 它专属的工具(market_data 等)一并消失 */
+bool asst_skill_set_enabled(const char *name, bool on);
 bool asst_skill_check(const char *text, char *why, size_t n); /* ★技能不许带脚本★: 围栏代码块 / #! / <script> / 命令行 / 行内代码里的命令或脚本文件名 → false + 第几行什么 */
 char *asst_skill_put_file(const char *name, const char *rel, const char *data, size_t n);   /* 页面上传随附文件; NULL = 成功, 否则原因(malloc) */
 int asst_skills_seed(const char *src_root, char *msg, size_t msgn);   /* 仓库自带技能(src_root/<名>/)默认装上, 账本 skills.seeded 管升级/删除(skill_seed.c); 返回装/升级了几个 */

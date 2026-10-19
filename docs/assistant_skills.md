@@ -119,6 +119,8 @@ description: 写部门周报用这个: 按部门汇总本周 jira 导出的 csv,
 | 沙盒 | 技能夹永远是只读根 | `read_file` 读得到资料; 里面本来就没有可执行的东西(全部 0600, 没有脚本文件) |
 | 上传随附文件 | 相对路径逐段查: 不许 `..`、不许 `.` 开头、不许绝对路径; 扩展名白名单; md/txt 过脚本语句检查 | §1.1 |
 | 删除 | 整个文件夹挪进 `trash/skills/<名>-<时间>` | 点错了盘上还在(和删会话同路) |
+| 开关 | 列表每行右边一个滑动开关。关 = 文件夹里放空文件 `.disabled`; 关掉的技能不进 `use_skill` 工具表, 模型点名调也回 `error: this skill is turned off by the user` | 想暂时不用又不想删。标记放文件夹里: 删除时跟着进 trash; 点开头的文件不进文件表、不进 §1.2 指纹, 所以关掉不算"改过", 仓库升级照样覆盖正文, 升级完仍是关着 |
+| 专属工具 | 为某个技能专门写的数据源工具跟着它走: `market_data` 归 finance, `lottery_data` 归 lottery(归属表在 `src/assistant/asst_tools.c` 的 `OWNED`)。技能**删了或关了**, 工具表里就没有它, 硬调回 `error: this tool belongs to a skill the user turned off or removed` | 只关技能不关工具, 模型照样能查行情, 开关等于没关。多个技能共用的通用工具(write_document / web_search …)不进归属表, 否则关一个 pptx 连 Word 都写不了。注意删掉自带的 finance, 行情能力也没了, 而且不会自动装回来, 要从仓库 `skills/finance` 重新导入 |
 | 其它控制目录 | 照旧拒(token / policy / approvals / sessions) | 技能是 `~/.ds4/assistant` 下唯一对工具开读的子目录 |
 
 诚实的边界: 技能正文和网页一样是进上下文的文本, 它说什么模型就可能做什么。**装技能 = 信任写它的人**, 和装一个
@@ -146,8 +148,8 @@ tests/asst/e2e_device.mjs     技能页 8 项: 导航第三格、空表、模板
 
 接口:
 ```
-GET  /api/assistant/skills                       → {root, skills:[{name, description, md, files:[{path,size}]}]}
-POST /api/assistant/skills      {op:"save", name, md} | {op:"delete", name}   → 同 GET
+GET  /api/assistant/skills                       → {root, skills:[{name, description, enabled, md, files:[{path,size}]}]}
+POST /api/assistant/skills      {op:"save", name, md} | {op:"delete", name} | {op:"enable", name, on:true|false}   → 同 GET
 POST /api/assistant/skill_file?name=<技能>&path=<相对路径>   原始体 = 文件字节 → {ok:true}
 ```
 

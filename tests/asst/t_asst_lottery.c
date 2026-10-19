@@ -95,9 +95,8 @@ static void test_exec(void) {
     asst_lot_set_fetch(NULL);
     asst_gres g; asst_guard("abcdef123456", "lottery_data", "{\"what\":\"draws\",\"game\":\"ssq\"}", &g);
     CHECK(g.dec == ASST_ALLOW && !strcmp(g.cls, "web") && !strcmp(g.target, "lottery data"), "guard allows as web: %d %s", (int)g.dec, g.cls);
-    char *tj = asst_tools_json(NULL);
-    const bool listed = strstr(tj, "\"name\":\"lottery_data\"") && strstr(tj, "\"enum\":[\"draws\",\"matches\",\"results\"]");
-    CHECK(listed == (asst_browser_kind()[0] != 0), "lottery_data offered iff Firefox is installed");
+    char *tj = asst_tools_json(NULL);   /* 这里的助理根没装 lottery: 专属工具不该出现(装了之后的有无在 test_skill 里验) */
+    CHECK(!strstr(tj, "\"name\":\"lottery_data\""), "no lottery skill → no lottery_data");
     free(tj);
 }
 
@@ -110,6 +109,14 @@ static void test_skill(const char *base) {
     CHECK(asst_skills_seed("skills", msg, sizeof msg) >= 4 && strstr(msg, "installed lottery") && strstr(msg, "installed research") && !strstr(msg, "skipped"), "repo skills incl. lottery and research pass the script check: %s", msg);
     ds4_buf b = {0}; CHECK(asst_skill_build_tool(NULL, &b) && strstr(b.ptr, "- lottery: ") && strstr(b.ptr, "- research: 科研、学术、论文相关的事用这个"), "use_skill lists lottery and research"); ds4_buf_free(&b);
     char *body = asst_skill_load("lottery"); CHECK(body && strstr(body, "lottery_data"), "lottery body loads"); free(body);
+    char *tj = asst_tools_json(NULL);
+    const bool listed = strstr(tj, "\"name\":\"lottery_data\"") && strstr(tj, "\"enum\":[\"draws\",\"matches\",\"results\"]");
+    CHECK(listed == (asst_browser_kind()[0] != 0), "lottery on → lottery_data offered iff Firefox is installed"); free(tj);
+    CHECK(asst_skill_set_enabled("lottery", false), "switch lottery off");
+    tj = asst_tools_json(NULL); CHECK(!strstr(tj, "\"name\":\"lottery_data\""), "lottery off → lottery_data gone"); free(tj);
+    asst_gres g = {0}; int ok = 1; body = asst_tool_exec("abcdef123456", "lottery_data", "{\"what\":\"draws\",\"game\":\"ssq\"}", &g, &ok);
+    CHECK(!ok && body && strstr(body, "turned off"), "lottery off → calling lottery_data anyway is refused: %s", body ? body : "(null)"); free(body);
+    CHECK(asst_skill_set_enabled("lottery", true), "switch lottery back on");
     body = asst_skill_load("research");
     CHECK(body && strstr(body, "  reference/templates.md (") && strstr(body, "---\n# 科研助理\n") && strstr(body, "api.openalex.org") && strstr(body, "pdftotext") && strstr(body, "Mann-Whitney"), "research body loads with its template listed: %.200s", body ? body : "(null)"); free(body);
     snprintf(asst_root, sizeof asst_root, "%s", saved_root); snprintf(asst_skills, sizeof asst_skills, "%s", saved_sk);

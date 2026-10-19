@@ -14,9 +14,11 @@
  * 而且别处的技能(pptxgenjs/python-pptx 那类)依赖本机根本没有的库, 模型照着跑只会撞墙。 */
 #include "../assistant/asst_internal.h"
 #include <dirent.h>
+#include <errno.h>
 #include <strings.h>
 #include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 char asst_skills[ASST_PATH];
 
@@ -135,6 +137,22 @@ static int scan(char names[][ASST_SKILL_NAME_MAX + 1]) {
 
 int asst_skill_count(void) { char names[SK_MAX][ASST_SKILL_NAME_MAX + 1]; return scan(names); }
 
+/* 开关(10-19 用户: "卡片上多一个开关, 打开则生效, 关闭则不生效"): 关 = 技能文件夹里有个空文件 .disabled。
+ * 为什么放文件夹里不放一份总表: 删技能是整个文件夹挪进 trash, 状态跟着走, 不会留下指向不存在技能的孤儿行;
+ * 点开头的文件 walk 不列、上传口拒收、skill_seed 指纹不算 —— 所以关掉不算"用户改过", 仓库升级照样能覆盖正文, 而开关状态保留。
+ * 关掉的技能: 工具表里不列(模型根本不知道有它), use_skill 点名也拒; 页面照常显示、照常能改。 */
+static void flag_path(char *p, size_t n, const char *name) { snprintf(p, n, "%s/%s/.disabled", asst_skills, name); }
+static bool sk_on(const char *name) { char p[ASST_PATH + 112]; flag_path(p, sizeof p, name); struct stat st; return stat(p, &st) != 0; }
+bool asst_skill_enabled(const char *name) {   /* 装着(有 SKILL.md)且开着: 技能专属工具(asst_tools.c 的 skill 列)按它出现/消失 */
+    if (!asst_skill_name_ok(name)) return false;
+    char p[ASST_PATH + 96]; snprintf(p, sizeof p, "%s/%s/SKILL.md", asst_skills, name);
+    struct stat st; return !stat(p, &st) && S_ISREG(st.st_mode) && sk_on(name);
+}
+bool asst_skill_set_enabled(const char *name, bool on) {
+    char p[ASST_PATH + 112]; flag_path(p, sizeof p, name);
+    return on ? unlink(p) == 0 || errno == ENOENT : asst_write_file(p, "", 0, 0600);
+}
+
 /* 文件夹里的文件表(递归, 跳过 . 开头, 最多 ASST_SKILL_FILES 条): 给模型的文本 "  rel (N bytes)\n", 给页面的 JSON {"path":…,"size":N} */
 static void walk(const char *root, const char *rel, ds4_buf *txt, ds4_buf *js, int *k, int depth) {
     char d[ASST_PATH * 2]; snprintf(d, sizeof d, "%s%s%s", root, rel[0] ? "/" : "", rel);
@@ -157,10 +175,11 @@ static void walk(const char *root, const char *rel, ds4_buf *txt, ds4_buf *js, i
     free(names);
 }
 
-/* use_skill 的 schema: 没装技能这一行就不存在(模型不会去调一个空表); name 是枚举, 模型拼不错 */
+/* use_skill 的 schema: 没装技能(或全关了)这一行就不存在(模型不会去调一个空表); name 是枚举, 模型拼不错 */
 bool asst_skill_build_tool(const asst_tctx *c, ds4_buf *b) {
     (void)c;
-    char names[SK_MAX][ASST_SKILL_NAME_MAX + 1]; const int n = scan(names);
+    char names[SK_MAX][ASST_SKILL_NAME_MAX + 1]; const int all = scan(names);
+    int n = 0; for (int i = 0; i < all; i++) if (sk_on(names[i])) { if (n != i) memcpy(names[n], names[i], sizeof names[0]); n++; }
     if (!n) return false;
     ds4_buf d = {0};
     ds4_buf_puts(&d, "Read the full instructions of one of the skills the user installed; do this first, before any other step, when the task is one a skill covers. "
@@ -183,6 +202,7 @@ char *asst_skill_load(const char *name) {
     if (!asst_skill_name_ok(name)) return strdup("error: no such skill\n");
     size_t len = 0; char *md = read_skill_md(name, &len);
     if (!md) return strdup("error: no such skill\n");
+    if (!sk_on(name)) { free(md); return strdup("error: this skill is turned off by the user\n"); }   /* 工具表里已经不列; 这里防模型凭会话里早先见过的名字硬调 */
     sk_meta m; parse_md(md, &m);
     ds4_buf b = {0};
     ds4_buf_printf(&b, "skill: %s\nfolder: %s/%s (read-only; read these files with read_file using their full paths)\nfiles:\n", name, asst_skills, name);
@@ -208,6 +228,7 @@ void asst_skills_json(ds4_buf *b) {
     for (int i = 0; i < n; i++) {
         size_t len = 0; char *md = read_skill_md(names[i], &len); sk_meta m; parse_md(md ? md : "", &m);
         ds4_buf_printf(b, "%s{\"name\":\"%s\",\"description\":", i ? "," : "", names[i]); ds4_json_escape(b, m.desc);
+        ds4_buf_printf(b, ",\"enabled\":%s", sk_on(names[i]) ? "true" : "false");
         ds4_buf_puts(b, ",\"md\":"); ds4_json_escape(b, md ? md : "");
         ds4_buf_puts(b, ",\"files\":[");
         char root[ASST_PATH + 96]; snprintf(root, sizeof root, "%s/%s", asst_skills, names[i]);
@@ -218,13 +239,19 @@ void asst_skills_json(ds4_buf *b) {
     ds4_buf_puts(b, "]}");
 }
 
-/* 页面: {op:"save", name, md} 建/改 SKILL.md; {op:"delete", name} 整个文件夹挪进 trash/skills/(不真删, 点错了盘上还在) */
+/* 页面: {op:"save", name, md} 建/改 SKILL.md; {op:"delete", name} 整个文件夹挪进 trash/skills/(不真删, 点错了盘上还在); {op:"enable", name, on} 开关 */
 bool asst_skill_op(const char *body, char *err, size_t errn) {
-    char *op = NULL, *name = NULL, *md = NULL; bool ok = false;
+    char *op = NULL, *name = NULL, *md = NULL; bool ok = false, on = true;
     asst_jstr(body, "op", &op); asst_jstr(body, "name", &name); asst_jstr(body, "md", &md);
     char dir[ASST_PATH + 96];
     char why[256];
     if (!asst_skill_name_ok(name)) snprintf(err, errn, "skill name must be 1-64 lowercase letters, digits or hyphens");
+    else if (op && !strcmp(op, "enable")) {
+        size_t len = 0; char *cur = read_skill_md(name, &len); const bool have = cur != NULL; free(cur);
+        if (!have) snprintf(err, errn, "no such skill");
+        else if (!asst_jbool(body, "on", &on)) snprintf(err, errn, "on must be true or false");
+        else if (!(ok = asst_skill_set_enabled(name, on))) snprintf(err, errn, "cannot change the switch of %s", name);
+    }
     else if (op && !strcmp(op, "save")) {
         if (!md || !md[0]) snprintf(err, errn, "SKILL.md is empty");
         else if (!asst_skill_check(md, why, sizeof why)) snprintf(err, errn, "SKILL.md rejected: %s", why);
@@ -241,7 +268,7 @@ bool asst_skill_op(const char *body, char *err, size_t errn) {
         char to[ASST_PATH + 128]; snprintf(to, sizeof to, "%s/trash/skills/%s-%ld", asst_root, name, (long)time(NULL));
         ok = rename(dir, to) == 0;
         if (!ok) snprintf(err, errn, "no such skill");
-    } else snprintf(err, errn, "op must be save or delete");
+    } else snprintf(err, errn, "op must be save, delete or enable");
     free(op); free(name); free(md);
     return ok;
 }

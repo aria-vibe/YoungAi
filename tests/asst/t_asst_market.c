@@ -114,9 +114,8 @@ static void test_exec(void) {
     asst_gres g; asst_guard("abcdef123456", "market_data", "{\"what\":\"quote\",\"symbols\":\"600519\"}", &g);
     CHECK(g.dec == ASST_ALLOW && !strcmp(g.cls, "web") && !strcmp(g.target, "market data"), "guard allows a quote as web: %d %s", (int)g.dec, g.cls);
     asst_guard("abcdef123456", "market_data", "{\"what\":\"news\",\"symbols\":\"4111111111111111\"}", &g); CHECK(g.dec == ASST_DENY, "guard refuses a card-number-like keyword");
-    char *tj = asst_tools_json(NULL);
-    const bool listed = strstr(tj, "\"name\":\"market_data\"") && strstr(tj, "\"enum\":[\"search\",\"quote\",\"history\",\"financials\",\"news\",\"notices\",\"market\"]");
-    CHECK(listed == (asst_browser_kind()[0] != 0), "market_data offered iff Firefox is installed");
+    char *tj = asst_tools_json(NULL);   /* 这里的助理根没装 finance: 专属工具不该出现(装了之后的有无在 test_seed 里验) */
+    CHECK(!strstr(tj, "\"name\":\"market_data\""), "no finance skill → no market_data");
     free(tj);
 }
 
@@ -139,8 +138,16 @@ static void test_seed(const char *base) {
     snprintf(p, sizeof p, "%s/demo/ref/a.md", asst_skills); char *t = rd(p); CHECK(t && !strcmp(t, "ref v1\n"), "reference file copied"); free(t);
     snprintf(p, sizeof p, "%s/bad", asst_skills); struct stat st; CHECK(stat(p, &st) != 0, "refused skill leaves no folder");
     CHECK(asst_skills_seed(src, msg, sizeof msg) == 0, "second start does nothing: %s", msg);
+    /* 开关: 关掉 → 工具表没有 use_skill(只有这一个技能)、点名拒、页面 JSON enabled:false; 关掉不算"用户改过", 仓库新版照样升级且升级后仍关着 */
+    CHECK(asst_skill_op("{\"op\":\"enable\",\"name\":\"demo\",\"on\":false}", msg, sizeof msg) && !asst_skill_enabled("demo"), "switch demo off: %s", msg);
+    ds4_buf sb = {0}; CHECK(!asst_skill_build_tool(NULL, &sb), "off skill not offered to the model: %s", sb.ptr ? sb.ptr : ""); ds4_buf_free(&sb);
+    char *off = asst_skill_load("demo"); CHECK(off && strstr(off, "turned off"), "use_skill refuses an off skill: %s", off ? off : "(null)"); free(off);
+    asst_skills_json(&sb); CHECK(sb.ptr && strstr(sb.ptr, "\"name\":\"demo\"") && strstr(sb.ptr, "\"enabled\":false"), "page sees enabled:false"); ds4_buf_free(&sb);
+    CHECK(!asst_skill_op("{\"op\":\"enable\",\"name\":\"nope\",\"on\":true}", msg, sizeof msg) && strstr(msg, "no such skill"), "switch on unknown skill rejected: %s", msg);
     snprintf(p, sizeof p, "%s/demo/SKILL.md", src); put(p, "---\nname: demo\ndescription: v2\n---\n# Demo\n");
     CHECK(asst_skills_seed(src, msg, sizeof msg) == 1 && strstr(msg, "updated demo"), "untouched copy follows the repo: %s", msg);
+    CHECK(!asst_skill_enabled("demo"), "upgrade keeps the skill switched off");
+    CHECK(asst_skill_op("{\"op\":\"enable\",\"name\":\"demo\",\"on\":true}", msg, sizeof msg) && asst_skill_build_tool(NULL, &sb) && strstr(sb.ptr, "- demo: v2"), "switch back on: listed again"); ds4_buf_free(&sb);
     snprintf(p, sizeof p, "%s/demo/SKILL.md", asst_skills); t = rd(p); CHECK(t && strstr(t, "v2"), "v2 on disk"); free(t);
     put(p, "---\nname: demo\ndescription: mine\n---\n# Demo\n");   /* 用户在技能页改过 */
     snprintf(p, sizeof p, "%s/demo/SKILL.md", src); put(p, "---\nname: demo\ndescription: v3\n---\n# Demo\n");
@@ -153,6 +160,15 @@ static void test_seed(const char *base) {
     CHECK(asst_skills_seed("skills", msg, sizeof msg) >= 2 && strstr(msg, "installed finance") && strstr(msg, "installed pptx") && !strstr(msg, "skipped"), "repo skills pass the script check: %s", msg);
     ds4_buf b = {0}; CHECK(asst_skill_build_tool(NULL, &b) && strstr(b.ptr, "- finance: 股票、指数、基金"), "use_skill lists finance"); ds4_buf_free(&b);
     char *body = asst_skill_load("finance"); CHECK(body && strstr(body, "market_data") && strstr(body, "## 按问题选查法"), "finance body loads"); free(body);
+    /* 专属工具跟着技能开关走: 装着且开着 → 有火狐就列; 关掉 → 工具表没有、硬调拒(不出网); 再开 → 回来 */
+    const bool ff = asst_browser_kind()[0] != 0;
+    char *tj = asst_tools_json(NULL); CHECK((strstr(tj, "\"name\":\"market_data\"") != NULL) == ff, "finance on → market_data offered iff Firefox"); free(tj);
+    CHECK(asst_skill_set_enabled("finance", false), "switch finance off");
+    tj = asst_tools_json(NULL); CHECK(!strstr(tj, "\"name\":\"market_data\""), "finance off → market_data gone from the tool list"); free(tj);
+    asst_gres g = {0}; int ok = 1; body = asst_tool_exec("abcdef123456", "market_data", "{\"what\":\"market\"}", &g, &ok);
+    CHECK(!ok && body && strstr(body, "turned off"), "finance off → calling market_data anyway is refused: %s", body ? body : "(null)"); free(body);
+    CHECK(asst_skill_set_enabled("finance", true), "switch finance back on");
+    tj = asst_tools_json(NULL); CHECK((strstr(tj, "\"name\":\"market_data\"") != NULL) == ff, "finance on again → market_data back"); free(tj);
     snprintf(asst_root, sizeof asst_root, "%s", saved_root); snprintf(asst_skills, sizeof asst_skills, "%s", saved_sk);
 }
 

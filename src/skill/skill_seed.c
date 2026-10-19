@@ -111,7 +111,8 @@ int asst_skills_seed(const char *src_root, char *msg, size_t msgn) {
             char t[ASST_PATH + 32]; snprintf(t, sizeof t, "%s/trash", asst_root); mkdir(t, 0700);
             snprintf(t, sizeof t, "%s/trash/skills", asst_root); mkdir(t, 0700);
             char to[ASST_PATH + 128]; snprintf(to, sizeof to, "%s/trash/skills/%s-%ld-replaced", asst_root, name, (long)time(NULL));   /* 后缀: 与页面删除的 <名>-<秒> 同一秒撞名时 rename 会失败 */
-            if (!rename(dst, to) && install(src, name, fs, &log)) { ds4_buf_printf(&log, "updated %s; ", name); done++; record = true; }
+            const bool on = asst_skill_enabled(name);   /* 开关(.disabled)不进指纹, 但旧文件夹整个挪走了: 用户关掉的, 新版装好照样关着 */
+            if (!rename(dst, to) && install(src, name, fs, &log)) { if (!on) asst_skill_set_enabled(name, false); ds4_buf_printf(&log, "updated %s; ", name); done++; record = true; }
         }
         if (record) { ds4_buf nl = {0}; ledger_set(&nl, led, name, hs); free(led); led = ds4_buf_take(&nl); dirty = true; }
     }

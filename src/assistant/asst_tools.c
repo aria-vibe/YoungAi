@@ -29,6 +29,16 @@ typedef struct {
     bool reach;                  /* 能进用户别的 app/账号(系统分享面板、打开 app、云手机): 表里有一个, system 才带"设备与账号"记忆(asst_tools_reach) */
 } asst_tool;
 
+/* 技能专属工具: 所属技能装着且开着才有(10-19 用户: "skill 关闭了, 但 function 还能 call")。不挂的话技能页关掉 finance,
+ * 模型照样从工具表看到 market_data 去查行情, 开关等于没关。只收为某个技能专门写的数据源; write_document / web_search 这类
+ * 多个技能共用的通用工具不许进来 —— 挂上去关一个 pptx 技能就连 Word 都写不了。归属写在代码里不写在 SKILL.md: 工具是代码,
+ * 技能是用户能导入的文件, 让文件自己声明"我拥有 market_data", 别处导进来的同名声明就能抢走它。 */
+static const struct { const char *tool, *skill; } OWNED[] = { { "market_data", "finance" }, { "lottery_data", "lottery" } };
+static bool owner_off(const char *tool) {   /* 有所属技能且那个技能删了或关了 */
+    for (size_t i = 0; i < sizeof OWNED / sizeof OWNED[0]; i++) if (!strcmp(tool, OWNED[i].tool)) return !asst_skill_enabled(OWNED[i].skill);
+    return false;
+}
+
 static bool has_item(const char *list, const char *item) {   /* 逗号表整词匹配: share 不匹配 share_files */
     const size_t n = strlen(item);
     for (const char *p = list; p && (p = strstr(p, item)); p += n) if ((p == list || p[-1] == ',') && (p[n] == 0 || p[n] == ',')) return true;
@@ -179,6 +189,7 @@ static bool offered(const asst_tool *t, const asst_tctx *ctx, bool phone_on, ds4
     if (t->cap && !has_item(ctx->caps ? ctx->caps : "", t->cap)) return false;
     if (t->need_browser && !asst_browser_kind()[0]) return false;
     if (t->site == PHONE && !phone_on) return false;   /* 危险模式开着且手机 ready 才有(本机状态, 不是页面报的能力: 页面报什么都不该让模型碰到手机) */
+    if (owner_off(t->name)) return false;   /* 所属技能删了或关了(OWNED) */
     if (t->schema) { if (b) ds4_buf_puts(b, t->schema); return true; }
     ds4_buf tmp = {0}; const bool ok = t->build(ctx, b ? b : &tmp); ds4_buf_free(&tmp);
     return ok;
@@ -313,6 +324,7 @@ char *asst_tool_exec(const char *sid, const char *tool, const char *args, const 
     *ok = 0;
     const asst_tool *t = find(tool);
     if (!t || t->site == DEV) return strdup("error: unknown tool\n");
+    if (owner_off(t->name)) return strdup("error: this tool belongs to a skill the user turned off or removed\n");   /* 工具表里已经没有; 防模型凭会话早先见过的名字硬调 */
     if (!strcmp(tool, "remember")) { char *k = arg(args, "kind"), *s = arg(args, "text"); char *r = asst_remember(sid, k, s); free(k); free(s); *ok = strncmp(r, "error", 5) != 0; return r; }
     if (!strcmp(tool, "forget")) { char *s = arg(args, "text"); char *r = asst_forget(s); free(s); *ok = 1; return r; }
     if (!strcmp(tool, "use_skill")) { char *s = arg(args, "name"); char *r = asst_skill_load(s ? s : ""); free(s); *ok = strncmp(r, "error", 5) != 0; return r; }

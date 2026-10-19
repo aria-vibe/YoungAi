@@ -223,6 +223,15 @@ const skDir = path.join(ASST, "skills", "e2e-weekly-report");
   /* 工具表里的 use_skill 行(模型那头)由 ds4_asst_test 的 test_skills 验; 这里只验页面 ↔ 接口 ↔ 盘 */
   const tj = await p4.evaluate(async () => (await aFetch("skills")).skills.map(s => s.name + ": " + s.description).join("|"));
   ok(tj.split("|").includes("e2e-weekly-report: 写部门周报用这个"), "GET skills 回名字与 frontmatter 描述: " + tj);
+  /* 开关(10-19): 行上的滑动开关, 关 → 盘上 .disabled + 行变淡 + 接口 enabled:false; 点开关不改选中; 再点 → 标记没了 */
+  const skRow = p4.locator("#sk-list .row", { has: p4.locator("b", { hasText: "e2e-weekly-report" }) });
+  ok(await skRow.locator(".switch input").isChecked(), "新建的技能开关默认开着");
+  await skRow.locator(".switch .knob").click(); await sleep(300);
+  const en = await p4.evaluate(async () => (await aFetch("skills")).skills.find(s => s.name === "e2e-weekly-report").enabled);
+  ok(existsSync(path.join(skDir, ".disabled")) && en === false && await skRow.evaluate(r => r.classList.contains("off")) && !(await skRow.locator(".switch input").isChecked()), "点开关 → .disabled 落盘, enabled:false, 行变淡");
+  ok(await skRow.evaluate(r => r.classList.contains("sel")), "点开关不改选中");
+  await skRow.locator(".switch .knob").click(); await sleep(300);
+  ok(!existsSync(path.join(skDir, ".disabled")) && await skRow.locator(".switch input").isChecked(), "再点 → .disabled 删掉, 开关回到开");
   await p4.locator("#sk-del").click(); await p4.locator("#ask-yes").click(); await sleep(300);
   ok(!existsSync(skDir) && readdirSync(path.join(ASST, "trash", "skills")).some(d => d.startsWith("e2e-weekly-report-")), "删除 → 文件夹挪进 trash/skills/");
   ok(await p4.locator("#sk-list .row b", { hasText: "e2e-weekly-report" }).count() === 0 && await p4.locator("#sk-edit").isHidden(), "删完列表里没了, 编辑卡收起");
