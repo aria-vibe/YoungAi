@@ -44,6 +44,7 @@ static void probe(void) {
 }
 
 const char *asst_toolbox_desc(void) { pthread_once(&once, probe); return desc; }
+bool asst_toolbox_has(const char *prog) { pthread_once(&once, probe); for (size_t i = 0; i < NTB; i++) if (!strcmp(TOOLBOX[i].prog, prog)) return have[i]; return false; }
 
 void asst_toolbox_json(ds4_buf *b) {
     pthread_once(&once, probe);

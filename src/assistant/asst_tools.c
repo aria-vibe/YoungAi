@@ -19,7 +19,7 @@
 #define N(n, d) "\"" n "\":{\"type\":\"number\",\"description\":\"" d "\"}"
 #define B(n, d) "\"" n "\":{\"type\":\"boolean\",\"description\":\"" d "\"}"
 
-enum { MEM, SBX, NET, DEV, PHONE, TASK, PUSH };   /* TASK = 主进程改 tasks/<id>.json(asst_task.c), 只在任务会话里进工具表; PUSH = 推送到用户设备(asst_notify.c) */
+enum { MEM, SBX, NET, DEV, PHONE, TASK, PUSH, DB };   /* DB = 主进程直连数据库 TCP(tool_db.c; sqlite 在沙盒子进程跑 sqlite3) */   /* TASK = 主进程改 tasks/<id>.json(asst_task.c), 只在任务会话里进工具表; PUSH = 推送到用户设备(asst_notify.c) */
 typedef struct {
     const char *name, *schema;   /* schema 为 NULL 的行由 build 按上下文拼(run 的工具箱、open_app 的 app 枚举) */
     int site, wait;              /* wait: DEV 工具要不要等设备交回结果 */
@@ -97,6 +97,8 @@ static const asst_tool TOOLS[] = {
     { "forget", TOOL("forget", "Delete remembered lines (of any kind) that contain the given text.", S("text", "Text contained in the lines to delete"), "\"text\""), MEM, 0, NULL, false, NULL, false },
     /* 技能(src/skill/skill.c): 描述里列已装技能的"名字: 一句描述", 正文模型调了才给(渐进披露); 一个都没装这行就不在 */
     { "use_skill", NULL, MEM, 0, NULL, false, asst_skill_build_tool, false },
+    /* 连接器(asst_conn.c): 描述里列开着的连接器与各种库怎么查; 一个没开这行就不在 */
+    { "query_db", NULL, DB, 0, NULL, false, asst_conn_build_tool, false },
     { "read_file", TOOL("read_file", "Read a text file with line numbers (up to 400 lines per call). Relative paths are inside the workspace.", S("path", "File path") "," I("start", "First line to show, 1-based (default 1)") "," I("lines", "How many lines (default and max 400)"), "\"path\""), SBX, 0, NULL, false, NULL, false },
     { "list_dir", TOOL("list_dir", "List a directory. Relative paths are inside the workspace; empty = workspace root.", S("path", "Directory path"), ""), SBX, 0, NULL, false, NULL, false },
     { "search_files", TOOL("search_files", "Find lines containing a substring in files under a directory (recursive, skips hidden folders).", S("pattern", "Substring to find") "," S("path", "Directory or file to search (default workspace)") "," S("glob", "Only file names matching this pattern, e.g. *.md"), "\"pattern\""), SBX, 0, NULL, false, NULL, false },
@@ -333,6 +335,7 @@ char *asst_tool_exec(const char *sid, const char *tool, const char *args, const 
     if (asst_plan_tool(tool)) return asst_plan_tool_exec(sid, tool, args, ok);
     if (t->site == TASK) return asst_task_tool_exec(sid, tool, args, ok);
     if (t->site == PUSH) return asst_notify_tool_exec(sid, args, ok);
+    if (t->site == DB) return asst_db_exec(sid, args, ok);
     char trash[ASST_PATH + 16]; snprintf(trash, sizeof trash, "%s/.trash", asst_ws);
     if (!strcmp(tool, "fetch_image")) return asst_fetch_exec(args, g, trash, ok);   /* 主进程驱动火狐搜图 + 转码, 落盘在沙盒子进程(tool_fetch.c) */
     if (!strcmp(tool, "market_data")) return asst_market_exec(args, ok);            /* 主进程驱动火狐取接口 JSON, 不落盘(tool_market.c) */

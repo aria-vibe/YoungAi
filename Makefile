@@ -55,7 +55,7 @@ SKILL_OBJS := src/skill/skill.o src/skill/skill_seed.o
 # 推送密码学(src/push/: P-256 / AES-GCM / HKDF / RFC 8291 加密 / VAPID JWT); 纯主机 C, 零依赖; 金标 tests/push/t_push.c
 PUSH_SRCS := $(sort $(wildcard src/push/*.c))
 PUSH_OBJS := $(PUSH_SRCS:.c=.o)
-# 数据库连接器(src/db/: BSON / MongoDB 线协议 / SCRAM-SHA-256 / 只读查询, 方案稿 docs/assistant_connectors.md); 纯主机 C, 零依赖
+# 数据库连接器(src/db/: BSON / MongoDB 线协议 / SCRAM-SHA-256 / 只读查询, 方案稿 docs/assistant_connectors.md); 纯主机 C, 零依赖; 金标 tests/asst/t_asst_db.c
 DB_SRCS := $(sort $(wildcard src/db/*.c))
 DB_OBJS := $(DB_SRCS:.c=.o)
 # 官方产出工具的格式基元(src/office/: zip/deflate/Markdown/docx/xlsx, 方案稿 docs/assistant_office.md); 纯主机 C, 零依赖
@@ -376,8 +376,8 @@ tests/asst/fake/ds4-server: tests/asst/fake_model.c
 asst-e2e: ds4-train tests/asst/fake/ds4-server
 	node tests/asst/e2e_device.mjs
 # 沙盒逃逸单测 + 纯逻辑单测 + 工作台登录单测(不要模型, 秒级; make test 里跑)
-ds4_asst_test: tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o
-	$(CC) $(CFLAGS) -o $@ tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o $(LDLIBS)
+ds4_asst_test: tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c tests/asst/t_asst_db.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o
+	$(CC) $(CFLAGS) -o $@ tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c tests/asst/t_asst_db.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o $(LDLIBS)
 
 
 # Standalone capability modules (self-contained, no engine coupling): z 隐变量

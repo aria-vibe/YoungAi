@@ -103,6 +103,10 @@ static void guard_decide(const char *sid, const char *tool, const char *args, as
     memset(r, 0, sizeof *r);
     if (!strcmp(tool, "remember") || !strcmp(tool, "forget")) { snprintf(r->cls, sizeof r->cls, "mem"); set(r, ASST_ALLOW, "memory"); return; }
     if (!strcmp(tool, "use_skill")) { snprintf(r->cls, sizeof r->cls, "skill"); set(r, ASST_ALLOW, "installed skill"); return; }   /* 主进程读 skills/<名>/SKILL.md, 不进沙盒; 用户自己装的, 不置污点 */
+    if (!strcmp(tool, "query_db")) {   /* 用户自己登记的库, 只读(代码保证): 放行不审批; 结果是用户的私有数据, 执行后置 taint_priv(asst_guard_mark), 之后上网只能"仅这次" */
+        snprintf(r->cls, sizeof r->cls, "db"); char *cn = NULL; asst_jstr(args, "connector", &cn); snprintf(r->target, sizeof r->target, "%s", cn ? cn : "db"); free(cn);
+        set(r, ASST_ALLOW, "the user's own database, read-only"); return;
+    }
     if (!strcmp(tool, "nearby")) { snprintf(r->cls, sizeof r->cls, "geo"); set(r, ASST_ALLOW, "places near the user"); return; }   /* 出门的只有查询词与坐标, key 由 C 填; 不置污点 */
     if (asst_task_tool(tool) || asst_plan_tool(tool)) { snprintf(r->cls, sizeof r->cls, "task"); set(r, ASST_ALLOW, "task schedule"); return; }   /* 只改自己这个任务的下次时间/状态, 不碰文件系统; 不进沙盒 */
     if (asst_notify_tool(tool)) {   /* 推到用户自己的设备: 出门的只有标题与正文(加密后经推送服务), 像密文的不推 */
@@ -188,6 +192,7 @@ static void guard_decide(const char *sid, const char *tool, const char *args, as
 
 void asst_guard_mark(const char *sid, const char *cls, const char *path) {
     if (!strcmp(cls, "web") || !strcmp(cls, "phone") || !strcmp(cls, "pay")) { if (!meta_flag(sid, "taint_web")) asst_meta_set(sid, "taint_web", "true"); }   /* 手机屏幕上的字和网页一样是别人写的 */
+    else if (!strcmp(cls, "db")) { if (!meta_flag(sid, "taint_priv")) asst_meta_set(sid, "taint_priv", "true"); }   /* 库里的是用户自己的数据, 和读工作区外的私有文件同级 */
     else if ((!strcmp(cls, "read") || !strcmp(cls, "exec")) && path && !asst_under(path, asst_ws) && !(asst_skills[0] && asst_under(path, asst_skills))) { if (!meta_flag(sid, "taint_priv")) asst_meta_set(sid, "taint_priv", "true"); }   /* 技能是用户装的, 读它不算读私有文件 */
 }
 

@@ -114,6 +114,14 @@ int asst_api(const asst_req *rq, ds4_buf *out, const char **ctype) {
         if (post) { if (!asst_skill_op(rq->body, err, sizeof err)) return jerr(out, 400, err); }
         asst_skills_json(out); return 200;
     }
+    if (!strcmp(r, "connectors")) {   /* 连接器(asst_conn.c): GET 种类表 + 列表(没有密码); POST {op:save|delete|enable} → 同 GET; {op:test} → {ok,line,ms}/{error} */
+        if (post) {
+            char *op = NULL; asst_jstr(rq->body, "op", &op); const bool test = op && !strcmp(op, "test"); free(op);
+            if (test) return asst_conn_test(rq->body, out) ? 200 : 400;
+            if (!asst_conn_op(rq->body, err, sizeof err)) return jerr(out, 400, err);
+        }
+        asst_conns_json(out); return 200;
+    }
     if (!strcmp(r, "push")) {   /* 通知: GET {key, devices}; POST {op: subscribe|unsubscribe|test, …}(asst_push.c) */
         if (post) { if (!asst_push_op(rq->body, err, sizeof err)) return jerr(out, 400, err); }
         asst_push_json(out); return 200;

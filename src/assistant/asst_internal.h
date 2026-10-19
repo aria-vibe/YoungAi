@@ -245,6 +245,20 @@ bool asst_skill_set_enabled(const char *name, bool on);
 bool asst_skill_check(const char *text, char *why, size_t n); /* ★技能不许带脚本★: 围栏代码块 / #! / <script> / 命令行 / 行内代码里的命令或脚本文件名 → false + 第几行什么 */
 char *asst_skill_put_file(const char *name, const char *rel, const char *data, size_t n);   /* 页面上传随附文件; NULL = 成功, 否则原因(malloc) */
 int asst_skills_seed(const char *src_root, char *msg, size_t msgn);   /* 仓库自带技能(src_root/<名>/)默认装上, 账本 skills.seeded 管升级/删除(skill_seed.c); 返回装/升级了几个 */
+/* ---------------- 连接器(asst_conn.c + tools/tool_db.c, 方案稿 docs/assistant_connectors.md): connectors/<名>.json + secrets/conn_<名>; 工具 query_db 只读 ---------------- */
+#define ASST_CONN_NAME_MAX 24   /* 密码的 secret 名是 conn_<名>, secrets 名字上限 32 */
+typedef struct { char name[ASST_CONN_NAME_MAX + 1], kind[16], host[256], db[128], user[128], auth_db[64], path[ASST_PATH]; int port; bool enabled; long updated; } asst_conn;
+bool asst_conn_name_ok(const char *name);
+bool asst_conn_load(const char *name, asst_conn *c);          /* 读 json; 不存在或种类不认 false */
+bool asst_conn_enabled(const char *name);
+bool asst_conn_password(const char *name, char *out, size_t n);   /* secrets/conn_<名>; 调用方用完清零 */
+bool asst_conn_build_tool(const asst_tctx *c, ds4_buf *b);   /* query_db 的 schema: 开着的连接器枚举 + 用到的种类的 what 并集; 一个没开 → false */
+void asst_conns_json(ds4_buf *b);                              /* 页面: {kinds:[{kind,label,port,fields}], connectors:[{name,kind,host,port,db,user,auth_db,path,has_password,enabled,updated}]}(没有 password) */
+bool asst_conn_op(const char *body, char *err, size_t errn);   /* {op: save|enable|delete, …} */
+bool asst_conn_test(const char *body, ds4_buf *out);           /* 测试连接 → {ok,line,ms} / {error} */
+char *asst_db_exec(const char *sid, const char *args, int *ok);   /* query_db: 主进程直连 TCP(sqlite 在沙盒子进程跑 sqlite3); 头 16 KB 给模型, 全量落工作区 db/ */
+bool asst_sqlite_probe(const char *path, char *line, size_t n, char *err, size_t errn);   /* 沙盒里 sqlite3 -readonly 开文件: 版本 + 表数 */
+bool asst_toolbox_has(const char *prog);   /* sbx_toolbox.c: 沙盒 PATH 里有没有这个程序 */
 char *asst_tools_json(const asst_tctx *ctx);   /* OpenAI tools 数组(malloc): 注册表里 avail 为真的行 */
 bool asst_tools_reach(const asst_tctx *ctx);   /* 工具表里有没有能进用户别的 app/账号的工具(share / open_app / 云手机): 决定 system 带不带"设备与账号"记忆 */
 char *asst_tool_args_error(const asst_tctx *ctx, const char *tool, const char *args);   /* 参数不合这一轮的 schema → "error: invalid arguments …"(malloc); 合规 NULL */
