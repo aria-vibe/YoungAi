@@ -42,16 +42,15 @@ pipeline_tag: text-generation
 
 ![YoungAi Studio: the assistant hunting for the cheapest DGX Spark](docs/img/studio-agent-en.png)
 
-The model behind it is DeepSeek V4.1 Flash, the 1017 release (510 GB as published), shrunk to 113.6 GB and running on a single 128 GB
-DGX Spark with a 1M-token context. Open source, MIT. Plain C99 + CUDA (Metal on Apple Silicon), one Makefile, no
-third-party libraries linked.
+The model behind it is DeepSeek V4.1 Flash, the 1017 release (510 GB as published), shrunk to 113.6 GB and running on one
+128 GB machine, a DGX Spark or an Apple Silicon Mac, with a 1M-token context. Open source, MIT. Plain C99 + CUDA on the
+Spark, Metal on the Mac, one Makefile, no third-party libraries linked.
 
 ## The model
 
 | | |
 |---|---|
 | Size | 510 GB as released → 113.6 GB base (8 weights vector-quantized together, ~1.6 bit/weight, no training data used) |
-| Speed (DGX Spark) | reads 999 tokens/s; writes 45.7 tokens/s with speculative decoding, 30.1 without (a real 7.7k-token request, coding sidecar on) |
 | Context | 1M tokens; the full KV cache is 0.89 GB |
 | Domain sidecars | finance / code / law / medicine / science, ~40 MB each, switched from the chat box in under a second |
 
@@ -59,8 +58,22 @@ With a sidecar, how often our next token matches the original full-precision mod
 78.3% → 82.0%), and general English text goes up too (76.8% → 77.9–79.7%). Method and full tables:
 [technical notes §5](docs/TECHNICAL.md#5-results).
 
-**On a Mac**, `make` builds the Metal version; 126 GPU kernel tests pass on a real Apple GPU. The full model has not run on a
-Mac yet (ours has 16 GB).
+### Speed
+
+| | DGX Spark (GB10, 128 GB) | Mac Studio M5 Max (128 GB) |
+|---|---:|---:|
+| Reading the prompt | 1,040–1,070 tokens/s (9.2k-token prompt) | 627 tokens/s (25.5k-token prompt) |
+| Writing, speculative decoding (default) | 48.2 tokens/s | 35–36 tokens/s prose, 41–42 code |
+| Writing, plain decoding | 29.9 tokens/s | not measured |
+| Measured by | us | a contributor ([#3](https://github.com/fodelf/YoungAi/pull/3)) |
+
+Both columns use the same 113.6 GB base, temperature 0 and 512 written tokens. The Spark numbers come from a real
+request that was never used for tuning, with the coding sidecar on. The Mac numbers come through `ds4-server`, best of two
+runs. The prompts differ, so compare the columns roughly rather than digit by digit. More workloads and context lengths:
+[technical notes §5.2](docs/TECHNICAL.md#52-speed).
+
+**On a Mac**, `make` builds the Metal version and 133 GPU kernel tests pass on a real Apple GPU. Our own Mac has 16 GB, so
+the full-model numbers above are the contributor's.
 
 ## What it does
 
@@ -134,7 +147,7 @@ recognition also runs on the machine's GPU, so the audio never leaves it.
 
 ## Get started
 
-You need a DGX Spark (Linux aarch64 with the CUDA 13 runtime, ~320 GB free SSD). The web tools need Firefox, which
+**On a DGX Spark** (Linux aarch64 with the CUDA 13 runtime, ~320 GB free SSD). The web tools need Firefox, which
 Ubuntu on the Spark ships.
 
 ```sh
@@ -153,6 +166,21 @@ make cuda-spark
 
 How every tab and every tool works, and what happens when something goes wrong: the
 **[user guide](https://fodelf.github.io/YoungAi/guide.html)**.
+
+**On a Mac** (Apple Silicon with 128 GB, ~325 GB free SSD), run the model server directly. The Studio's *Download* and
+*Load* buttons have only been run on the Spark.
+
+```sh
+git clone https://github.com/fodelf/YoungAi.git ~/ds4-main && cd ~/ds4-main
+make                                                            # Metal build
+bash gguf-tools/scripts/hf_install.sh download --dir ~/youngai   # ~317 GB, resumable
+M=~/youngai/model/DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative
+./ds4-server --metal -m $M.gguf --zchain $M-grrb-code_fit_n15360-engine \
+    --engram-dir ~/youngai/deepseek-engram --mem-budget-mb 110000 --port 8000   # OpenAI / Anthropic API on :8000
+```
+
+If the server says a model range is *not covered by mapped model views*, the build predates Mac support: pull and run
+`make` again.
 
 ## Two more things it does
 
@@ -178,7 +206,8 @@ bash install.sh                      # --domain law for another domain (default:
 
 ## Limits
 
-- Tested end to end only on the DGX Spark; every number here comes from it.
+- We test end to end on the DGX Spark. The Mac's full-model numbers come from a contributor's M5 Max; our own Mac has
+  16 GB, so on it we only run the GPU kernel tests.
 - One machine, one model: background tasks and your chat take turns rather than running in parallel.
 - Sites behind a login or a captcha stay closed to the assistant; it says what it could not open instead of guessing.
 - Sidecars are scored on held-out text, not on end-to-end tasks.

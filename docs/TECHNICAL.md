@@ -591,10 +591,14 @@ gives +2.58, +3.67, +3.25, +3.75 and +3.37. The bare base reads lower on WikiTex
 that ruler's teacher changed too (original-model PPL 1.795 vs 1.657 on the same 512 tokens), and on the
 16× longer finance ruler the bare base is level (71.70% vs 71.73% on the reference path).
 
-### 5.2 Speed (one DGX Spark)
+### 5.2 Speed
+
+One DGX Spark:
 
 | Workload | Prefill | Decode |
 |---|---:|---:|
+| Request never used for tuning, 9.2k-token prompt, 1017 base + coding sidecar, plain | **1,043–1,067 t/s** | **29.9 t/s** |
+| Same request, speculative (default) | — | **48.2 t/s** (2.46 of 5 drafts accepted) |
 | Real request, 7.7k-token prompt, 1017 base + coding sidecar, plain | **999 t/s** | **30.1 t/s** (33.2 ms per token) |
 | Same request, speculative (default) | 1,017 t/s | **45.7 t/s** (2.11 of 5 drafts accepted) |
 | 12.5k-token prompt † | **1,055 t/s** (539 with `--decoder-full`) | — |
@@ -603,14 +607,23 @@ that ruler's teacher changed too (original-model PPL 1.795 vs 1.657 on the same 
 | Short prompt, plain greedy † | — | **30.5–30.7 t/s** |
 | Real agent request, 14.1k-token prompt, plain † | — | 28.9–29.4 t/s |
 | Same request, speculative † | — | **43.0 t/s** (3.04 tokens per round) |
-| Request never used for tuning, 9.2k prompt, speculative † | — | **40.0 t/s** |
 | 51k context, plain † | — | 27.5 t/s |
 
+The 9.2k rows: temperature 0, 512 tokens, two runs each; plain and speculative write byte-identical text.
 † Measured on the previous base. The 1017 base file has the same size and layout to the byte
 (113,556,639,424 bytes) and its sidecars are the same size, so every kernel reads the same bytes: on the
 7.7k request, run back to back with one binary, the previous base with its coding sidecar reads 1,007 t/s
 prefill and 30.0 t/s plain decode. Speculative decode is not comparable across bases from one run (46.5 vs
 45.7 t/s): the two models write different text, and acceptance follows the text.
+
+One Mac Studio M5 Max (128 GB), measured by a contributor through `ds4-server`: same 1017 base,
+temperature 0, 512 tokens, best of two runs.
+
+| Workload | Prefill | Decode |
+|---|---:|---:|
+| 25.5k-token prompt, one request, 1 output token | **627 t/s** | — |
+| Prose and Chinese, speculative (default) | — | **35–36 t/s** |
+| Code, speculative (default) | — | **41–42 t/s** |
 
 ---
 
@@ -751,28 +764,35 @@ at load with a fingerprint mismatch. `install.sh --posttrain` stops with an erro
 Every GPU operation V4.1 uses has a Metal implementation, transcribed kernel by kernel from
 the CUDA one: the forward pass, the VQ expert decode (12-bit and 13-bit bit-plane), sidecar gains and router
 bias, GPU sampling and speculative verification, and the backward pass post-training needs.
-`./ds4_test --metal-v41` checks 126 cases on a real Apple GPU against CPU references on synthetic data
+`./ds4_test --metal-v41` checks 133 cases on a real Apple GPU against CPU references on synthetic data
 (no model needed): VQ expert decode matches bit for bit; the other matrix products agree to ~1e-4 and
 are identical wherever the model rounds to bf16; attention is within one bf16 rounding step; every
-backward kernel passes a finite-difference check.
+backward kernel passes a finite-difference check; the half-activation prefill kernels below have their own,
+wider bound.
 
-What has **not** been done yet: running the real model on a Mac. The base stays resident in memory
-(113.6 GB) and our Mac has 16 GB, so there are no Mac speed or quality numbers, and whether a 128 GB Mac
-is enough in practice is untested. It is also expected to be slower than its hardware allows for now: Metal
-has no stream capture, so each token is dispatched kernel by kernel instead of as one recorded graph;
-prefill uses f32 tiles rather than the GPU's matrix units; attention has only a scalar kernel.
+**The full model runs on a 128 GB Mac.** A contributor runs the 1017 base on a Mac Studio M5 Max (speeds in
+§5.2); our own Mac has 16 GB, so we have not run it ourselves. Three things made it work:
 
-To try it on a Mac with enough memory: `install.sh` is Linux-only, so do Steps 1–2 by hand (use
-`shasum -a 256 -c` in place of `sha256sum -c`, and skip `chmod` — the downloaded `bin/` is Linux), then
-start your own build from the source tree:
+- **The VQ expert blobs are mapped for the GPU on first use.** They live outside the backbone and expert spans
+  the loader maps up front, so without this the first MoE layer stops with *Metal model range … is not covered
+  by mapped model views*. The views join the residency set; outside it, the driver held large speculative command
+  buffers 30–1000 ms before the GPU started. These views are not counted by the load-time `--mem-budget-mb` gate.
+- **Prefill uses the GPU's matrix units.** q4_K, bf16 and fp8 matrix products, the VQ experts and attention run on
+  simdgroup matrices, or Metal 4 TensorOps when the shapes line up, with activations rounded to half the way
+  llama.cpp's `kernel_mul_mm` does (relative error ~1e-3). These kernels run only on the inference path
+  (generation, server requests, `--score-ids`). Training and the kernel tests keep the f32 kernels, because the
+  backward pass recomputes the forward and has to match it.
+- **Decode keeps f32 activations.** A q4_K GEMV ported from llama.cpp, VQ experts reading a per-layer f16 codebook,
+  and attention split across the live keys.
 
-```sh
-./ds4-server --metal -m /path/to/DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative.gguf --zchain /path/to/$SIDECAR \
-    --engram-dir /path/to/DeepSeek-V4.1-Flash-1017 --mem-budget-mb 110000 --port 8000
-```
+In the contributor's check, teacher-forced against the original model's answers on 10 HumanEval+ tasks (1,439
+tokens), the Mac kernels agree with the original model's top-1 token as often as the old scalar kernels did: 97.98%
+on the decode path, 98.05% on prefill, NLL ratio 1.058 / 1.059. Metal still has no stream capture, so each decode step is dispatched kernel by
+kernel instead of as one recorded graph.
 
-Start it from the source directory (or pass `--chdir <source dir>`): the Metal shaders are compiled at
-startup from `metal/*.metal` by relative path, so a binary copied elsewhere cannot find them.
+The commands are in the README's *Get started*. Start the server from the source directory (or pass
+`--chdir <source dir>`): the Metal shaders are compiled at startup from `metal/*.metal` by relative path, so a
+binary copied elsewhere cannot find them.
 
 ---
 
@@ -788,8 +808,8 @@ startup from `metal/*.metal` by relative path, so a binary copied elsewhere cann
   business outcomes.
 - **Five domains.** Finance, code, law, medicine and science (§5.1), all five sidecars in the Hugging Face repository.
   All are judged teacher-forced on held-out text; none has been evaluated on end-to-end tasks (agentic coding, legal or clinical question answering).
-- **One machine type tested end to end.** All numbers on this page are from a DGX Spark. The Metal
-  backend passes its kernel tests but has not run the real model yet (see
-  [Building and running on a Mac](#building-and-running-on-a-mac)).
+- **We test end to end on one machine type.** Every number on this page is from a DGX Spark, except the Mac
+  speeds in §5.2 and the Mac numerics check in §7, which a contributor measured on a 128 GB M5 Max. Our own Mac has 16 GB and only runs the
+  kernel tests (see [Building and running on a Mac](#building-and-running-on-a-mac)).
 - **Prefill on tensor cores is not bit-identical** to the fused scalar path (experts) or to the two-pass
   attention kernel (single-pass flash attention); both differences are at the rounding-noise level (§4.4).

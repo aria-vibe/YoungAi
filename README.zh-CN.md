@@ -19,22 +19,35 @@
 
 ![YoungAi 工作台：助理在全网找最便宜的 DGX Spark](docs/img/studio-agent.png)
 
-背后的模型是 DeepSeek V4.1 Flash 的 1017 版（官方权重 510 GB），压到 113.6 GB 跑在一台 128 GB 的 DGX Spark 上，1M 上下文。
-开源，MIT 协议；纯 C99 + CUDA（Apple Silicon 用 Metal），一个 Makefile，不链任何第三方库。
+背后的模型是 DeepSeek V4.1 Flash 的 1017 版（官方权重 510 GB），压到 113.6 GB，一台 128 GB 的机器就能跑：
+DGX Spark 或 Apple Silicon 的 Mac，1M 上下文。开源，MIT 协议；纯 C99，Spark 上用 CUDA，Mac 上用 Metal，
+一个 Makefile，不链任何第三方库。
 
 ## 模型
 
 | | 数 |
 |---|---|
 | 体积 | 官方 510 GB → 基座 113.6 GB（每 8 个权重一起向量量化，约 1.6 bit/权重，不用训练数据） |
-| 速度（DGX Spark） | 读提示 999 token/s；写 45.7 token/s（投机解码开），不开 30.1（真实 7.7k token 请求，挂编程侧车） |
 | 上下文 | 1M token，满载 KV 缓存 0.89 GB |
 | 领域侧车 | 金融 / 编程 / 法律 / 医疗 / 科研，各约 40 MB，聊天框下拉切换，不到 1 秒 |
 
 挂侧车后，下一个字和原版全精度模型一致的比例提高 2.6–3.8 个百分点（例：编程 78.3% → 82.0%），
 通用英文也跟着涨（76.8% → 77.9–79.7%）。测法和完整结果表见[技术细节第五章](docs/TECHNICAL.zh-CN.md#五实测结果)。
 
-**Mac**：`make` 编出 Metal 版，126 项 GPU 核测试在真 Apple GPU 上全过；整模型还没在 Mac 上跑过（手上的 Mac 只有 16 GB）。
+### 速度
+
+| | DGX Spark（GB10，128 GB） | Mac Studio M5 Max（128 GB） |
+|---|---:|---:|
+| 读提示 | 1,040–1,070 token/s（9.2k token 提示） | 627 token/s（25.5k token 提示） |
+| 写，投机解码（默认） | 48.2 token/s | 散文 35–36 token/s，代码 41–42 |
+| 写，纯解码 | 29.9 token/s | 没测 |
+| 谁测的 | 我们 | 一位贡献者（[#3](https://github.com/fodelf/YoungAi/pull/3)） |
+
+两列用的是同一个 113.6 GB 基座，温度 0，各写 512 个 token。Spark 的数来自一条没拿来调过参的真实请求，挂编程侧车；
+Mac 的数经 `ds4-server` 量，两趟取好的一趟。两边提示不同，只适合看量级，别逐位比。更多负载和上下文长度见
+[技术细节 5.2](docs/TECHNICAL.zh-CN.md#52-速度)。
+
+**Mac**：`make` 编出 Metal 版，133 项 GPU 核测试在真 Apple GPU 上全过。我们手上的 Mac 只有 16 GB，上表 Mac 整模型的数是贡献者量的。
 
 ## 它能干什么
 
@@ -99,7 +112,7 @@
 
 ## 上手
 
-需要一台 DGX Spark（Linux aarch64 + CUDA 13 运行库，SSD 空闲约 320 GB）。上网工具要火狐，Spark 上的 Ubuntu 自带。
+**DGX Spark**（Linux aarch64 + CUDA 13 运行库，SSD 空闲约 320 GB）。上网工具要火狐，Spark 上的 Ubuntu 自带。
 
 ```sh
 git clone https://github.com/fodelf/YoungAi.git ~/ds4-main && cd ~/ds4-main
@@ -115,6 +128,19 @@ make cuda-spark
 5. **技能**页：新建或导入一个带 `SKILL.md` 的文件夹（仓库自带一份做 PPT 的 [`skills/pptx/`](https://github.com/fodelf/YoungAi/tree/restructure/skills/pptx)）。
 
 工作台各页、每个工具怎么用、出错会怎样，见 **[使用指南](https://fodelf.github.io/YoungAi/guide.html)**。
+
+**Mac**（Apple Silicon，128 GB 内存，SSD 空闲约 325 GB）：直接起模型服务。工作台的"下载""加载"按钮只在 Spark 上跑过。
+
+```sh
+git clone https://github.com/fodelf/YoungAi.git ~/ds4-main && cd ~/ds4-main
+make                                                            # Metal 版
+bash gguf-tools/scripts/hf_install.sh download --dir ~/youngai   # 约 317 GB，断点续传
+M=~/youngai/model/DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative
+./ds4-server --metal -m $M.gguf --zchain $M-grrb-code_fit_n15360-engine \
+    --engram-dir ~/youngai/deepseek-engram --mem-budget-mb 110000 --port 8000   # :8000 上是 OpenAI / Anthropic 兼容 API
+```
+
+服务端报某段模型区间 *not covered by mapped model views*，说明代码是支持 Mac 之前的版本：拉最新代码重新 `make`。
 
 ## 还能干的两件事
 
@@ -139,7 +165,7 @@ bash install.sh                      # 默认编程侧车，--domain law 换领�
 
 ## 局限
 
-- 只在 DGX Spark 上端到端验过，本页数字都来自它。
+- 我们在 DGX Spark 上做端到端验证。Mac 整模型的数来自贡献者的 M5 Max；我们手上的 Mac 只有 16 GB，只跑 GPU 核测试。
 - 一台机器一份模型：后台任务和你聊天是排队跑，不是并行。
 - 要登录或有验证码的网站，助理打不开；它会说哪些没打开，不会去猜。
 - 侧车只在留出文本上评过分，没在端到端任务上评过。
