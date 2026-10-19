@@ -188,7 +188,9 @@ bool v41_multi_step(ds4_engine *e, ds4_v41_batch *b, ds4_v41_state **m, const in
     if (ok && ds4_gpu_begin_commands() == 0) ok = false;
     const bool big = R > DS4_V41_GEMV_MAX_TOK;   /* 超 8 行: q4_K 骨架走张量核小批形态(而不是预填 GEMM), 只在这一步里开 */
     if (big) (void)ds4_gpu_v41_set_multi_rows(1);
+    (void)ds4_gpu_v41_set_half_prefill(m[0]->half_prefill);   /* 合批的各路都是服务端请求态(core_v41_req.c 开) */
     if (ok) ok = v41_multi_body(e, b, m, r0, nr, nm, R);
+    (void)ds4_gpu_v41_set_half_prefill(0);
     if (big) (void)ds4_gpu_v41_set_multi_rows(0);
     if (ok && (ds4_gpu_end_commands() == 0 || ds4_gpu_synchronize() == 0)) ok = false;
     for (uint32_t i = 0; i < nm; i++) { v41_detach(m[i], &rv[i]); if (ok) v41_multi_advance(m[i], nr[i]); }

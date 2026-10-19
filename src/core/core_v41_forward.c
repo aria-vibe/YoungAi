@@ -410,7 +410,9 @@ bool v41_forward(ds4_engine *e, ds4_v41_state *st, const int32_t *ids, uint32_t 
     if (!st->no_engram && !v41_engram_prefetch(e, st)) return false;   /* engram 行读盘与前面几层的 GPU 算重叠 */
     st->mainh_wrote = 0;
     if (ds4_gpu_begin_commands() == 0) return false;
+    (void)ds4_gpu_v41_set_half_prefill(st->half_prefill);
     const bool body_ok = v41_forward_body(e, st);
+    (void)ds4_gpu_v41_set_half_prefill(0);
     st->vrows_on = 0;   /* 图片行只属于这一块 */
     if (!body_ok) return false;
     if (ds4_gpu_end_commands() == 0 || ds4_gpu_synchronize() == 0) return false;

@@ -49,10 +49,12 @@ int v41_sgemm(const ds4_gpu_tensor *A, uint32_t lda, int transA, const ds4_gpu_t
 /* f32 GEMV 直发(n ≤ 8, 设备 f32 权重张量 W[out][in]): 草稿 bias 等用 */
 int v41_f32_gemv_dev(const ds4_gpu_tensor *W, uint64_t in_dim, uint64_t out_dim, const ds4_gpu_tensor *x, ds4_gpu_tensor *out, uint32_t n_tok, const char *what);
 
+/* 推理路预填快核开关(metal_v41_common.m; 只有推理调用方经 ds4_gpu_v41_set_half_prefill 打开) */
+extern int g_v41_half_prefill;
 /* 反修增益覆盖表 [layer] → 设备 [n_expert][OUT] f32(实现在 metal_v41_moe.m); 空 = 该层不挂 */
 id<MTLBuffer> v41_gr_buf(uint32_t layer);
 /* VQ 专家前向的预填骨架(排序 + 分组核), 供反向重算借用: 返回排序后的 ys/inv/meta 等(实现在 metal_v41_moe.m) */
-typedef struct { uint32_t nv, nact, npair; id<MTLBuffer> perm, inv, meta; } v41_vq_sort;
+typedef struct { uint32_t nv, nact, npair, maxcnt; id<MTLBuffer> perm, inv, meta; } v41_vq_sort;
 int v41_vq_sort_pairs(const ds4_gpu_tensor *selected, uint32_t n_tok, uint32_t K, uint32_t n_total_expert, v41_vq_sort *out);
 
 #endif /* DS4_METAL_V41_H */

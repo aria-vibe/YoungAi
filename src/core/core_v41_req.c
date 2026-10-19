@@ -95,6 +95,7 @@ struct ds4_v41_req *ds4_v41_req_open(ds4_engine *e, const int *prompt, int n_pro
     r->sp = sp ? *sp : g_decode_sampling;
     if (!v41_state_alloc(&r->st, r->cap, ctx, DS4_MTP_MAX_BLOCK + 2u)) { free(r); return NULL; }
     r->st.head_last_only = 1;   /* 预填块只算末位 logits(core_v41.h) */
+    r->st.half_prefill = 1;     /* 推理路: 预填快核(core_v41.h) */
     if (!v41_req_setup(r)) { ds4_v41_req_close(r); return NULL; }
     return r;
 }

@@ -4,6 +4,7 @@
  * 反修: gr 增益覆盖表(set_gr_override)按层挂设备缓冲, down 核的行增益 × 它; 取料(vq_capture_expert_out)读上一次预填留下的 ys/inv。 */
 #import "metal_v41.h"
 #include "vq_fmt.h"
+#include "../common/ds4_fp8.h"
 
 static id<MTLBuffer> g_v41_gr[64];
 static v41_scratch g_vq_h, g_vq_part, g_vq_ys, g_vq_cap, g_vq_perm, g_vq_inv, g_vq_meta;
@@ -47,11 +48,49 @@ int v41_vq_sort_pairs(const ds4_gpu_tensor *selected, uint32_t n_tok, uint32_t K
             for (uint32_t e = 0; e < n_total_expert; e++) if (cnt[e]) nact++;
             uint32_t k = 0;
             for (uint32_t e = 0; e < n_total_expert; e++) if (cnt[e]) { mh[k] = e; mh[nact + k] = off[e]; mh[2u * nact + k] = cnt[e]; k++; }
-            o->nv = nv; o->nact = nact; o->npair = (uint32_t)npair; o->perm = perm; o->inv = inv; o->meta = meta;
+            uint32_t mxc = 0; for (uint32_t e = 0; e < n_total_expert; e++) if (cnt[e] > mxc) mxc = cnt[e];
+            o->nv = nv; o->nact = nact; o->npair = (uint32_t)npair; o->perm = perm; o->inv = inv; o->meta = meta; o->maxcnt = mxc;
         }
     }
     free(sel); free(cnt); free(off); free(cur);
     return ok;
+}
+
+
+/* ★层码本预解 f16(2026-10-17, M5 提速)★: v3 blob 一层一本 E4M3 码本, 解码核原来每个权重现场 E4M3→f32。
+ * 这里按 blob 首次见到时在主机解成 f16 缓冲(E4M3 全部有限取值在 f16 里精确 ⇒ 核里值逐位同), 核里一个码字 = 两次 half4 读。
+ * 只在该 blob 所有载荷共用同一 cb_off/nc 时建; 码本里有 NaN 位型(abs 0x7f)也不建 —— 不往 half 里塞 NaN(全仓 -ffast-math),
+ * 退回核内逐值解(与原核逐位同)。E4M3 解码用全仓唯一实现 ds4_fp8.h。 */
+static struct { const uint8_t *key; id<MTLBuffer> buf; } g_cbh[128];
+static int g_cbh_n = 0;
+static id<MTLBuffer> v41_vq_cbh(const uint8_t *bh, uint64_t blob_bytes) {
+    for (int i = 0; i < g_cbh_n; i++) if (g_cbh[i].key == bh) return g_cbh[i].buf;
+    id<MTLBuffer> out = nil;
+    const uint32_t nexp = ds4vq_blob_nexp(bh);
+    uint64_t cb_off = 0; uint32_t nc = 0; int ok = ds4vq_blob_ver(bh) == 3u;
+    for (uint32_t e = 0; ok && e < nexp; e++) for (int w = 0; ok && w < 3; w++) {
+        const uint64_t off = ds4vq_slot(bh, (int)e, w);
+        if (!off) continue;
+        if (off + 32u > blob_bytes) { ok = 0; break; }
+        const uint8_t *pay = bh + off;
+        uint32_t mg; memcpy(&mg, pay, 4);
+        uint16_t n16; memcpy(&n16, pay + 6, 2);
+        uint64_t c; memcpy(&c, pay + 24, 8);
+        if (mg != DS4VQ_MAT3_MAGIC) { ok = 0; break; }
+        if (!nc) { nc = n16; cb_off = c; } else if (nc != n16 || cb_off != c) ok = 0;
+    }
+    const size_t n = (size_t)nc * 8u;
+    if (ok && nc && cb_off + n <= blob_bytes) for (size_t i = 0; i < n; i++) if ((bh[cb_off + i] & 0x7fu) == 0x7fu) { ok = 0; break; }
+    if (ok && nc && cb_off + n <= blob_bytes) {
+        __fp16 *hb = malloc(n * sizeof(__fp16));
+        if (hb) {
+            for (size_t i = 0; i < n; i++) hb[i] = (__fp16)ds4_e4m3fn_to_f32(bh[cb_off + i]);
+            out = [g_device newBufferWithBytes:hb length:n * sizeof(__fp16) options:MTLResourceStorageModeShared];
+            free(hb);
+        }
+    }
+    if (g_cbh_n < 128) { g_cbh[g_cbh_n].key = bh; g_cbh[g_cbh_n].buf = out; g_cbh_n++; }
+    return out;
 }
 
 int ds4_gpu_v41_routed_moe_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size, uint64_t blob_offset, uint64_t blob_bytes, uint32_t in_dim,
@@ -71,14 +110,21 @@ int ds4_gpu_v41_routed_moe_tensor(ds4_gpu_tensor *out, const void *model_map, ui
     if (!blob) return 0;
     id<MTLBuffer> gr = v41_gr_buf(layer);
     v41_vq_args a = { in_dim, mid_dim, out_dim, n_expert_used, ver == 3u ? 1u : 0u, gr ? 1u : 0u, n_tok, 0, clamp, 0, 0, 0 };
+    id<MTLBuffer> cbh = v41_vq_cbh(bh, blob_bytes);
+    a.pad0 = cbh && n_tok <= DS4_V41_GEMV_MAX_TOK ? 1u : 0u;   /* 解码核: 1 = 用 f16 层码本 */
     if (n_tok <= DS4_V41_GEMV_MAX_TOK) {
         const uint64_t np = (uint64_t)n_tok * n_expert_used;
         id<MTLBuffer> h = v41_grow(&g_vq_h, np * mid_dim * 4, "v41 vq h"), part = v41_grow(&g_vq_part, np * out_dim * 4, "v41 vq partial");
         if (!h || !part) return 0;
-        v41_bind b1[] = { V41_A(a), V41_B(h, 0), V41_B(blob, 0), V41_T(selected), V41_T(x), V41_A(inner) };
-        if (!v41_launch("kernel_v41_vq_gateup", b1, 6, MTLSizeMake((mid_dim + 7u) / 8u, (NSUInteger)np, 1), MTLSizeMake(256, 1, 1))) return 0;
-        v41_bind b2[] = { V41_A(a), V41_B(part, 0), V41_B(blob, 0), V41_T(selected), V41_B(h, 0), V41_A(inner), gr ? V41_B(gr, 0) : V41_T(NULL) };
-        if (!v41_launch("kernel_v41_vq_down", b2, 7, MTLSizeMake((out_dim + 7u) / 8u, (NSUInteger)np, 1), MTLSizeMake(256, 1, 1))) return 0;
+        v41_bind b1[] = { V41_A(a), V41_B(h, 0), V41_B(blob, 0), V41_T(selected), V41_T(x), V41_A(inner), cbh ? V41_B(cbh, 0) : V41_B(blob, 0) };
+        /* 12 位码号快路(kernel_v41_vq_*_q12): 要 f16 层码本、x 进得了核的行宽上限; 核内再逐矩阵判对齐, 不合就退回原行点积 */
+        const int q12 = cbh && in_dim <= 6144u && mid_dim <= 6144u;
+        if (!v41_launch(q12 ? "kernel_v41_vq_gateup_q12" : "kernel_v41_vq_gateup", b1, 7,
+                        MTLSizeMake(q12 ? (mid_dim + 31u) / 32u : (mid_dim + 7u) / 8u, (NSUInteger)np, 1), MTLSizeMake(256, 1, 1))) return 0;
+        v41_bind b2[] = { V41_A(a), V41_B(part, 0), V41_B(blob, 0), V41_T(selected), V41_B(h, 0), V41_A(inner), gr ? V41_B(gr, 0) : V41_T(NULL),
+                          cbh ? V41_B(cbh, 0) : V41_B(blob, 0) };
+        if (!v41_launch(q12 ? "kernel_v41_vq_down_q12" : "kernel_v41_vq_down", b2, 8,
+                        MTLSizeMake(q12 ? (out_dim + 63u) / 64u : (out_dim + 7u) / 8u, (NSUInteger)np, 1), MTLSizeMake(256, 1, 1))) return 0;
         if (!out) return 1;
         const uint32_t tail = 0;
         v41_bind b3[] = { V41_A(a), V41_T(out), V41_B(part, 0), V41_T(weights), V41_T(NULL), V41_A(tail) };
@@ -90,6 +136,24 @@ int ds4_gpu_v41_routed_moe_tensor(ds4_gpu_tensor *out, const void *model_map, ui
     id<MTLBuffer> h = v41_grow(&g_vq_h, (uint64_t)s.nv * mid_dim * 4, "v41 vq h"), ys = v41_grow(&g_vq_ys, (uint64_t)s.nv * out_dim * 4, "v41 vq ys");
     if (!h || !ys) return 0;
     a.n_act = s.nact;
+    /* 预填、推理路: 按专家分组的 half 矩阵乘(metal/v41_vq_mm.metal; Metal 4 有 TensorOps 时走 matmul2d 版)。要 v3 + f16 层码本 + 维度对齐;
+     * 训练原语留在下面的 f32 分组核(见 ds4_gpu_v41_set_half_prefill)。 */
+    if (g_v41_half_prefill && cbh && ver == 3u && (in_dim % 32u) == 0u && (mid_dim % 32u) == 0u && s.maxcnt > 0u) {
+        id<MTLBuffer> gb = gr ? gr : blob;
+        const int mpp = ds4_gpu_mpp_available() && (in_dim % 64u) == 0u && (mid_dim % 64u) == 0u;
+        for (uint32_t mode = 0; mode < 3u; mode++) {   /* 0 gate, 1 up(就地 swiglu), 2 down */
+            v41_vq_args am = a; am.pad1 = mode;
+            const uint32_t rows = mode == 2u ? out_dim : mid_dim;
+            v41_bind bm[] = { V41_A(am), V41_B(mode == 2u ? ys : h, 0), V41_B(blob, 0), V41_B(s.meta, 0), V41_B(s.perm, 0),
+                              mode == 2u ? V41_B(h, 0) : V41_T(x), V41_A(inner), V41_B(cbh, 0), V41_B(gb, 0) };
+            if (!v41_launch(mpp ? "kernel_v41_vq_mpp" : "kernel_v41_vq_mm", bm, 9,
+                            MTLSizeMake(mpp ? (s.maxcnt + 63u) / 64u : (s.maxcnt + 31u) / 32u, (rows + 63u) / 64u, s.nact), MTLSizeMake(128, 1, 1))) return 0;
+        }
+        v41_bind b3m[] = { V41_A(a), V41_T(out), V41_B(ys, 0), V41_B(s.inv, 0), V41_T(weights) };
+        if (!v41_launch("kernel_v41_vqp_reduce", b3m, 5, MTLSizeMake((out_dim + 255u) / 256u, n_tok, 1), MTLSizeMake(256, 1, 1))) return 0;
+        g_cap_tok = n_tok; g_cap_used = n_expert_used; g_cap_out = out_dim;
+        return 1;
+    }
     v41_bind b1[] = { V41_A(a), V41_B(h, 0), V41_B(blob, 0), V41_B(s.meta, 0), V41_B(s.perm, 0), V41_T(x), V41_A(inner) };
     if (!v41_launch("kernel_v41_vq_gateup_grp", b1, 7, MTLSizeMake((mid_dim + 7u) / 8u, s.nact, 1), MTLSizeMake(256, 1, 1))) return 0;
     v41_bind b2[] = { V41_A(a), V41_B(ys, 0), V41_B(blob, 0), V41_B(s.meta, 0), V41_B(h, 0), V41_A(inner), gr ? V41_B(gr, 0) : V41_T(NULL) };

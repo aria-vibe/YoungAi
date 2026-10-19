@@ -18,7 +18,48 @@ int ds4_gpu_v41_sparse_attn_tensor(ds4_gpu_tensor *o, const ds4_gpu_tensor *q, c
     const int hasc = kv_comp && idx;
     v41_attn_args a = { pos0, window, hasc ? ng : 0u, hasc ? topk : 0u, n_head, head_dim, full_block ? n_tok : 0u, ring ? 1u : 0u, win_lo, posd ? 1u : 0u, hasc ? 1u : 0u, 0,
                         scale, 0, 0, 0 };
+    /* ★解码小批分段(2026-10-17 M5)★: n ≤ 8 时原核一 threadgroup 串行扫全部键, 长上下文下 GPU 只开 n×8 个 threadgroup。
+     * 键按 V41_ATTN_SPLIT_KEYS 一段分到 grid.z(最多 V41_ATTN_SPLIT_MAX 段), 再由 reduce 核合并(在线 softmax 的 max/sum 合法合并)。
+     * 段数按实际可见键数估(主机知道位置时: 窗口里可见行 + 实际可选压缩组); 设备位置(posd)时只能按上限。
+     * 32 键一段、最多 32 段是这个核的形状参数(与瓦片尺寸同类, 不随请求变): 部分和暂存 = n·头·S·(hd+2)·4 B, S 封顶也是给暂存封顶。 */
+    enum { V41_ATTN_SPLIT_KEYS = 32u, V41_ATTN_SPLIT_MAX = 32u };
+    uint64_t kmax = (uint64_t)window + n_tok + (hasc ? topk : 0u);
+    if (!posd) {
+        const uint64_t vis = (uint64_t)pos0 + n_tok;
+        const uint64_t kw = (full_block ? (uint64_t)window + n_tok : (vis < (uint64_t)window + n_tok ? vis : (uint64_t)window + n_tok));
+        const uint64_t kc = hasc ? (ng < topk ? ng : topk) : 0u;
+        if (kw + kc < kmax) kmax = kw + kc;
+    }
+    uint32_t S = (uint32_t)((kmax + V41_ATTN_SPLIT_KEYS - 1u) / V41_ATTN_SPLIT_KEYS);
+    if (S > V41_ATTN_SPLIT_MAX) S = V41_ATTN_SPLIT_MAX;
+    if (n_tok <= DS4_V41_GEMV_MAX_TOK && S > 1u) {
+        static v41_scratch g_attn_part;
+        id<MTLBuffer> pb = v41_grow(&g_attn_part, (uint64_t)n_tok * n_head * S * (head_dim + 2u) * 4u, "v41 attn split");
+        if (pb) {
+            a.pad = S;
+            v41_bind b1[] = { V41_A(a), V41_B(pb, 0), V41_T(q), V41_T(kv_win), V41_T(kv_comp), V41_T(idx), V41_T(posd) };
+            if (!v41_launch("kernel_v41_sparse_attn_split", b1, 7, MTLSizeMake(n_tok, n_head / 8u, S), MTLSizeMake(256, 1, 1))) return 0;
+            v41_bind b2[] = { V41_A(a), V41_T(o), V41_B(pb, 0), V41_B(sb, (NSUInteger)so) };
+            return v41_launch("kernel_v41_sparse_attn_reduce", b2, 4, MTLSizeMake(n_tok, n_head / 8u, 1), MTLSizeMake(256, 1, 1));
+        }
+    }
     v41_bind b[] = { V41_A(a), V41_T(o), V41_T(q), V41_T(kv_win), V41_T(kv_comp), V41_T(idx), V41_B(sb, (NSUInteger)so), V41_T(posd) };
+    /* 预填(n_tok > 8)、推理路: simdgroup MMA 版, 压缩 KV 先预解成 half(half 激活, 门是 NLL; 训练原语留在下面的 f32 原核, 见 ds4_gpu_v41_set_half_prefill) */
+    if (g_v41_half_prefill && n_tok > DS4_V41_GEMV_MAX_TOK) {
+        static v41_scratch g_ckv_half;
+        id<MTLBuffer> kh = nil;
+        if (hasc && ng > 0u && !posd) {
+            kh = v41_grow(&g_ckv_half, (uint64_t)ng * 512u * 2u, "v41 ckv half");
+            if (kh) {
+                v41_bind bp[] = { V41_T(kv_comp), V41_B(kh, 0), V41_A(ng) };
+                if (!v41_launch("kernel_v41_ckv_predecode", bp, 3, MTLSizeMake(ng, 1, 1), MTLSizeMake(128, 1, 1))) return 0;
+                a.pad = 1u;
+            }
+        }
+        v41_bind bm[] = { V41_A(a), V41_T(o), V41_T(q), V41_T(kv_win), V41_T(kv_comp), V41_T(idx), V41_B(sb, (NSUInteger)so), V41_T(posd),
+                          kh ? V41_B(kh, 0) : V41_B(sb, (NSUInteger)so) };
+        return v41_launch("kernel_v41_sparse_attn_mma", bm, 9, MTLSizeMake(n_tok, n_head / 8u, 1), MTLSizeMake(128, 1, 1));
+    }
     return v41_launch("kernel_v41_sparse_attn", b, 8, MTLSizeMake(n_tok, n_head / 8u, 1), MTLSizeMake(256, 1, 1));
 }
 int ds4_gpu_v41_attn_scratch_prepare(uint32_t n_tok, uint32_t n_head, uint32_t head_dim) { (void)n_tok; (void)n_head; (void)head_dim; return 1; }   /* 标量核不用暂存 */

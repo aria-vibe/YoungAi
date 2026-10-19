@@ -23,13 +23,10 @@ inline float v41_f16_to_f32(ushort h) { return float(as_type<half>(h)); }
 
 // E4M3FN 位型 → f32(abs 0x7f = NaN, 无 Inf), 与 ds4_e4m3fn_to_f32 同式。
 inline float v41_e4m3_to_f32(uint x) {
+    /* 位移进 half 再 ×2^8(2026-10-18 M5): 对全部非 NaN 的 E4M3(含次正规与 ±0)与原 ldexp 版逐位同, 省掉 ldexp 与分支 */
     const uint a = x & 0x7fu;
-    const bool neg = (x & 0x80u) != 0u;
-    if (a == 0u) return neg ? -0.0f : 0.0f;
     if (a == 0x7fu) return as_type<float>(0x7fc00000u);
-    const int e = int((x >> 3) & 0x0fu), m = int(x & 0x07u);
-    const float v = e == 0 ? ldexp(float(m), -9) : ldexp(1.0f + float(m) / 8.0f, e - 7);
-    return neg ? -v : v;
+    return float(as_type<half>((ushort)(((x & 0x80u) << 8) | (a << 7)))) * 256.0f;
 }
 // E8M0 → f32(e=0 按 0x00400000 位型), 与 ds4_e8m0_to_f32 同式。
 inline float v41_e8m0_to_f32(uint e) { return as_type<float>(e == 0u ? 0x00400000u : (e << 23)); }
@@ -114,12 +111,17 @@ inline void v41_w8(uint wtype, device const uchar *w, ulong w_off, device const 
     } else if (wtype == V41_WT_Q4K) {
         device const uchar *blk = w + w_off + ((ulong)r * (cols / 256u) + (c0 / 256u)) * 144u;
         const uint e = c0 % 256u, g = e / 64u, oo = e % 64u, hi = oo >= 32u ? 1u : 0u;
-        const float d = v41_f16_to_f32((ushort)blk[0] | ((ushort)blk[1] << 8));
-        const float dmin = v41_f16_to_f32((ushort)blk[2] | ((ushort)blk[3] << 8));
+        /* 向量读(2026-10-17 M5 提速): GGUF 张量 32 B 对齐、块 144 B ⇒ 块首 4 B 对齐, qs 段 8 B 对齐; 值与逐字节读同 */
+        const half2 dd = *(device const half2 *)blk;
+        const float d = float(dd.x), dmin = float(dd.y);
         float s, m; v41_q4k_sm(blk + 4, g * 2u + hi, s, m);
         const float ds = d * s, dm = dmin * m;
-        device const uchar *qs = blk + 16u + g * 32u + (oo % 32u);
-        for (uint j = 0; j < 8u; j++) { const uint by = qs[j]; o[j] = ds * float(hi ? (by >> 4) : (by & 0xFu)) - dm; }
+        const uint2 q = *(device const uint2 *)(blk + 16u + g * 32u + (oo % 32u));
+        const uint sh = hi ? 4u : 0u;
+        o[0] = ds * float((q.x >> sh) & 0xFu) - dm;         o[1] = ds * float((q.x >> (8u + sh)) & 0xFu) - dm;
+        o[2] = ds * float((q.x >> (16u + sh)) & 0xFu) - dm; o[3] = ds * float((q.x >> (24u + sh)) & 0xFu) - dm;
+        o[4] = ds * float((q.y >> sh) & 0xFu) - dm;         o[5] = ds * float((q.y >> (8u + sh)) & 0xFu) - dm;
+        o[6] = ds * float((q.y >> (16u + sh)) & 0xFu) - dm; o[7] = ds * float((q.y >> (24u + sh)) & 0xFu) - dm;
     } else if (wtype == V41_WT_BF16) {
         device const ushort *p = (device const ushort *)(w + w_off + ((ulong)r * cols + c0) * 2u);
         for (uint j = 0; j < 8u; j++) o[j] = v41_bf16_to_f32(p[j]);
@@ -199,3 +201,9 @@ struct v41_wgemm_args {
     uint M, N, K, lda, ldc, x_gstride, out_gstride, wtype, wnn, wcols, sbc, beta, round_out, pad0;
 };
 struct v41_sgemm_args { uint M, N, K, lda, ldb, ldc, transA, transB; float alpha, beta; uint a_gstride, b_gstride, c_gstride, pad1; };
+
+// 批内拷贝(2026-10-17 M5 提速): 4 B 对齐、不重叠的 tensor_copy 走计算核, 省掉每次 compute→blit→compute 的编码器切换
+kernel void kernel_v41_copy_u32(device const uint *src [[buffer(0)]], device uint *dst [[buffer(1)]], constant uint &n [[buffer(2)]],
+                                uint gid [[thread_position_in_grid]]) {
+    if (gid < n) dst[gid] = src[gid];
+}

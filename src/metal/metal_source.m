@@ -186,10 +186,12 @@ NSString *ds4_gpu_full_source(void) {
         /* DeepSeek V4.1 一族(2026-10-08): 公共件必须在最前(后面的文件用它的函数与参数块), 其余按依赖序 */
         @"metal/v41_common.metal",
         @"metal/v41_dense.metal",
+        @"metal/v41_prefill_mm.metal",
         @"metal/v41_layer.metal",
         @"metal/v41_attn.metal",
         @"metal/v41_sample.metal",
         @"metal/v41_vq.metal",
+        @"metal/v41_vq_mm.metal",
         @"metal/v41_bwd.metal",
         @"metal/v41_draft.metal",
         @"metal/asr.metal",   /* 语音识别(2026-10-14): 自带参数块, 不依赖 v41 公共件 */
