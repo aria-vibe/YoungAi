@@ -5,10 +5,10 @@
 // 解码(n ≤ 8): 一 (token, 专家) 对一组 threadgroup, 一 simdgroup 一行; 预填: 按专家分组, 同一行的码字只解一次、对该专家的每个 token 各乘一遍。
 // 必须排在 v41_common.metal 之后。
 
-struct v41_vq_mat { device const uchar *cb; device const uchar *gr; device const uchar *ix; device const uchar *ex; uint nidx_row, mb, imsk, nc; bool ok, v3, has_ex; };
+struct v41_vq_mat { device const uchar *cb; device const uchar *gr; device const uchar *ix; device const uchar *ex; device const half *cbh; uint nidx_row, mb, imsk, nc; bool ok, v3, has_ex, cbh_on; };
 inline ulong v41_rd_u64(device const uchar *p) { return (ulong)(*(device const uint *)p) | ((ulong)(*(device const uint *)(p + 4)) << 32); }
 inline v41_vq_mat v41_vq_open(device const uchar *blob, uint e, uint which, uint rows, uint cols, uint v3) {
-    v41_vq_mat m; m.ok = false; m.v3 = v3 != 0u; m.has_ex = false; m.cb = m.gr = m.ix = m.ex = blob; m.nidx_row = m.mb = m.imsk = m.nc = 0u;
+    v41_vq_mat m; m.ok = false; m.v3 = v3 != 0u; m.has_ex = false; m.cbh_on = false; m.cbh = (device const half *)blob; m.cb = m.gr = m.ix = m.ex = blob; m.nidx_row = m.mb = m.imsk = m.nc = 0u;
     const ulong off = v41_rd_u64(blob + 16u + ((ulong)e * 3u + which) * 8u);
     if (off == 0ul) return m;
     device const uchar *pay = blob + off;
@@ -47,6 +47,12 @@ inline uint v41_vq_code(const thread v41_vq_mat &m, uint r, uint j) {
 }
 // 码字 v → 8 个 f32(v3: 8 个 E4M3; v2: 8 个 f16)
 inline void v41_vq_cw(const thread v41_vq_mat &m, uint v, thread float *c) {
+    if (m.cbh_on) {   /* 主机预解的 f16 层码本(E4M3 在 f16 里精确, 值逐位同) */
+        device const half4 *p = (device const half4 *)(m.cbh + (ulong)v * 8u);
+        const float4 lo = float4(p[0]), hi = float4(p[1]);
+        c[0] = lo.x; c[1] = lo.y; c[2] = lo.z; c[3] = lo.w; c[4] = hi.x; c[5] = hi.y; c[6] = hi.z; c[7] = hi.w;
+        return;
+    }
     if (m.v3) { device const uchar *p = m.cb + (ulong)v * 8u; for (uint q = 0; q < 8u; q++) c[q] = v41_e4m3_to_f32(p[q]); }
     else { device const ushort *p = (device const ushort *)(m.cb + (ulong)v * 16u); for (uint q = 0; q < 8u; q++) c[q] = v41_f16_to_f32(p[q]); }
 }
@@ -78,13 +84,15 @@ struct v41_vq_args { uint IN, MID, OUT, K, v3, has_gov, n_tok, n_act; float clam
 // ---- 解码(n ≤ 8): gate/up 同核, grid (ceil(MID/8), n_tok·K), 256 线程; down grid (ceil(OUT/8), np)
 kernel void kernel_v41_vq_gateup(constant v41_vq_args &a [[buffer(0)]], device float *h [[buffer(1)]], device const uchar *blob [[buffer(2)]],
                                  device const int *sel [[buffer(3)]], device const float *x [[buffer(4)]], constant ulong &blob_off [[buffer(5)]],
+                                 device const half *cbh [[buffer(6)]],
                                  uint2 tg [[threadgroup_position_in_grid]], uint sgitg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     const uint pair = tg.y, t = pair / a.K, r = tg.x * 8u + sgitg;
     const int e = sel[pair];
     if (e < 0 || r >= a.MID) return;
     device const uchar *b = blob + blob_off;
-    const v41_vq_mat mg = v41_vq_open(b, (uint)e, 0u, a.MID, a.IN, a.v3), mu = v41_vq_open(b, (uint)e, 1u, a.MID, a.IN, a.v3);
+    v41_vq_mat mg = v41_vq_open(b, (uint)e, 0u, a.MID, a.IN, a.v3), mu = v41_vq_open(b, (uint)e, 1u, a.MID, a.IN, a.v3);
     if (!mg.ok || !mu.ok) return;
+    if (a.pad0) { mg.cbh = cbh; mg.cbh_on = true; mu.cbh = cbh; mu.cbh_on = true; }
     device const float *xs = x + (ulong)t * a.IN;
     const float gv = v41_bf16r(v41_vq_row_dot(mg, r, xs, x, 0u, lane));
     const float ui = v41_bf16r(v41_vq_row_dot(mu, r, xs, x, 0u, lane));
@@ -92,16 +100,109 @@ kernel void kernel_v41_vq_gateup(constant v41_vq_args &a [[buffer(0)]], device f
 }
 kernel void kernel_v41_vq_down(constant v41_vq_args &a [[buffer(0)]], device float *partial [[buffer(1)]], device const uchar *blob [[buffer(2)]],
                                device const int *sel [[buffer(3)]], device const float *h [[buffer(4)]], constant ulong &blob_off [[buffer(5)]],
-                               device const float *gov [[buffer(6)]], uint2 tg [[threadgroup_position_in_grid]],
+                               device const float *gov [[buffer(6)]], device const half *cbh [[buffer(7)]], uint2 tg [[threadgroup_position_in_grid]],
                                uint sgitg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
     const uint pair = tg.y, r = tg.x * 8u + sgitg;
     const int e = sel[pair];
     if (r >= a.OUT) return;
     if (e < 0) { if (lane == 0u) partial[(ulong)pair * a.OUT + r] = 0.0f; return; }
-    const v41_vq_mat md = v41_vq_open(blob + blob_off, (uint)e, 2u, a.OUT, a.MID, a.v3);
+    v41_vq_mat md = v41_vq_open(blob + blob_off, (uint)e, 2u, a.OUT, a.MID, a.v3);
     if (!md.ok) { if (lane == 0u) partial[(ulong)pair * a.OUT + r] = 0.0f; return; }
+    if (a.pad0) { md.cbh = cbh; md.cbh_on = true; }
     const float y = v41_bf16r(v41_vq_row_dot(md, r, h + (ulong)pair * a.MID, gov + (ulong)e * a.OUT, a.has_gov, lane));
     if (lane == 0u) partial[(ulong)pair * a.OUT + r] = y;
+}
+// ---- 解码快路(2026-10-17 M5): 只在 v3 + 12 位主流码号 + f16 层码本 + 行 4 B 对齐时走, 否则逐矩阵退回上面的原行点积。
+// 8 码字一组 = 12 B = 3 次对齐 uint 读 → 8 个 12 位号, 8 次码本取料互不依赖(gather 是延迟瓶颈, 原核一次一个码字)。
+// 一 simdgroup 管多行、每行 4 lane: gate/up = 4 行 × {gate, up} 8 组, down = 8 行; 同一时刻 8 组 lane 读同一段 x ⇒ 硬件合并成广播。
+// 累加结合序与原核不同 ⇒ 门是 NLL(PR 说明里的 HumanEval+ teacher-force 门)。
+#define V41_VQ_Q12_XMAX 6144u
+inline bool v41_vq_q12_ok(const thread v41_vq_mat &m, device const uchar *b, ulong blob_off) {
+    return m.v3 && m.mb == 12u && m.cbh_on && (m.nidx_row & 7u) == 0u && m.nidx_row * 8u <= V41_VQ_Q12_XMAX &&
+           ((blob_off + (ulong)(m.ix - b)) & 3ul) == 0ul;
+}
+// 一行的部分点积: 本 lane 管第 sub, sub+subw, … 组(每组 8 码字 = 64 元素), 调用方在子组内 simd_shuffle_xor 规约。
+inline float v41_vq_row_part(const thread v41_vq_mat &m, uint r, device const float *xs, uint sub, uint subw) {
+    const uint ng = m.nidx_row >> 3;
+    device const uint *rowp = (device const uint *)(m.ix + (((ulong)r * m.nidx_row * 12u) >> 3));
+    device const uchar *exr = m.ex + (ulong)r * ((m.nidx_row + 7u) >> 3);
+    float acc = 0.0f;
+    for (uint gi = sub; gi < ng; gi += subw) {
+        const uint w0 = rowp[3u * gi], w1 = rowp[3u * gi + 1u], w2 = rowp[3u * gi + 2u];
+        uint v[8];
+        v[0] = w0 & 0xFFFu;                  v[1] = (w0 >> 12) & 0xFFFu;
+        v[2] = ((w0 >> 24) | (w1 << 8)) & 0xFFFu; v[3] = (w1 >> 4) & 0xFFFu;
+        v[4] = (w1 >> 16) & 0xFFFu;          v[5] = ((w1 >> 28) | (w2 << 4)) & 0xFFFu;
+        v[6] = (w2 >> 8) & 0xFFFu;           v[7] = (w2 >> 20) & 0xFFFu;
+        if (m.has_ex) { const uint eb = exr[gi]; for (uint k = 0; k < 8u; k++) v[k] |= ((eb >> k) & 1u) << 12; }
+        device const float4 *xg = (device const float4 *)(xs + gi * 64u);
+        float sacc = 0.0f;
+        for (uint k = 0; k < 8u; k++) {
+            device const half4 *cp = (device const half4 *)(m.cbh + (ulong)v[k] * 8u);
+            sacc += dot(float4(cp[0]), xg[2u * k]) + dot(float4(cp[1]), xg[2u * k + 1u]);
+        }
+        acc += sacc;
+    }
+    return acc;
+}
+// gate/up: grid (ceil(MID/32), n_tok·K), 256 线程 = 8 simdgroup × 4 行
+kernel void kernel_v41_vq_gateup_q12(constant v41_vq_args &a [[buffer(0)]], device float *h [[buffer(1)]], device const uchar *blob [[buffer(2)]],
+                                  device const int *sel [[buffer(3)]], device const float *x [[buffer(4)]], constant ulong &blob_off [[buffer(5)]],
+                                  device const half *cbh [[buffer(6)]],
+                                  uint2 tg [[threadgroup_position_in_grid]], uint sgitg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint pair = tg.y, t = pair / a.K, grp = lane >> 2, sub = lane & 3u;
+    const uint rbase = (tg.x * 8u + sgitg) * 4u, r = rbase + (grp >> 1);
+    const bool up = (grp & 1u) != 0u, live = r < a.MID;
+    const int e = sel[pair];
+    if (e < 0 || rbase >= a.MID) return;
+    device const float *xt = x + (ulong)t * a.IN;
+    device const uchar *b = blob + blob_off;
+    v41_vq_mat mg = v41_vq_open(b, (uint)e, 0u, a.MID, a.IN, a.v3), mu = v41_vq_open(b, (uint)e, 1u, a.MID, a.IN, a.v3);
+    if (!mg.ok || !mu.ok) return;
+    mg.cbh = cbh; mg.cbh_on = true; mu.cbh = cbh; mu.cbh_on = true;
+    if (v41_vq_q12_ok(mg, blob, blob_off) && v41_vq_q12_ok(mu, blob, blob_off)) {
+        float p = live ? v41_vq_row_part(up ? mu : mg, r, xt, sub, 4u) : 0.0f;
+        p += simd_shuffle_xor(p, 2u); p += simd_shuffle_xor(p, 1u);
+        const float pu = simd_shuffle_down(p, 4u);
+        if (!up && sub == 0u && live) {
+            const float gv = v41_bf16r(p * v41_vq_gain(mg, r, x, 0u)), ui = v41_bf16r(pu * v41_vq_gain(mu, r, x, 0u));
+            h[(ulong)pair * a.MID + r] = v41_vq_swiglu(gv, ui, a.clamp_v);
+        }
+    } else {
+        for (uint q = 0; q < 4u; q++) {
+            const uint rr = rbase + q;
+            if (rr >= a.MID) break;
+            const float gv = v41_bf16r(v41_vq_row_dot(mg, rr, xt, x, 0u, lane));
+            const float ui = v41_bf16r(v41_vq_row_dot(mu, rr, xt, x, 0u, lane));
+            if (lane == 0u) h[(ulong)pair * a.MID + rr] = v41_vq_swiglu(gv, ui, a.clamp_v);
+        }
+    }
+}
+// down: grid (ceil(OUT/64), np), 256 线程 = 8 simdgroup × 8 行, 每行 4 lane
+kernel void kernel_v41_vq_down_q12(constant v41_vq_args &a [[buffer(0)]], device float *partial [[buffer(1)]], device const uchar *blob [[buffer(2)]],
+                                device const int *sel [[buffer(3)]], device const float *h [[buffer(4)]], constant ulong &blob_off [[buffer(5)]],
+                                device const float *gov [[buffer(6)]], device const half *cbh [[buffer(7)]], uint2 tg [[threadgroup_position_in_grid]],
+                                uint sgitg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint pair = tg.y, sub = lane & 3u, rbase = (tg.x * 8u + sgitg) * 8u, r = rbase + (lane >> 2);
+    const int e = sel[pair];
+    const bool live = r < a.OUT;
+    device const float *hp = h + (ulong)pair * a.MID;
+    if (e < 0) { if (live && sub == 0u) partial[(ulong)pair * a.OUT + r] = 0.0f; return; }
+    v41_vq_mat md = v41_vq_open(blob + blob_off, (uint)e, 2u, a.OUT, a.MID, a.v3);
+    if (!md.ok) { if (live && sub == 0u) partial[(ulong)pair * a.OUT + r] = 0.0f; return; }
+    md.cbh = cbh; md.cbh_on = true;
+    if (v41_vq_q12_ok(md, blob, blob_off)) {
+        float p = live ? v41_vq_row_part(md, r, hp, sub, 4u) : 0.0f;
+        p += simd_shuffle_xor(p, 2u); p += simd_shuffle_xor(p, 1u);
+        if (live && sub == 0u) partial[(ulong)pair * a.OUT + r] = v41_bf16r(p * v41_vq_gain(md, r, gov + (ulong)e * a.OUT, a.has_gov));
+    } else {
+        for (uint q = 0; q < 8u; q++) {
+            const uint rr = rbase + q;
+            if (rr >= a.OUT) break;
+            const float y = v41_bf16r(v41_vq_row_dot(md, rr, hp, gov + (ulong)e * a.OUT, a.has_gov, lane));
+            if (lane == 0u) partial[(ulong)pair * a.OUT + rr] = y;
+        }
+    }
 }
 // out[t][o] = Σ_k w[t][k]·partial[t·K+k][o]; tail 版再 + so 并舍 bf16(MoE 尾巴四发合一)
 kernel void kernel_v41_vq_reduce(constant v41_vq_args &a [[buffer(0)]], device float *out [[buffer(1)]], device const float *partial [[buffer(2)]],
@@ -243,3 +344,4 @@ kernel void kernel_v41_mtp_down(constant v41_mtp_args &a [[buffer(0)]], device f
     const float y = v41_fp4_row_dot(w, offs[2u * a.n_expert + e], r, h + (ulong)pair * a.MID, a.MID, lane);
     if (lane == 0u) partial[(ulong)pair * a.OUT + r] = v41_bf16r(y);
 }
+

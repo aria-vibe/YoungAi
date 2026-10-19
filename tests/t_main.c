@@ -2,6 +2,7 @@
  * 原单文件 tests/ds4_test.c 本体(重构阶段8 机械拆分): 各 suite 抽出为 tests/t_*.c,
  * 跨文件助手与 suite 入口声明在 tests/test_internal.h。 */
 #include "test_internal.h"
+#include "../ds4_v41_api.h"
 
 /* 运行器登记表: flag=命令行开关, name=进度打印名, desc=--help 一行说明。
  * (typedef 曾在 daa6237 随 --penalty-unit 套件误删, 运行器因此编不过;
@@ -52,6 +53,7 @@ static void test_print_help(const char *prog) {
     puts("      Show this help.");
     puts("\nEnvironment:");
     puts("  --model FILE         GGUF model for the real-model suites (default ds4flash.gguf).");
+    puts("  --engram-dir DIR     V4.1: directory with the n-gram table shards (same as ds4 / ds4-server --engram-dir).");
     puts("  --long-prompt FILE   Rendered long-context story fact prompt.");
     puts("  --vector-file FILE   Simple official-vector fixture.");
     puts("  --local-golden FILE  Local top-k golden-vector fixture.");
@@ -124,6 +126,8 @@ int main(int argc, char **argv) {
             return 0;
         } else if (!strcmp(argv[i], "--model")) {
             g_test_model = test_need_value(&i, argc, argv);
+        } else if (!strcmp(argv[i], "--engram-dir")) {
+            ds4_engine_v41_set_engram_dir(test_need_value(&i, argc, argv));
         } else if (!strcmp(argv[i], "--vector-file")) {
             g_test_vector_file = test_need_value(&i, argc, argv);
         } else if (!strcmp(argv[i], "--long-prompt")) {

@@ -405,7 +405,10 @@ int v41_draft_launch(ds4_engine *e, ds4_v41_state *main_st, ds4_v41_draft *dr, i
      * 位置 < 窗宽 / rows 超档 / 草稿图已关 的直发不是暖身, 那就是它的真实成本(调度器按 last_warm 决定记不记账) */
     const bool in_grows = rows >= 1u && rows <= DS4_V41_DRAFT_GROWS;
     dr->last_warm = dr->rounds == 0u || (in_grows && dr->gwarm[rows] == 0u && pos0 >= SWA && !dr->graph_off);
-    if (!v41_draft_gpu_round(e, main_st, dr, first, rows, pos0)) return 0;
+    /* 直发也包一批(2026-10-17 M5): Metal 批外每核独占命令缓冲, 草稿一轮 ~100 ms 大半是提交开销 */
+    if (ds4_gpu_begin_commands() == 0) return 0;
+    const bool gr_ok = v41_draft_gpu_round(e, main_st, dr, first, rows, pos0);
+    if (ds4_gpu_end_commands() == 0 || !gr_ok) return 0;
     if (rows) dr->win_end = pos_main;
     if (!ds4_gpu_synchronize()) return 0;
     if (!ds4_gpu_tensor_read(dr->ids, 0, dr->host_ids, (uint64_t)(dr->block + 1u) * 4)) return 0;

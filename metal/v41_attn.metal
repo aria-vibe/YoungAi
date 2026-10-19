@@ -78,6 +78,209 @@ kernel void kernel_v41_sparse_attn(constant v41_attn_args &a [[buffer(0)]], devi
     for (uint e = 0; e < per; e++) o[((ulong)i * a.n_head + h) * hd + lane * per + e] = v41_bf16r(acc[e] / den);
 }
 
+// 压缩 KV 预解(2026-10-18 M5): grid (ng), 128 线程; out[g][d] = half(v41_ckv_get_s(...)), 与核内现解同值。
+kernel void kernel_v41_ckv_predecode(device const uchar *kvc [[buffer(0)]], device half *out [[buffer(1)]], constant uint &ng [[buffer(2)]],
+                                     uint g [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]]) {
+    threadgroup float sc[32];
+    if (g >= ng) return;
+    device const uchar *row = kvc + (ulong)g * 288u;
+    if (tid < 32u) sc[tid] = v41_e4m3_to_f32(row[256u + tid]);
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    for (uint d = tid; d < 512u; d += 128u) out[(ulong)g * 512u + d] = half(v41_ckv_get_s(row, d, sc));
+}
+// ---- 预填版 MMA(2026-10-17 M5 提速): 一 threadgroup = 一行 query × 8 头, 128 线程(4 simdgroup)。键块与在线 softmax 同原核(8 键一块,
+// p 舍 bf16, sink 只进分母); QK = Q(8×512)·Kᵀ 按 k 维分 4 段各算部分和; PV: 每 simdgroup 管 128 维(16 块 8×8), O = diag(rs)·O + P·V。
+kernel void kernel_v41_sparse_attn_mma(constant v41_attn_args &a [[buffer(0)]], device float *o [[buffer(1)]], device const float *q [[buffer(2)]],
+                                       device const float *kvw [[buffer(3)]], device const uchar *kvc [[buffer(4)]], device const int *idx [[buffer(5)]],
+                                       device const float *sink [[buffer(6)]], device const int *posd [[buffer(7)]],
+                                       device const half *kvh [[buffer(8)]],
+                                       uint2 tg [[threadgroup_position_in_grid]], ushort tid [[thread_index_in_threadgroup]],
+                                       ushort sgitg [[simdgroup_index_in_threadgroup]]) {
+    threadgroup half qs[8 * 512];
+    threadgroup half ks[8 * 512];
+    threadgroup float sp[4 * 64];
+    threadgroup float ksc[8][32];
+    threadgroup float dmat[64];
+    threadgroup half pmat[64];
+    threadgroup int kok[8];
+    threadgroup float mrow[8], lrow[8];
+    const uint i = tg.x, h0 = tg.y * 8u, hd = 512u;
+    const uint pos0 = a.has_posd ? (uint)posd[0] : a.pos0;
+    for (uint e = tid; e < 8u * hd; e += 128u) qs[e] = half(q[((ulong)i * a.n_head + h0 + e / hd) * hd + (e % hd)]);
+    if (tid < 8u) { mrow[tid] = -1e30f; lrow[tid] = 0.0f; }
+    if (tid < 64u) dmat[tid] = 0.0f;
+    const uint p = pos0 + i;
+    const uint last = a.full_block ? pos0 + a.full_block - 1u : p;
+    uint lo = a.full_block ? (pos0 > a.window ? pos0 - a.window : 0u) : (p + 1u > a.window ? p + 1u - a.window : 0u);
+    if (lo < a.win_lo) lo = a.win_lo;
+    const uint nwin = last - lo + 1u;
+    const uint topk = a.has_comp ? a.topk : 0u;
+    const uint nkeys = nwin + topk;
+    simdgroup_float8x8 oacc[16];
+    for (short t = 0; t < 16; t++) oacc[t] = make_filled_simdgroup_matrix<float, 8>(0.f);
+    for (uint base = 0; base < nkeys; base += 8u) {
+        const uint nt = (nkeys - base) < 8u ? (nkeys - base) : 8u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        /* 键块: 线程 tid → 第 kt = tid/16 个键, 维 [32·(tid%16), +32) */
+        const uint kt = tid / 16u, dseg = (tid % 16u) * 32u, kk = base + kt;
+        bool have_w = false, have_c = false; ulong wrow = 0; device const uchar *cpk = kvc; int gsel = 0;
+        if (kt < nt) {
+            if (kk < nwin) { have_w = true; wrow = (ulong)v41_win_row((int)(lo + kk), pos0, a.window, a.ring) * hd; }
+            else { const int g = idx[(ulong)i * topk + (kk - nwin)]; if (g >= 0 && (uint)g < a.ng) { have_c = true; gsel = g; cpk = kvc + (ulong)g * 288u; } }
+        }
+        if ((tid % 16u) == 0u) kok[kt] = (have_w || have_c) ? 1 : 0;
+        if (a.pad == 1u) {   /* 压缩行已预解成 half */
+            if (have_w) { for (uint d = dseg; d < dseg + 32u; d++) ks[kt * hd + d] = half(kvw[wrow + d]); }
+            else if (have_c) { device const half4 *src4 = (device const half4 *)(kvh + (ulong)gsel * hd + dseg); threadgroup half4 *dst4 = (threadgroup half4 *)(ks + kt * hd + dseg);
+                               for (uint d = 0; d < 8u; d++) dst4[d] = src4[d]; }
+            else { for (uint d = dseg; d < dseg + 32u; d++) ks[kt * hd + d] = half(0.0f); }
+        } else {
+        if (have_c) { const uint sidx = (tid % 16u) * 2u; ksc[kt][sidx] = v41_e4m3_to_f32(cpk[256u + sidx]); ksc[kt][sidx + 1u] = v41_e4m3_to_f32(cpk[256u + sidx + 1u]); }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        for (uint d = dseg; d < dseg + 32u; d++)
+            ks[kt * hd + d] = half(have_w ? kvw[wrow + d] : (have_c ? v41_ckv_get_s(cpk, d, ksc[kt]) : 0.0f));
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        /* QK 部分和: simdgroup sg 管 k ∈ [128·sg, +128) */
+        {
+            simdgroup_float8x8 sacc = make_filled_simdgroup_matrix<float, 8>(0.f);
+            simdgroup_half8x8 mq, mk;
+            for (uint k0 = sgitg * 128u; k0 < sgitg * 128u + 128u; k0 += 8u) {
+                simdgroup_load(mq, qs + k0, hd, 0, false);
+                simdgroup_load(mk, ks + k0, hd, 0, true);
+                simdgroup_multiply_accumulate(sacc, mq, mk, sacc);
+            }
+            simdgroup_store(sacc, sp + sgitg * 64u, 8, 0, false);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        /* 在线 softmax: 线程 r(<8) 管第 r 个头(行) */
+        if (tid < 8u) {
+            const uint r = tid;
+            float s8[8]; float tm = -1e30f;
+            for (uint t = 0; t < 8u; t++) {
+                const float d = sp[r * 8u + t] + sp[64u + r * 8u + t] + sp[128u + r * 8u + t] + sp[192u + r * 8u + t];
+                s8[t] = (t < nt && kok[t]) ? d * a.scale : -1e30f;
+                tm = max(tm, s8[t]);
+            }
+            const float mx = mrow[r], nm = max(mx, tm), rs = exp(mx - nm);
+            float ps = 0.0f;
+            for (uint t = 0; t < 8u; t++) {
+                const float pv = (t < nt) ? exp(s8[t] - nm) : 0.0f;
+                ps += pv;
+                pmat[r * 8u + t] = half(v41_bf16r(pv));
+            }
+            lrow[r] = lrow[r] * rs + ps;
+            mrow[r] = nm;
+            dmat[r * 9u] = rs;
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        /* PV: O = diag(rs)·O + P·V, simdgroup sg 管维 [128·sg, +128) */
+        {
+            simdgroup_float8x8 md; simdgroup_half8x8 mp, mv;
+            simdgroup_load(md, dmat, 8, 0, false);
+            simdgroup_load(mp, pmat, 8, 0, false);
+            for (short t = 0; t < 16; t++) {
+                const uint c0 = sgitg * 128u + (uint)t * 8u;
+                simdgroup_multiply(oacc[t], md, oacc[t]);
+                simdgroup_load(mv, ks + c0, hd, 0, false);
+                simdgroup_multiply_accumulate(oacc[t], mp, mv, oacc[t]);
+            }
+        }
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+    device float *orow = o + ((ulong)i * a.n_head + h0) * hd;
+    for (short t = 0; t < 16; t++) simdgroup_store(oacc[t], orow + sgitg * 128u + (uint)t * 8u, hd, 0, false);
+    threadgroup_barrier(mem_flags::mem_device);
+    for (uint e = tid; e < 8u * hd; e += 128u) {
+        const uint r = e / hd;
+        const float den = lrow[r] + exp(sink[h0 + r] - mrow[r]);
+        orow[e] = v41_bf16r(orow[e] / den);
+    }
+}
+
+// ---- 分段版(2026-10-17 M5 提速): 键分 S 段(grid.z), 每段出 (acc[hd], max, sum), 再由 reduce 核合并。
+// 每个键的打分 / p 舍 bf16 / 8 键一块的在线 softmax 与原核同; 只有跨段合并的结合序不同 ⇒ 值有末位差, 门是生成比对 + NLL。
+// part 布局: [((i·n_head + h)·S + s)·(hd + 2)] = acc[hd], max, sum。S 放在 a.pad。
+kernel void kernel_v41_sparse_attn_split(constant v41_attn_args &a [[buffer(0)]], device float *part [[buffer(1)]], device const float *q [[buffer(2)]],
+                                         device const float *kvw [[buffer(3)]], device const uchar *kvc [[buffer(4)]], device const int *idx [[buffer(5)]],
+                                         device const int *posd [[buffer(6)]],
+                                         uint3 tg [[threadgroup_position_in_grid]], uint sgitg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    threadgroup float ks[8][512];
+    threadgroup float ksc[8][32];
+    threadgroup int kok[8];
+    const uint i = tg.x, h = tg.y * 8u + sgitg, hd = a.hd, per = hd / 32u, S = a.pad, sp = tg.z;
+    const uint pos0 = a.has_posd ? (uint)posd[0] : a.pos0;
+    float qa[16], acc[16];
+    for (uint e = 0; e < per; e++) { qa[e] = q[((ulong)i * a.n_head + h) * hd + lane * per + e]; acc[e] = 0.0f; }
+    float mx = -1e30f, sum = 0.0f;
+    const uint p = pos0 + i;
+    const uint last = a.full_block ? pos0 + a.full_block - 1u : p;
+    uint lo = a.full_block ? (pos0 > a.window ? pos0 - a.window : 0u) : (p + 1u > a.window ? p + 1u - a.window : 0u);
+    if (lo < a.win_lo) lo = a.win_lo;
+    const uint nwin = last - lo + 1u;
+    const uint topk = a.has_comp ? a.topk : 0u;
+    const uint nkeys = nwin + topk;
+    const uint chunk = ((nkeys + S - 1u) / S + 7u) & ~7u;
+    const uint kb = sp * chunk, ke = min(nkeys, kb + chunk);
+    for (uint base = kb; base < ke; base += 8u) {
+        const uint nt = (ke - base) < 8u ? (ke - base) : 8u;
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        if (sgitg < nt) {
+            const uint t = sgitg, kk = base + t;
+            bool have_w = false, have_c = false; ulong wrow = 0; device const uchar *cpk = kvc;
+            if (kk < nwin) { have_w = true; wrow = (ulong)v41_win_row((int)(lo + kk), pos0, a.window, a.ring) * hd; }
+            else { const int g = idx[(ulong)i * topk + (kk - nwin)]; if (g >= 0 && (uint)g < a.ng) { have_c = true; cpk = kvc + (ulong)g * 288u; } }
+            if (lane == 0u) kok[t] = (have_w || have_c) ? 1 : 0;
+            if (have_c) ksc[t][lane] = v41_e4m3_to_f32(cpk[256u + lane]);
+            simdgroup_barrier(mem_flags::mem_threadgroup);
+            for (uint d = lane; d < hd; d += 32u) ks[t][d] = have_w ? kvw[wrow + d] : (have_c ? v41_ckv_get_s(cpk, d, ksc[t]) : 0.0f);
+        }
+        threadgroup_barrier(mem_flags::mem_threadgroup);
+        float s[8]; float tm = -1e30f;
+        for (uint t = 0; t < nt; t++) {
+            float d = 0.0f;
+            for (uint e = 0; e < per; e++) d += qa[e] * ks[t][lane * per + e];
+            d = simd_sum(d);
+            s[t] = kok[t] ? d * a.scale : -1e30f;
+            tm = max(tm, s[t]);
+        }
+        const float nm = max(mx, tm), rs = exp(mx - nm);
+        float add[16]; for (uint e = 0; e < per; e++) add[e] = 0.0f;
+        float ps = 0.0f;
+        for (uint t = 0; t < nt; t++) {
+            const float pv = exp(s[t] - nm);
+            ps += pv;
+            const float pb = v41_bf16r(pv);
+            for (uint e = 0; e < per; e++) add[e] += pb * ks[t][lane * per + e];
+        }
+        sum = sum * rs + ps;
+        for (uint e = 0; e < per; e++) acc[e] = acc[e] * rs + add[e];
+        mx = nm;
+    }
+    device float *pp = part + (((ulong)i * a.n_head + h) * S + sp) * (hd + 2u);
+    for (uint e = 0; e < per; e++) pp[lane * per + e] = acc[e];
+    if (lane == 0u) { pp[hd] = mx; pp[hd + 1u] = sum; }
+}
+// 合并: grid (n_tok, n_head/8), 256 线程, 一 simdgroup 一个头
+kernel void kernel_v41_sparse_attn_reduce(constant v41_attn_args &a [[buffer(0)]], device float *o [[buffer(1)]], device const float *part [[buffer(2)]],
+                                          device const float *sink [[buffer(3)]],
+                                          uint2 tg [[threadgroup_position_in_grid]], uint sgitg [[simdgroup_index_in_threadgroup]], uint lane [[thread_index_in_simdgroup]]) {
+    const uint i = tg.x, h = tg.y * 8u + sgitg, hd = a.hd, per = hd / 32u, S = a.pad;
+    device const float *pp = part + ((ulong)i * a.n_head + h) * S * (hd + 2u);
+    float M = -1e30f;
+    for (uint sp = 0; sp < S; sp++) M = max(M, pp[sp * (hd + 2u) + hd]);
+    float sum = 0.0f, acc[16];
+    for (uint e = 0; e < per; e++) acc[e] = 0.0f;
+    for (uint sp = 0; sp < S; sp++) {
+        device const float *ps = pp + sp * (hd + 2u);
+        const float w = exp(ps[hd] - M);
+        sum += ps[hd + 1u] * w;
+        for (uint e = 0; e < per; e++) acc[e] += ps[lane * per + e] * w;
+    }
+    const float den = sum + exp(sink[h] - M);
+    for (uint e = 0; e < per; e++) o[((ulong)i * a.n_head + h) * hd + lane * per + e] = v41_bf16r(acc[e] / den);
+}
+
 // ---- indexer 打分(官方 Indexer.forward): score[i][c] = bf16(Σ_h bf16(relu(bf16(q_h·k_g))·w[i][h])); 不可见 → −inf
 // 一 simdgroup 一个候选项 c; grid (n_tok, gblocks) × 256 线程。cand 非空(C2): 紧凑行 [ns], 第 c 项 ↔ 组 list[1+c/bs]·bs + c%bs。
 struct v41_idx_args { uint pos0, ng, n_head, dk, ratio, has_posd, has_cand, cand_bs, cand_cap, n_rows, topk, pad; };

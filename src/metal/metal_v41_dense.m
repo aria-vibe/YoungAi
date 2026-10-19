@@ -41,10 +41,88 @@ int v41_gemv(const void *model_map, uint64_t model_size, uint32_t wtype, uint64_
     a.sc_gstride = wtype == V41_WT_FP8BLK ? (uint64_t)((out_dim + 31u) / 32u) * a.sbc : 0;
     a.in_dim = (uint32_t)in_dim; a.out_dim = (uint32_t)out_dim; a.x_stride = x_stride; a.out_stride = out_stride; a.ksplit = ksplit;
     a.x_gstride = x_gstride; a.out_gstride = out_gstride; a.n_tok = n_tok; a.round_out = round_out ? 1u : 0u; a.wtype = wtype; a.has_skip = skip ? 1u : 0u;
+    /* q4_K、n_tok == 1: llama.cpp kernel_mul_mv_q4_K_f32 移植核(f32 激活, 只差加法次序; M5 解码 33.7 → 38 tok/s 的一半来自这里) */
+    if (wtype == V41_WT_Q4K && n_tok == 1u && (out_dim % 4u) == 0u && (in_dim % 256u) == 0u) {
+        v41_bind bq[] = { V41_A(a), V41_B(wb, 0), V41_T(x), V41_T(out), V41_T(skip) };
+        return v41_launch("kernel_v41_gemv_q4k_ll", bq, 5, MTLSizeMake((NSUInteger)(out_dim / 4u), n_groups, 1), MTLSizeMake(64, 1, 1));
+    }
+    /* q4_K、2 ≤ n_tok ≤ 8(投机验证批): 8 行同块广播 x + 权重整解一次的核(f32 激活) */
+    if (wtype == V41_WT_Q4K && n_tok >= 2u && (out_dim % 8u) == 0u && (in_dim % 256u) == 0u && (x_stride % 4u) == 0u &&
+        (x_gstride % 4u) == 0u && (ds4_gpu_tensor_offset(x) % 16u) == 0u) {
+        char qn[40]; snprintf(qn, sizeof qn, "kernel_v41_gemv_q4k_w%u", n_tok);
+        v41_bind bq[] = { V41_A(a), V41_B(wb, 0), V41_T(x), V41_T(out), V41_T(skip) };
+        return v41_launch(qn, bq, 5, MTLSizeMake((NSUInteger)(out_dim / 8u), n_groups, 1), MTLSizeMake(128, 1, 1));
+    }
     char name[48]; snprintf(name, sizeof name, "kernel_v41_gemv_nt%u", n_tok);
     const uint32_t rpb = 8u / ksplit;
     v41_bind b[] = { V41_A(a), V41_B(wb, 0), V41_T(x), V41_T(out), V41_T(skip), V41_B(wb, 0) };
     return v41_launch(name, b, 6, MTLSizeMake((NSUInteger)((out_dim + rpb - 1u) / rpb), n_groups, 1), MTLSizeMake(256, 1, 1));
+}
+
+/* fp8blk 矩阵的缩放平面里, E8M0 指数的范围能否让所有 e4m3×2^s 在 half 里精确(|v| ≤ 448·2^smax < 65504 且最小非零 ≥ 2^-21)。按权重偏移缓存。 */
+static int v41_fp8_half_safe(const uint8_t *scales, uint64_t n) {
+    static struct { const uint8_t *p; int ok; } cache[64]; static int nc = 0;
+    for (int i = 0; i < nc; i++) if (cache[i].p == scales) return cache[i].ok;
+    int mn = 255, mx = 0;
+    for (uint64_t i = 0; i < n; i++) { const int e = scales[i]; if (e < mn) mn = e; if (e > mx) mx = e; }
+    const int smin = mn - 127, smax = mx - 127;
+    const int ok = mx != 255 && smax <= 7 && smin >= -12;
+    if (nc < 64) { cache[nc].p = scales; cache[nc].ok = ok; nc++; }
+    fprintf(stderr, "ds4: [v41-metal] fp8 缩放指数范围 [%d, %d] → half 预填 %s\n", smin, smax, ok ? "启用" : "不用");
+    return ok;
+}
+
+/* 推理路预填快核的分发(调用方已判 half 开关、wnn == 0、x 16 B 对齐)。返回 1/0 = 发了(成败), -1 = 没有合形状的快核。
+ * 次序按 M5 实测: TensorOps(Metal 4 才有)> simdgroup half 瓦片 > 窄输出核。 */
+static int v41_wgemm_half(const v41_wgemm_args *a, const void *model_map, uint64_t off, uint64_t wg, id<MTLBuffer> wb, uint64_t inner,
+                          const ds4_gpu_tensor *x, ds4_gpu_tensor *out, uint32_t n_groups, uint32_t x_gstride, uint32_t lda, uint32_t ldc,
+                          int beta, int round_out) {
+    const uint32_t wtype = a->wtype, M = a->M, N = a->N, K = a->K;
+    const MTLSize grid_mm = MTLSizeMake((M + 31u) / 32u, (N + 63u) / 64u, n_groups), tg_mm = MTLSizeMake(128, 1, 1);
+    v41_bind bm[] = { V41_A(*a), V41_B(wb, 0), V41_T(x), V41_T(out) };
+    /* q4_K / bf16 走 Metal 4 TensorOps(matmul2d): 单组、紧排、无 beta、维度对齐时; 不对齐的 token 数 = 对齐前缀走 TensorOps, 余下 < 32 行走 half 瓦片 */
+    const int is_bf = wtype == V41_WT_BF16;
+    if ((wtype == V41_WT_Q4K || is_bf) && n_groups == 1u && lda == K && ldc == N && !beta && ds4_gpu_mpp_available() &&
+        (K % 32u) == 0u && (N % 64u) == 0u && M >= 32u) {
+        const uint32_t Mal = M & ~31u, Mtail = M - Mal;
+        const uint32_t tile = (Mal % 128u) == 0u ? 128u : ((Mal % 64u) == 0u ? 64u : 32u);
+        const char *fn = is_bf ? (tile == 128u ? "kernel_v41_mm_bf16_mpp_n128" : (tile == 64u ? "kernel_v41_mm_bf16_mpp_n64" : "kernel_v41_mm_bf16_mpp"))
+                               : (tile == 128u ? "kernel_v41_mm_q4K_mpp_n128" : (tile == 64u ? "kernel_v41_mm_q4K_mpp_n64" : "kernel_v41_mm_q4K_mpp"));
+        id<MTLComputePipelineState> pl = ds4_gpu_get_mul_mm_pipeline(fn, false, false);
+        if (pl) {
+            ds4_gpu_mul_mm_args ma = ds4_gpu_make_mm_args(K, N, Mal, is_bf ? (uint64_t)K * 2u : (uint64_t)(K / 256u) * 144u);
+            int owned = 0;
+            id<MTLCommandBuffer> cb = ds4_gpu_command_buffer(&owned);
+            id<MTLComputeCommandEncoder> enc = ds4_gpu_compute_encoder(cb);
+            [enc setComputePipelineState:pl];
+            [enc setBytes:&ma length:sizeof(ma) atIndex:0];
+            [enc setBuffer:wb offset:(NSUInteger)inner atIndex:1];
+            [enc setBuffer:ds4_gpu_tensor_buffer(x) offset:ds4_gpu_tensor_offset(x) atIndex:2];
+            [enc setBuffer:ds4_gpu_tensor_buffer(out) offset:ds4_gpu_tensor_offset(out) atIndex:3];
+            [enc setThreadgroupMemoryLength:64u * 32u * sizeof(uint16_t) atIndex:0];
+            [enc dispatchThreadgroups:MTLSizeMake(Mal / tile, N / 64u, 1) threadsPerThreadgroup:tg_mm];
+            ds4_gpu_end_compute_encoder(cb, enc);
+            if (!ds4_gpu_submit_command_buffer_async(cb, owned)) return 0;
+            if (round_out && !ds4_gpu_v41_round_bf16_tensor(out, (uint64_t)Mal * N)) return 0;
+            if (!Mtail) return 1;
+            v41_wgemm_args at = *a; at.M = Mtail;
+            v41_bind bt[] = { V41_A(at), V41_B(wb, 0), V41_TO(x, (uint64_t)Mal * lda * 4u), V41_TO(out, (uint64_t)Mal * ldc * 4u) };
+            return v41_launch(is_bf ? "kernel_v41_wgemm_bf16_mm" : "kernel_v41_wgemm_q4k_mm", bt, 4,
+                              MTLSizeMake((Mtail + 31u) / 32u, (N + 63u) / 64u, 1), tg_mm);
+        }
+    }
+    const int k4 = (lda % 4u) == 0u && (x_gstride % 4u) == 0u;
+    if (wtype == V41_WT_Q4K && (K % 256u) == 0u && k4) return v41_launch("kernel_v41_wgemm_q4k_mm", bm, 4, grid_mm, tg_mm);
+    if (wtype == V41_WT_FP8BLK && (K % 32u) == 0u && k4) {   /* 缩放后值在 half 里精确才用 half 权重瓦片, 否则 bf16 瓦片 */
+        const uint64_t sbc = (K + 31u) / 32u, sbr = (N + 31u) / 32u;
+        const int half_ok = v41_fp8_half_safe((const uint8_t *)model_map + off + wg * n_groups, (uint64_t)n_groups * sbr * sbc);
+        return v41_launch(half_ok ? "kernel_v41_wgemm_w8_mm" : "kernel_v41_wgemm_w8_mmbf", bm, 4, grid_mm, tg_mm);
+    }
+    if (is_bf && N > 64u && (K % 32u) == 0u && k4 && (inner % 2u) == 0u) return v41_launch("kernel_v41_wgemm_bf16_mm", bm, 4, grid_mm, tg_mm);
+    /* 窄输出(N ≤ 64)f32/bf16: 原瓦片核 64×64 网格只开几十个 threadgroup */
+    if ((wtype == V41_WT_F32 || is_bf) && n_groups == 1u && N <= 64u && (K % 4u) == 0u && (lda % 4u) == 0u && (inner % 8u) == 0u)
+        return v41_launch("kernel_v41_wgemm_skinny", bm, 4, MTLSizeMake((M + 7u) / 8u, (N + 7u) / 8u, 1), MTLSizeMake(256, 1, 1));
+    return -1;
 }
 
 int v41_wgemm(const void *model_map, uint64_t model_size, uint32_t wtype, uint64_t off, uint32_t wnn, uint32_t M, uint32_t N, uint32_t K,
@@ -65,6 +143,13 @@ int v41_wgemm(const void *model_map, uint64_t model_size, uint32_t wtype, uint64
     a.sc_off = wtype == V41_WT_FP8BLK ? inner + wg * n_groups : inner; a.sc_gstride = wtype == V41_WT_FP8BLK ? sbr * sbc : 0;
     a.M = M; a.N = N; a.K = K; a.lda = lda; a.ldc = ldc; a.x_gstride = x_gstride; a.out_gstride = out_gstride;
     a.wtype = wtype; a.wnn = wnn; a.wcols = wcols; a.sbc = (uint32_t)sbc; a.beta = beta ? 1u : 0u; a.round_out = round_out ? 1u : 0u;
+    /* ★推理路的预填快核(metal/v41_prefill_mm.metal)★: 权重解成 half、激活在 threadgroup 里舍成 half(llama.cpp kernel_mul_mm 同法),
+     * 相对误差 ~1e-3, 门是 NLL。训练原语(反传重算、--metal-v41 的精确界)要 f32 精确, 所以只有推理调用方开着
+     * ds4_gpu_v41_set_half_prefill(1) 时才走; 关着、或形状不合(返回 -1), 落到下面原来的 f32 kernel_v41_wgemm。 */
+    if (g_v41_half_prefill && !wnn && (ds4_gpu_tensor_offset(x) % 16u) == 0u) {
+        const int r = v41_wgemm_half(&a, model_map, off, wg, wb, inner, x, out, n_groups, x_gstride, lda, ldc, beta, round_out);
+        if (r >= 0) return r;
+    }
     v41_bind b[] = { V41_A(a), V41_B(wb, 0), V41_T(x), V41_T(out), V41_B(wb, 0) };
     return v41_launch("kernel_v41_wgemm", b, 5, MTLSizeMake((N + 63u) / 64u, (M + 63u) / 64u, n_groups), MTLSizeMake(128, 1, 1));
 }
