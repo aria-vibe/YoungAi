@@ -53,6 +53,10 @@ int ds4_gpu_v41_grouped_matmul_q4k_tensor(ds4_gpu_tensor *low, const void *model
 /* 合批开关(2026-10-10): 1 = 接下来的 q4_K 乘法若行数在 9..16, 走张量核小批形态(与解码 GEMV 只差加法次序); 0 = 照旧(9 行起走预填 GEMM)。
  * 只有合批步(core_v41_multi.c)在一步超 8 行时开、步末关; 没有这条路的后端(Metal)空实现返回 1。 */
 int ds4_gpu_v41_set_multi_rows(int on);
+/* 推理路预填快核(2026-10-19): 1 = 接下来的预填(n > 8)GEMM / VQ 专家 / 稀疏注意力可走 half 激活的快核(Metal: llama.cpp kernel_mul_mm
+ * 同法, 相对误差 ~1e-3, 门是 NLL); 0 = 原来的 f32 核(缺省)。训练原语(反传重算)与 --metal-v41 的精确界要 f32, 所以只有推理路
+ * (生成 / 服务端请求 / 打分)在前向期间开、出前向关。没有这类快核的后端(CUDA 预填本来就走 bf16 cuBLAS)空实现返回 1。 */
+int ds4_gpu_v41_set_half_prefill(int on);
 int ds4_gpu_v41_embed_q4k_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *tokens, const void *model_map,
                                  uint64_t model_size, uint64_t weight_offset, uint64_t n_vocab,
                                  uint32_t n_tok, uint64_t dim);

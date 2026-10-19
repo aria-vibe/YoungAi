@@ -35,6 +35,7 @@ int ds4_engine_v41_score_ids(ds4_engine *e, const int *ids, int n_ids, const cha
     if (!v41_state_alloc(&st, cap, n, 0)) return 1;   /* 打分路: 每个位置都要 logits, 按 cap 开 */
     st.dump_prefix = (n <= 64u && cap == n) ? out_path : NULL;   /* 单块小样本自动落逐层 x/y, 对拍定位用 */
     st.no_engram = no_engram;
+    st.half_prefill = 1;   /* 打分量的是推理路的数(NLL 门), 与生成同核 */
     if (no_engram) fprintf(stderr, "[v41] ★no-engram★ 对拍口径, 跳过 engram 层\n");
     if (ck < n) fprintf(stderr, "[v41] 分块 %u(%u 块)\n", ck, (n + ck - 1) / ck);
     ds4_score_aux *aux = ds4_score_aux_open(g_v41_score_nll, g_v41_score_topk_path,

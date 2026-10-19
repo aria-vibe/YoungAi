@@ -11,6 +11,7 @@
 #define V41_MMA_MAX_TOK 16u
 static int g_v41_multi_rows = 0;
 int ds4_gpu_v41_set_multi_rows(int on) { g_v41_multi_rows = on ? 1 : 0; return 1; }
+int ds4_gpu_v41_set_half_prefill(int on) { (void)on; return 1; }   /* Metal 专用(契约 ds4_gpu_v41.h): CUDA 预填本来就是 bf16 cuBLAS */
 static v41_scratch g_v41_xsum;
 
 /* Σx: xs[t][sb] = Σ_{i<32} x[t][32·sb + i](f32, 顺序加); x 行距 x_stride, 每行 nsb 个子块 */

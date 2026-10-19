@@ -59,6 +59,10 @@ v41_bind v41_bind_tensor_off(const ds4_gpu_tensor *t, uint64_t byte_off) {
     return r;
 }
 
+/* 推理路预填快核开关(契约 ds4_gpu_v41.h ds4_gpu_v41_set_half_prefill): 0 = 训练原语的 f32 精确核(缺省), 1 = half 瓦片 / TensorOps 快核 */
+int g_v41_half_prefill = 0;
+int ds4_gpu_v41_set_half_prefill(int on) { g_v41_half_prefill = on ? 1 : 0; return 1; }
+
 int v41_launch(const char *kernel, const v41_bind *binds, uint32_t nbind, MTLSize tgs, MTLSize tg) {
     if (!g_initialized && !ds4_gpu_init()) return 0;
     if (tgs.width == 0 || tgs.height == 0 || tgs.depth == 0) return 1;   /* 空网格 = 没活, 成功 */

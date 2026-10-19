@@ -400,6 +400,45 @@ id<MTLBuffer> ds4_gpu_wrap_model_range(
         }
     }
 
+    /* 懒包装: VQ 合一文件的 blk.L / mtp.T ffn_exps_vq.blob 不在 backbone/expert span 里
+     * (core_bind 把它们当 CPU mmap), 但 V4.1 Metal 路径的 VQ 核要从 GPU 直读 blob ——
+     * 没有这段, 第一层 MoE 就报下面的 "not covered by mapped model views"。未覆盖的区间按需补视图,
+     * ★并加进 residency set、挂到队列★(2026-10-18): 不入集时 DSpark 草稿/验证交替的大命令缓冲在 GPU 起跑前
+     * 被驱动挡 30~1000 ms(kernelStart→GPUStart; 纯解码 0.1 ms), 大 VQ 视图每次都要重新校验/上线;
+     * 入集后 M5 上 DSpark 7.9 → 39 tok/s, 输出逐字节同。
+     * ★记账缺口★: 这些视图是加载后按需补的, 不在 L1 预算闸(ds4_l1_budget_gate)加总的 span 里 ——
+     * --mem-budget-mb 的加载期估算不含它们(VQ blob 合计约是模型文件的大头), 只剩运行期看门狗兜底。 */
+    if (model_map == g_model_map_ptr && model_size == g_model_map_size) {
+        uint64_t added = 0;
+        const uint32_t before = g_model_view_count;
+        if (ds4_gpu_add_model_view_range(model_map, model_size, offset, len, len, false, &added)) {
+            static uint32_t lazy_logged = 0;
+            if (lazy_logged++ < 4) {
+                fprintf(stderr, "ds4: Metal lazy view %.2f..%.2f GiB (resident set, %u views)\n",
+                        ds4_gpu_gib(offset), ds4_gpu_gib(end), g_model_view_count);
+            }
+            if (g_model_residency_set) {
+                if (@available(macOS 15.0, *)) {
+                    static int attached = 0;
+                    for (uint32_t i = before; i < g_model_view_count; i++) {
+                        [g_model_residency_set addAllocation:g_model_views[i].buffer];
+                        g_model_views[i].resident_hint = true;
+                    }
+                    [g_model_residency_set commit];
+                    [g_model_residency_set requestResidency];
+                    if (!attached) { [g_queue addResidencySet:g_model_residency_set]; attached = 1; }
+                }
+            }
+            for (uint32_t i = before; i < g_model_view_count; i++) {
+                const uint64_t vs = g_model_views[i].model_offset;
+                if (offset >= vs && end <= vs + g_model_views[i].bytes) {
+                    *inner_offset = offset - vs;
+                    return g_model_views[i].buffer;
+                }
+            }
+        }
+    }
+
     fprintf(stderr,
             "ds4: Metal model range %.2f..%.2f GiB is not covered by mapped model views\n",
             ds4_gpu_gib(offset),

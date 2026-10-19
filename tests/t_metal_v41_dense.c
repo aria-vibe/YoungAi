@@ -51,6 +51,17 @@ static void test_dense_type(uint32_t wt) {
         test_v41_ref_matmul(x, wref, ref, n, out_dim, in_dim, round_out);
         char name[64]; snprintf(name, sizeof name, "%s matmul n=%u r=%d", wt_name(wt), n, round_out);
         test_v41_cmp(name, got, ref, (uint64_t)n * out_dim, round_out ? 6e-3f : 1e-4f, 1e-3f);
+        if (n > DS4_V41_GEMV_MAX_TOK) {   /* 推理路的预填快核(ds4_gpu_v41_set_half_prefill): 激活舍 half(llama.cpp mul_mm 同法), 相对误差 ~1e-3, 另立宽门 */
+            float *gh = malloc((size_t)n * out_dim * 4);
+            ds4_gpu_tensor *th = test_v41_tensor(NULL, (uint64_t)n * out_dim * 4);
+            TEST_ASSERT(ds4_gpu_v41_set_half_prefill(1) != 0);
+            TEST_ASSERT(call_matmul(wt, th, off, in_dim, out_dim, tx, n, round_out) != 0);
+            (void)ds4_gpu_v41_set_half_prefill(0);
+            TEST_ASSERT(test_v41_read(th, gh, (uint64_t)n * out_dim * 4));
+            snprintf(name, sizeof name, "%s matmul half n=%u r=%d", wt_name(wt), n, round_out);
+            test_v41_cmp(name, gh, ref, (uint64_t)n * out_dim, round_out ? 6e-3f : 2e-3f, 1e-3f);
+            ds4_gpu_tensor_free(th); free(gh);
+        }
         /* 反传转置乘: gx[n][in] = gy[n][out]·W(以 got 当 gy, 顺手验 accumulate) */
         {
             float *gx = malloc((size_t)n * in_dim * 4), *gref = malloc((size_t)n * in_dim * 4);
@@ -95,6 +106,17 @@ static void test_grouped_type(uint32_t wt) {
         }
         char name[64]; snprintf(name, sizeof name, "%s grouped n=%u", wt_name(wt), n);
         test_v41_cmp(name, got, ref, (uint64_t)n * out_all, 6e-3f, 1e-3f);
+        if (n > DS4_V41_GEMV_MAX_TOK) {   /* half 快核(同上): bf16 收尾处偶尔翻一个 ulp, 最大输出(~3×RMS)处一个 ulp ≈ 1.4e-2×RMS */
+            float *gq = malloc((size_t)n * out_all * 4);
+            ds4_gpu_tensor *tq = test_v41_tensor(NULL, (uint64_t)n * out_all * 4);
+            TEST_ASSERT(ds4_gpu_v41_set_half_prefill(1) != 0);
+            TEST_ASSERT(call_grouped(wt, tq, off, G, gd, rank, tx, n, 1) != 0);
+            (void)ds4_gpu_v41_set_half_prefill(0);
+            TEST_ASSERT(test_v41_read(tq, gq, (uint64_t)n * out_all * 4));
+            snprintf(name, sizeof name, "%s grouped half n=%u", wt_name(wt), n);
+            test_v41_cmp(name, gq, ref, (uint64_t)n * out_all, 2e-2f, 1e-3f);
+            ds4_gpu_tensor_free(tq); free(gq);
+        }
         /* 分组转置乘: gheads[n][G·gd] = glow[n][G·rank]·W_g */
         {
             float *gh = malloc((size_t)n * in_all * 4), *gref = malloc((size_t)n * in_all * 4);

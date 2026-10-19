@@ -136,6 +136,7 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
     ds4_v41_state st;
     if (!v41_state_alloc(&st, cap, ctx, DS4_MTP_MAX_BLOCK + 2u)) return 1;   /* 生成路: logits 只要解码/验证批那几行 + 预填末位 */
     st.head_last_only = 1;   /* 预填块只算末位 logits(core_v41.h) */
+    st.half_prefill = 1;     /* 推理路: 预填快核(core_v41.h) */
     ds4_gpu_tensor *am = ds4_gpu_tensor_alloc((uint64_t)(DS4_MTP_MAX_BLOCK + 2u) * 16u);   /* 设备槽: 每行 16 B(采样核 4 个 int; argmax 只用第 0 个) */
     const int eos = ds4_token_eos(e);
     int rc = 1;

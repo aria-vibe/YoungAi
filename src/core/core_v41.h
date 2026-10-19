@@ -141,6 +141,8 @@ typedef struct {
     int stop_early;             /* 反修钩子说"取完了": 本次前向跳过余下层与出口(core_v41_forward.c), 调用方不读 logits */
     const char *dump_prefix;    /* 非 NULL: 每层 MoE 入/出 落 <prefix>.x_Lnn.bin / .y_Lnn.bin(对拍夹具, 单块 n≤64 才开) */
     int no_engram;              /* 对拍夹具: 跳过 engram 层(与 Python --no-engram 同口径) */
+    int half_prefill;           /* 1 = 推理路(生成 / 服务端请求 / 打分): 前向期间开 ds4_gpu_v41_set_half_prefill, 预填走 half 激活的快核(Metal);
+                                 * 0 = 训练 / 取料路, 留在 f32 精确核(反传重算要与前向逐位一致)。v41_state_alloc 清零 ⇒ 缺省 0。 */
     int ced_skip;               /* ★CED★ 本 chunk 只跑编码器段 + 分界层的 KV 投影, 不跑解码器段, 不出 logits。
                                  * 官方 §2.2/§3.2.2: 解码器的全局 KV 就是编码器末态经分界层 wkv/wk 的投影 ——
                                  * 所以提示的中间块根本不需要跑后半 40% 的层, 它们的输出没有任何下游消费者。
