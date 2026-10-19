@@ -326,6 +326,9 @@
   .sk-list .row .switch { flex: none; } .sk-list .row.off b, .sk-list .row.off small { opacity: .5; }   /* 关掉的技能字变淡, 一眼看出哪些不生效 */
   .sk-files .f { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; border-bottom: 1px dashed var(--border); word-break: break-all; }
   .sk-files .f span:last-child { color: var(--dim); flex: none; }
+  .cn-form { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 12px; margin: 10px 0; }   /* 连接器表单: 字段按类型显隐(data-f) */
+  .cn-form label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--dim); } .cn-form label[hidden] { display: none; } .cn-form input, .cn-form select { width: 100%; }
+  @media (max-width: 640px) { .cn-form { grid-template-columns: 1fr; } }
   textarea.memtxt { width: 100%; min-height: 360px; resize: vertical; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 10px 0; }
   #v-act .card { margin-bottom: 16px; } #v-act td.wrap { white-space: normal; word-break: break-all; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; } #v-act td .act { font-size: 12.5px; padding: 3px 9px; }
   @media (max-width: 1100px) { .mem-grid { grid-template-columns: 1fr; } }
@@ -782,6 +785,29 @@
         <div style="margin-top:8px"><button id="sk-addfile" data-i18n="sk_addfile">添加文件</button><input type="file" id="sk-addfile-in" multiple style="display:none"></div>
       </div>
     </div>
+    <!-- 连接器(方案稿 docs/assistant_connectors.md): 登记数据库(类型下拉由 GET /api/assistant/connectors 的 kinds 给, 表单字段按种类显隐), 测试连接 / 保存 / 开关 / 删除;
+         密码只往上送不往下回(has_password); 助理那头是只读的 query_db 工具, 开着的连接器才进工具表 -->
+    <div class="sk-grid" style="margin-top:16px">
+      <div class="card"><div class="card-title" data-i18n="cn_list">连接器</div><div class="muted" data-i18n="cn_list_sub"></div>
+        <div id="cn-list" class="sk-list"></div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px"><button class="primary" id="cn-new" data-i18n="cn_new">新建</button></div></div>
+      <div class="card" id="cn-edit" hidden>
+        <div class="card-title"><span data-i18n="cn_edit">连接器</span><span id="cn-title" style="text-transform:none;letter-spacing:0;margin-left:6px"></span></div>
+        <div class="muted" data-i18n="cn_edit_sub"></div>
+        <div class="cn-form" id="cn-form">
+          <label><span data-i18n="cn_name">名字</span><input id="cn-name" data-i18n-ph="cn_name_ph" spellcheck="false" autocapitalize="off"></label>
+          <label><span data-i18n="cn_kind">类型</span><select id="cn-kind"></select></label>
+          <label data-f="host"><span data-i18n="cn_host">地址</span><input id="cn-host" spellcheck="false" autocapitalize="off"></label>
+          <label data-f="port"><span data-i18n="cn_port">端口</span><input id="cn-port" type="number" min="1" max="65535"></label>
+          <label data-f="db"><span data-i18n="cn_db">库名</span><input id="cn-db" spellcheck="false" autocapitalize="off"></label>
+          <label data-f="user"><span data-i18n="cn_user">账号</span><input id="cn-user" spellcheck="false" autocapitalize="off" autocomplete="off"></label>
+          <label data-f="password"><span data-i18n="cn_pw">密码</span><input id="cn-pw" type="password" autocomplete="new-password"></label>
+          <label data-f="auth_db"><span data-i18n="cn_authdb">认证库</span><input id="cn-authdb" placeholder="admin" spellcheck="false"></label>
+          <label data-f="path"><span data-i18n="cn_path">数据库文件</span><input id="cn-path" spellcheck="false" autocapitalize="off"></label>
+        </div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><button id="cn-test" data-i18n="cn_test">测试连接</button><button class="primary" id="cn-save" data-i18n="save">保存</button><button id="cn-del" class="danger" data-i18n="sk_delete">删除</button><span class="muted" id="cn-result" style="word-break:break-word"></span></div>
+      </div>
+    </div>
   </section>
 
   <!-- ============ 活动 ============ -->
@@ -1190,6 +1216,10 @@ const I18N = {
     sk_delete: "删除", sk_delete_confirm: "删除技能 {0}? 文件夹会挪进回收目录, 不真删。", sk_files: "文件", sk_files_sub: "模板、示例、参考资料。只收 md / txt / csv / json / yaml / 图片 / pdf / docx / xlsx / pptx; 脚本文件装不进来, md 和 txt 里也不能有命令或代码块(整份会被拒并指出第几行)。助理读得到、改不了。", sk_addfile: "添加文件",
     sk_empty: "还没有技能。点\"新建\"写一个, 或\"导入文件夹\"选一个带 SKILL.md 的技能文件夹。", sk_path: "文件夹: {0}", sk_bad_name: "技能名只能是 1~64 位小写字母、数字、连字符", sk_imported: "已导入 {0}: {1} 个文件", sk_import_nomd: "选的文件夹里没有 SKILL.md(直接选技能文件夹本身, 不是上一级)", sk_files_n: "{0} 个文件", sk_import_fail: "{0} 没进来: {1}",
     sk_toggle: "开着助理才会用这个技能; 关掉它就当没装过, 它专属的工具(比如 finance 的行情查询)也一起停用, 文件都还在", sk_on: "{0} 已打开", sk_off: "{0} 已关闭, 助理不会再用它",
+    cn_list: "连接器", cn_list_sub: "登记你的数据库(MongoDB / PostgreSQL / MySQL / Redis / SQLite 文件), 助理就能查它——只读, 代码里没有写库的命令。密码只存在本机 0600 的文件里, 页面和助理都拿不回原文。", cn_new: "新建", cn_edit: "连接器",
+    cn_edit_sub: "填好先点\"测试连接\", 通了再保存。关掉开关助理就看不见它; 删除会立刻删掉密码。", cn_name: "名字", cn_name_ph: "如 quant: 小写字母、数字、连字符", cn_kind: "类型", cn_host: "地址", cn_port: "端口", cn_db: "库名(Redis 填编号)", cn_user: "账号(没开鉴权留空)", cn_pw: "密码", cn_pw_saved: "已保存, 留空不改", cn_authdb: "认证库(默认 admin)", cn_path: "数据库文件路径",
+    cn_test: "测试连接", cn_testing: "连接中…", cn_test_ok: "✓ {0} · {1} ms", cn_test_fail: "✗ {0}", cn_empty: "还没有连接器。点\"新建\", 填地址、账号、密码, 测试通了保存。", cn_toggle: "开着助理才能查这个库; 关掉就当没登记过, 填的都还在", cn_on: "{0} 已打开", cn_off: "{0} 已关闭, 助理查不到它了",
+    cn_delete_confirm: "删除连接器 {0}? 密码立刻删掉, 其它信息进回收目录。", cn_bad_name: "名字只能是 1~24 位小写字母、数字、连字符", cls_db: "查库",
     sk_tpl: "---\nname: {0}\ndescription: 一句话说清什么任务该用这个技能(助理只凭这句决定要不要读全文)\n---\n\n# {0}\n\n## 什么时候用\n\n\n## 步骤(用助理自己的工具, 不写命令、不放脚本)\n\n1. \n2. \n\n## 结果应该长什么样\n\n\n## 参考\n\n- reference/ 放模板和示例, 助理用 read_file 读\n",
     act_sec: "安全", act_info: "沙盒: {0} · 浏览器: {1} · 工作区: {2}", act_nobrowser: "本机没有火狐", act_run: "允许在沙盒里跑程序(run: 没有网络, 只能写工作区, 不逐次审批)", act_toolbox: "工具箱: 已有 {0} · 缺 {1}", act_toolbox_none: "(没有)",
     act_dirs: "允许的目录", act_dirs_sub: "助理可以直接读这些目录(勾了可写还能直接写), 不再逐次问你。不能加包含助理自己数据目录的上级目录(比如整个家目录): 那等于让它能改自己的权限。", act_dir_ph: "目录路径, 例如 ~/Documents",
@@ -1358,6 +1388,10 @@ const I18N = {
     sk_delete: "Delete", sk_delete_confirm: "Delete skill {0}? The folder moves to the trash folder, nothing is destroyed.", sk_files: "Files", sk_files_sub: "Templates, examples, references. Only md / txt / csv / json / yaml / images / pdf / docx / xlsx / pptx; script files are refused, and md or txt files may not contain commands or code blocks (the whole file is rejected with the line number). The assistant can read them, never change them.", sk_addfile: "Add files",
     sk_empty: "No skills yet. Click New to write one, or Import folder to pick a skill folder that contains SKILL.md.", sk_path: "Folder: {0}", sk_bad_name: "A skill name is 1-64 lowercase letters, digits or hyphens", sk_imported: "Imported {0}: {1} files", sk_import_nomd: "That folder has no SKILL.md (pick the skill folder itself, not its parent)", sk_files_n: "{0} files", sk_import_fail: "{0} was not imported: {1}",
     sk_toggle: "On: the assistant can use this skill. Off: it acts as if the skill were not installed, and tools that exist only for it (finance's market data, for example) go too; the files stay", sk_on: "{0} turned on", sk_off: "{0} turned off; the assistant will not use it",
+    cn_list: "Connectors", cn_list_sub: "Register your databases (MongoDB / PostgreSQL / MySQL / Redis / an SQLite file) and the assistant can query them, read-only: the code has no writing commands. Passwords live only in a 0600 file on this machine; neither the page nor the assistant can read them back.", cn_new: "New", cn_edit: "Connector",
+    cn_edit_sub: "Fill it in, click Test connection, then save. Switched off, the assistant does not see it; deleting removes the password at once.", cn_name: "Name", cn_name_ph: "e.g. quant: lowercase letters, digits, hyphens", cn_kind: "Kind", cn_host: "Host", cn_port: "Port", cn_db: "Database (Redis: number)", cn_user: "User (empty if no auth)", cn_pw: "Password", cn_pw_saved: "saved; leave empty to keep", cn_authdb: "Auth database (default admin)", cn_path: "Database file path",
+    cn_test: "Test connection", cn_testing: "connecting…", cn_test_ok: "✓ {0} · {1} ms", cn_test_fail: "✗ {0}", cn_empty: "No connectors yet. Click New, fill in host, user and password, test, then save.", cn_toggle: "On: the assistant can query this database; off: as if it were not registered, nothing is lost", cn_on: "{0} is on", cn_off: "{0} is off; the assistant can no longer query it",
+    cn_delete_confirm: "Delete connector {0}? The password is removed at once; the rest goes to the trash folder.", cn_bad_name: "A name is 1-24 lowercase letters, digits or hyphens", cls_db: "database",
     sk_tpl: "---\nname: {0}\ndescription: One sentence saying which tasks this skill is for (the assistant decides from this line alone whether to read the rest)\n---\n\n# {0}\n\n## When to use\n\n\n## Steps (with the assistant's own tools; no commands, no scripts)\n\n1. \n2. \n\n## What the result should look like\n\n\n## Reference\n\n- reference/ holds templates and examples, read with read_file\n",
     act_sec: "Security", act_info: "Sandbox: {0} · Browser: {1} · Workspace: {2}", act_nobrowser: "no Firefox on this machine", act_run: "Allow running programs in the sandbox (run: no network, writes only in the workspace, no per-call approval)", act_toolbox: "Toolbox: have {0} · missing {1}", act_toolbox_none: "(none)",
     act_dirs: "Allowed folders", act_dirs_sub: "The assistant may read these folders (and write them if writable) without asking each time. A folder containing the assistant's own data (e.g. your whole home folder) can't be added: that would let it change its own permissions.", act_dir_ph: "Folder path, e.g. ~/Documents",
@@ -1455,7 +1489,7 @@ function showTab(tab) {
   text("page-title", t("tab_" + tab)); $("page-hint").textContent = I18N.zh["hint_" + tab] ? t("hint_" + tab) : "";
   syncShell(tab);
   /* 手机上程序聚焦输入框会直接弹键盘, 盖住半屏: app 外壳不自动聚焦, 用户点输入框才弹 */
-  if (tab === "train") { loadDetail(); if (isApp() && !trainPane) setTrainPane(training() || runs.length ? "prog" : "cfg"); } if (tab === "data") loadData(); if (tab === "chat") { if (!isApp()) inputEl.focus(); loadSessions(); } if (tab === "tasks") loadTasks(); if (tab === "models") loadModels(); if (tab === "mem") loadMem(true); if (tab === "skills") loadSkills(); if (tab === "act") loadAct(); if (tab === "api") loadApi(); if (tab === "monitor") syncMonitor(); if (tab === "more") renderMore(); if (tab === "search") srLoad(); phView(tab === "phone");
+  if (tab === "train") { loadDetail(); if (isApp() && !trainPane) setTrainPane(training() || runs.length ? "prog" : "cfg"); } if (tab === "data") loadData(); if (tab === "chat") { if (!isApp()) inputEl.focus(); loadSessions(); } if (tab === "tasks") loadTasks(); if (tab === "models") loadModels(); if (tab === "mem") loadMem(true); if (tab === "skills") { loadSkills(); loadConns(); } if (tab === "act") loadAct(); if (tab === "api") loadApi(); if (tab === "monitor") syncMonitor(); if (tab === "more") renderMore(); if (tab === "search") srLoad(); phView(tab === "phone");
 }
 document.querySelectorAll("nav a[data-tab], .tabbar a[data-tab]").forEach(a => a.onclick = () => { location.hash = a.dataset.tab; });
 
@@ -2938,6 +2972,79 @@ $("sk-addfile-in").onchange = async () => {
   if (!skSel || !files.length) return;
   try { for (const f of files) await skPut(skSel, f.name, f); toast(t("saved")); } catch (e) { toast(t("fail", e.message), true); }
   await loadSkills();
+};
+
+/* ---------------- 连接器 ----------------
+   GET /api/assistant/connectors → {kinds, connectors}(没有密码, 只有 has_password); POST {op:save|enable|delete}; {op:test} 拿表单当前值连一次, 不落盘。
+   类型下拉与表单字段全由 kinds 决定(data-f 显隐): 服务端加一种库, 这里不用改。 */
+let conns = [], cnKinds = [], cnSel = null, cnNew = false;
+const cnName = s => skName(s).slice(0, 24);
+function cnKind(k) { return cnKinds.find(x => x.kind === k) || cnKinds[0]; }
+async function loadConns() {
+  const r = await aFetch("connectors"); if (r.error) { toast(t("fail", r.error), true); return; }
+  conns = r.connectors; cnKinds = r.kinds; if (cnSel && !conns.some(c => c.name === cnSel)) cnSel = null;
+  renderConns();
+}
+function renderConns() {
+  const box = $("cn-list"); box.replaceChildren();
+  if (!conns.length) box.appendChild(node("div", "muted", t("cn_empty")));
+  conns.forEach(c => {
+    const row = node("div", "row" + (c.name === cnSel && !cnNew ? " sel" : "")), tx = node("div"); tx.style.flex = "1";
+    const k = cnKind(c.kind);
+    tx.appendChild(node("b", null, c.name)); tx.appendChild(node("small", null, (k ? k.label : c.kind) + " · " + (c.kind === "sqlite" ? c.path : c.host + ":" + c.port + (c.db ? "/" + c.db : ""))));
+    row.appendChild(tx);
+    const sw = node("label", "switch"), cb = node("input"); cb.type = "checkbox"; cb.checked = c.enabled !== false; sw.title = t("cn_toggle");
+    sw.appendChild(cb); sw.appendChild(node("span", "knob")); sw.onclick = e => e.stopPropagation();
+    cb.onchange = async () => {
+      const r = await aFetch("connectors", { op: "enable", name: c.name, on: cb.checked });
+      if (r.error) { cb.checked = !cb.checked; toast(t("fail", r.error), true); return; }
+      conns = r.connectors; renderConns(); toast(t(cb.checked ? "cn_on" : "cn_off", c.name));
+    };
+    row.appendChild(sw); if (c.enabled === false) row.classList.add("off");
+    row.onclick = () => { cnNew = false; cnSel = c.name; renderConns(); };
+    box.appendChild(row);
+  });
+  renderConnEdit();
+}
+function cnForm() {
+  return { name: cnNew ? cnName($("cn-name").value) : cnSel, kind: $("cn-kind").value, host: $("cn-host").value.trim(), port: +$("cn-port").value || 0, db: $("cn-db").value.trim(), user: $("cn-user").value.trim(), auth_db: $("cn-authdb").value.trim(), path: $("cn-path").value.trim(), password: $("cn-pw").value };
+}
+function cnFields() {   /* 按类型显隐字段, 端口空着就填这种库的默认端口 */
+  const k = cnKind($("cn-kind").value), f = (k ? k.fields : "").split(",");
+  document.querySelectorAll("#cn-form [data-f]").forEach(l => l.hidden = !f.includes(l.dataset.f));
+  if (k && !$("cn-port").value) $("cn-port").value = k.port || "";
+}
+function renderConnEdit() {
+  const c = conns.find(x => x.name === cnSel), ed = $("cn-edit"); ed.hidden = !c && !cnNew;
+  if (ed.hidden) return;
+  const sel = $("cn-kind");
+  if (sel.options.length !== cnKinds.length) { sel.replaceChildren(); cnKinds.forEach(k => { const o = node("option", null, k.label); o.value = k.kind; sel.appendChild(o); }); }
+  $("cn-name").disabled = !cnNew; $("cn-del").hidden = cnNew; $("cn-result").textContent = ""; $("cn-title").textContent = cnNew ? "" : c.name;
+  const v = c || { name: "", kind: cnKinds[0] ? cnKinds[0].kind : "mongodb", host: "127.0.0.1", port: 0, db: "", user: "", auth_db: "", path: "", has_password: false };
+  $("cn-name").value = v.name; sel.value = v.kind; $("cn-host").value = v.host; $("cn-port").value = v.port || ""; $("cn-db").value = v.db; $("cn-user").value = v.user; $("cn-authdb").value = v.auth_db; $("cn-path").value = v.path;
+  $("cn-pw").value = ""; $("cn-pw").placeholder = v.has_password ? t("cn_pw_saved") : "";
+  cnFields();
+}
+$("cn-kind").onchange = () => { $("cn-port").value = ""; cnFields(); };
+$("cn-new").onclick = () => { cnNew = true; cnSel = null; renderConns(); $("cn-name").focus(); };
+$("cn-test").onclick = async () => {
+  const f = cnForm(); if (!f.password) delete f.password;   /* 密码框空 = 用已存的那个测 */
+  const el = $("cn-result"); el.textContent = t("cn_testing"); el.style.color = "";
+  const r = await aFetch("connectors", Object.assign({ op: "test" }, f));
+  el.textContent = r.error ? t("cn_test_fail", r.error) : t("cn_test_ok", r.line, r.ms); el.style.color = r.error ? "var(--err)" : "var(--ok)";
+};
+$("cn-save").onclick = async () => {
+  const f = cnForm(); if (!f.name) { toast(t("cn_bad_name"), true); return; }
+  if (!f.password) delete f.password;   /* 没填 = 不改已存的 */
+  const r = await aFetch("connectors", Object.assign({ op: "save" }, f));
+  if (r.error) { toast(t("fail", r.error), true); return; }
+  toast(t("saved")); cnNew = false; cnSel = f.name; conns = r.connectors; renderConns();
+};
+$("cn-del").onclick = async () => {
+  if (!cnSel || !(await ask(t("cn_delete_confirm", cnSel), true, t("sk_delete")))) return;
+  const r = await aFetch("connectors", { op: "delete", name: cnSel });
+  if (r.error) { toast(t("fail", r.error), true); return; }
+  cnSel = null; conns = r.connectors; renderConns();
 };
 
 /* ---------------- 活动 ----------------

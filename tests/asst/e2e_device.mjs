@@ -238,6 +238,46 @@ const skDir = path.join(ASST, "skills", "e2e-weekly-report");
   await ctx4.close();
 }
 
+/* ---- 连接器(10-19, 技能页第二张卡): 新建 → 类型下拉来自接口 kinds, 端口按类型自动填; 测试连接(本机有 Mongo 就 ✓, 没有就 ✗ 带具体原因);
+   保存 → connectors/<名>.json 落盘 + 密码进 secrets/conn_<名>(0600) 且接口不回密码; 开关 → enabled:false; 删除 → json 进 trash/connectors, 密码文件没了 ---- */
+{
+  const cnFile = path.join(ASST, "connectors", "e2e-quant.json"), cnSecret = path.join(ASST, "secrets", "conn_e2e_quant");
+  if (existsSync(cnFile)) rmSync(cnFile); if (existsSync(cnSecret)) rmSync(cnSecret);
+  const ctx5 = await browser.newContext({ locale: "zh-CN" });
+  const p5 = await ctx5.newPage(); p5.on("pageerror", e => console.log("pageerror:", e.message));
+  await p5.goto(`http://127.0.0.1:${PORT}/#skills`); await login(p5); await sleep(300);
+  ok(await p5.locator("#cn-list .row").count() === 0 || await p5.locator("#cn-list .row b", { hasText: "e2e-quant" }).count() === 0, "连接器卡在技能页, 测试连接器还不在");
+  await p5.locator("#cn-new").click(); await sleep(100);
+  const kinds = await p5.locator("#cn-kind option").allTextContents();
+  ok(kinds.includes("MongoDB") && kinds.includes("PostgreSQL") && kinds.includes("MySQL / MariaDB") && kinds.includes("Redis") && kinds.includes("SQLite file"), "类型下拉来自接口 kinds: " + kinds.join(","));
+  await p5.locator("#cn-kind").selectOption("postgresql"); await sleep(50);
+  ok(await p5.locator("#cn-port").inputValue() === "5432" && await p5.locator("#cn-form [data-f=auth_db]").isHidden() && await p5.locator("#cn-form [data-f=path]").isHidden(), "选 PostgreSQL: 端口自动 5432, 认证库/文件字段藏起来");
+  await p5.locator("#cn-kind").selectOption("mongodb"); await sleep(50);
+  ok(await p5.locator("#cn-port").inputValue() === "27017" && await p5.locator("#cn-form [data-f=auth_db]").isVisible(), "选 MongoDB: 端口 27017, 认证库字段出现");
+  await p5.locator("#cn-name").fill("E2E Quant"); await p5.locator("#cn-host").fill("127.0.0.1"); await p5.locator("#cn-db").fill("quant_trading");
+  await p5.locator("#cn-test").click(); await p5.waitForFunction(() => !document.getElementById("cn-result").textContent.includes("连接中"), null, { timeout: 15000 });
+  const tr = await p5.locator("#cn-result").textContent();
+  ok(/^✓ MongoDB .*quant_trading/.test(tr) || /^✗ cannot connect to 127\.0\.0\.1:27017/.test(tr), "测试连接给具体结果(有 Mongo 就 ✓ 版本·库·集合数, 没有就 ✗ 连不上): " + tr);
+  await p5.locator("#cn-pw").fill("e2e-secret-1"); await p5.locator("#cn-save").click(); await sleep(300);
+  ok(existsSync(cnFile) && JSON.parse(readFileSync(cnFile, "utf8")).db === "quant_trading" && JSON.parse(readFileSync(cnFile, "utf8")).port === 27017, "保存 → connectors/e2e-quant.json 落盘(名字净化成小写连字符)");
+  ok(existsSync(cnSecret) && readFileSync(cnSecret, "utf8") === "e2e-secret-1" && (statSync(cnSecret).mode & 0o777) === 0o600, "密码进 secrets/conn_e2e_quant, 0600");
+  const cj = await p5.evaluate(async () => JSON.stringify(await aFetch("connectors")));
+  ok(!cj.includes("e2e-secret-1") && !cj.includes('"password"') && cj.includes('"has_password":true'), "接口不回密码, 只回 has_password");
+  ok(await p5.locator("#cn-pw").getAttribute("placeholder") === "已保存, 留空不改" && await p5.locator("#cn-pw").inputValue() === "", "密码框清空, 占位写已保存");
+  await p5.locator("#cn-host").fill("192.168.2.203"); await p5.locator("#cn-save").click(); await sleep(300);
+  ok(readFileSync(cnSecret, "utf8") === "e2e-secret-1" && JSON.parse(readFileSync(cnFile, "utf8")).host === "192.168.2.203", "密码留空再保存: 地址改了, 密码没动");
+  const cnRow = p5.locator("#cn-list .row", { has: p5.locator("b", { hasText: "e2e-quant" }) });
+  ok(await cnRow.count() === 1 && (await cnRow.locator("small").textContent()).includes("MongoDB · 192.168.2.203:27017/quant_trading"), "列表行: 名字 + 类型 地址:端口/库");
+  await cnRow.locator(".switch .knob").click(); await sleep(300);
+  ok(JSON.parse(readFileSync(cnFile, "utf8")).enabled === false && await cnRow.evaluate(r => r.classList.contains("off")), "开关关 → enabled:false, 行变淡");
+  await cnRow.locator(".switch .knob").click(); await sleep(300);
+  ok(JSON.parse(readFileSync(cnFile, "utf8")).enabled === true, "再点 → enabled:true");
+  await p5.locator("#cn-del").click(); await p5.locator("#ask-yes").click(); await sleep(300);
+  ok(!existsSync(cnFile) && !existsSync(cnSecret) && readdirSync(path.join(ASST, "trash", "connectors")).some(d => d.startsWith("e2e-quant-")), "删除 → json 进 trash/connectors, 密码文件没了");
+  ok(await p5.locator("#cn-list .row b", { hasText: "e2e-quant" }).count() === 0 && await p5.locator("#cn-edit").isHidden(), "删完列表里没了, 编辑卡收起");
+  await ctx5.close();
+}
+
 /* ---- 记忆页(10-15 三类): 四个框按 data-mem 载入盘上四个文件; 改"怎么做事"点保存 → habits.md 变了, 别的文件不动; 测完原样写回(这是本机真的记忆目录) ---- */
 {
   const memDir = path.join(ASST, "memory"), rd = f => existsSync(path.join(memDir, f)) ? readFileSync(path.join(memDir, f), "utf8") : null;
