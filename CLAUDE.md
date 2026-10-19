@@ -6,7 +6,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **DwarfStar** (`ds4`) is a self-contained native inference engine **purpose-built for DeepSeek V4 Flash** (and, on very high-memory machines, DeepSeek V4 PRO). It is *not* a generic GGUF runner and does **not** link against GGML — it reimplements the loading, tokenizer, prompt/DSML rendering, KV cache, graph scheduling, server API, and a native coding agent for this one model family. It only runs the DeepSeek V4 GGUFs published for this project (asymmetric quant: routed MoE experts at `IQ2_XXS`/`Q2_K`, everything else left high-precision). `README.md`(英文主版) / `README.zh-CN.md` 是对外门面(卖点+指标+用法+工作台截图 docs/img/), 算法/完整结果表/没走通的路/手动安装在 `docs/TECHNICAL.md` / `docs/TECHNICAL.zh-CN.md`; V4 时代的完整功能说明(服务端 API、磁盘 KV、运行时参数、Capability Evaluation)归档在 `docs/archive/README_v4_upstream.md`; 模型见 `docs/MODEL_CARD.md`。
 
-Primary backend is **Metal on macOS**; **CUDA on Linux** is the second production path; the **CPU path is reference/debug only**.
+Two production backends, both run the full V4.1 1017 base (113.6 GB) on one 128 GB machine:
+- **CUDA on Linux (DGX Spark / GB10)**: the deployment target; every end-to-end gate and every number we publish is measured here.
+- **Metal on Apple Silicon (128 GB Mac)**: full model runs since PR #3 (2026-10-19, contributor's M5 Max: decode 35–42 t/s, prefill 627 t/s on 25.5k).
+  Our own Mac has **16 GB** ⇒ on it only offline/kernel suites (`--metal-v41`, `--metal-kernels`, `--server`); Mac full-model numbers in the docs are the contributor's, say so.
+- The **CPU path is reference/debug only**.
 
 ## Layout (2026-08-25 重构后)
 
@@ -23,6 +27,11 @@ src/metal/    Metal 后端(原 ds4_metal.m 拆 62 文件); shader 在顶层 meta
               相对路径拼接加载, 移动该目录=运行时炸)。V4.1 原语(前向/反传/草稿蒸馏)在
               metal_v41_*.m / metal_bwd_*.m / metal_draft_kd.m + metal/v41_*.metal(2026-10-08);
               只缺解码整步 graph(Metal 无流捕获, core 走直发)。单测 `ds4_test --metal-v41`。
+              整模型在 Mac 跑通靠 PR #3(2026-10-19): ①VQ blob 不在 span 里, metal_model_map.m 首用时懒映射
+              并入常驻集(不入集驱动卡 30~1000 ms; 这些视图不进 --mem-budget-mb 加载闸) ②推理路预填 half 激活
+              快核(metal/v41_prefill_mm.metal、v41_vq_mm.metal, TensorOps/simdgroup)只在契约
+              ds4_gpu_v41_set_half_prefill(1) 期间走, 由 ds4_v41_state.half_prefill 驱动(generate/req/score 置 1);
+              训练原语与 --metal-v41 留 f32 原核(反传重算要逐位一致), CUDA 侧是空实现。
 src/cuda/     CUDA 后端: ds4_cuda.cu 是聚合根, 分片在 src/cuda/*.inc.cu(单 TU 语义)。
               ds4_gpu.h(伞头)+六个子头是 Metal/CUDA 共同契约, 已带 extern "C" 守卫,
               CUDA 直接 include——契约漂移=编译错误。
@@ -48,7 +57,7 @@ docs/archive/ 已收官战役的设计稿。根目录还剩: 公共头(ds4.h/ds4
 The build is a single hand-written `Makefile` (no CMake/configure). Output binaries land in the repo root.
 
 ```sh
-make              # macOS: builds Metal ds4, ds4-server, ds4-bench, ds4-eval, ds4-agent (default target)
+make              # macOS: Metal 版 ds4, ds4-server, ds4-bench, ds4-eval, ds4-agent, ds4-train, ds4-seg (default target)
 make cuda-spark   # Linux: = cuda-generic 的别名(2026-10-07 起无 Spark 专属旗; 统一内存/独显由引擎运行时按设备属性判)
 make cuda-generic # Linux: CUDA for a generic local GPU (CUDA_ARCH=native)
 make cuda CUDA_ARCH=sm_120   # Linux: CUDA with an explicit nvcc arch
@@ -67,6 +76,8 @@ make -C gguf-tools all amp legacy calib bench tools-test   # 工具链全目标(
 ./download_model.sh q2-imatrix   # fetch a model into ./gguf/ and point ./ds4flash.gguf at it
 ./ds4 -p "Explain Redis streams" # one-shot;  no -p => interactive REPL
 ./ds4-server --cuda -m gguf/v41/<model>.gguf --zchain <反修目录>   # V4.1: 上下文只有 1M 一个取值, 没有 --ctx(spark 上用 gguf-tools/scripts/serve_1m_spark.sh)
+./ds4-server --metal -m <model>.gguf --zchain <反修目录> --engram-dir <分片目录> --mem-budget-mb 110000   # 128 GB Mac; 下载走 hf_install.sh download(无 Linux 预检), 用法见 README "Get started"
+#   Mac 上工作台(ds4-train)的下载/加载按钮没人跑过; 整模型只有贡献者的 M5 Max 跑过 ds4-server 这条
 #   起服后 GET /monitor = 监控页(web/monitor.html, 指标照 Strata Monitor), GET /metrics = 数据(JSON; Accept: text/plain 给 Prometheus 文本)
 ./ds4-agent                      # in-process native coding agent (sessions in ~/.ds4/kvcache)
 ./ds4-train --port 8000          # ★工作台主进程, 永远不退★(10-10 用户定): GET / = web/studio.html(聊天/模型/训练/语料/记录), 全部 /api/*; spark 上 train_ui_spark.sh start
