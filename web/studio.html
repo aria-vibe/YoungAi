@@ -301,7 +301,7 @@
   .sdot.waiting_device { background: var(--accent-2); animation: pulse .9s infinite; }
   @media (max-width: 760px) { .deliver { margin-left: 0; } }
   /* 任务页 = 一个任务一张卡(.row), 按钮排在卡底一行。以前按钮竖在右侧一列: 手机上那列窄, 四五个按钮叠成一摞把整行撑得很高(10-16 用户实撞) */
-  #v-tasks { padding-bottom: 96px; }   /* 给右下角"+"让位, 否则最后一张卡的按钮被它盖住点不到 */
+  #v-tasks, #v-conns { padding-bottom: 96px; }   /* 给右下角"+"让位, 否则最后一张卡的按钮(连接器: 保存/删除)被它盖住点不到 */
   .tk-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; align-items: start; }
   .tk-list .row { display: flex; align-items: flex-start; gap: 10px; flex-wrap: wrap; background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
   .tk-list .row { cursor: pointer; } .tk-list .row:hover { border-color: var(--accent-line); } .tk-list .row:active { background: var(--hover); }
@@ -796,7 +796,7 @@
     <div class="sk-grid">
       <div class="card"><div class="card-title" data-i18n="cn_list">连接器</div><div class="muted" data-i18n="cn_list_sub"></div>
         <div id="cn-list" class="sk-list"></div>
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px"><button class="primary" id="cn-new" data-i18n="cn_new">新建</button></div></div>
+      </div>
       <div class="card" id="cn-edit" hidden>
         <div class="card-title"><span data-i18n="cn_edit">连接器</span><span id="cn-title" style="text-transform:none;letter-spacing:0;margin-left:6px"></span></div>
         <div class="muted" data-i18n="cn_edit_sub"></div>
@@ -814,6 +814,8 @@
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap"><button id="cn-test" data-i18n="cn_test">测试连接</button><button class="primary" id="cn-save" data-i18n="save">保存</button><button id="cn-del" class="danger" data-i18n="sk_delete">删除</button><span class="muted" id="cn-result" style="word-break:break-word"></span></div>
       </div>
     </div>
+    <!-- 新建 = 右下角"+", 和任务页同一个样式(10-19 用户要"跟任务一样") -->
+    <button class="primary tk-fab" id="cn-new" data-i18n-title="cn_new"><svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg></button>
   </section>
 
   <!-- ============ 活动 ============ -->
@@ -1223,9 +1225,9 @@ const I18N = {
     sk_delete: "删除", sk_delete_confirm: "删除技能 {0}? 文件夹会挪进回收目录, 不真删。", sk_files: "文件", sk_files_sub: "模板、示例、参考资料。只收 md / txt / csv / json / yaml / 图片 / pdf / docx / xlsx / pptx; 脚本文件装不进来, md 和 txt 里也不能有命令或代码块(整份会被拒并指出第几行)。助理读得到、改不了。", sk_addfile: "添加文件",
     sk_empty: "还没有技能。点\"新建\"写一个, 或\"导入文件夹\"选一个带 SKILL.md 的技能文件夹。", sk_path: "文件夹: {0}", sk_bad_name: "技能名只能是 1~64 位小写字母、数字、连字符", sk_imported: "已导入 {0}: {1} 个文件", sk_import_nomd: "选的文件夹里没有 SKILL.md(直接选技能文件夹本身, 不是上一级)", sk_files_n: "{0} 个文件", sk_import_fail: "{0} 没进来: {1}",
     sk_toggle: "开着助理才会用这个技能; 关掉它就当没装过, 它专属的工具(比如 finance 的行情查询)也一起停用, 文件都还在", sk_on: "{0} 已打开", sk_off: "{0} 已关闭, 助理不会再用它",
-    cn_list: "连接器", cn_list_sub: "登记你的数据库(MongoDB / PostgreSQL / MySQL / Redis / SQLite 文件), 助理就能查它——只读, 代码里没有写库的命令。密码只存在本机 0600 的文件里, 页面和助理都拿不回原文。", cn_new: "新建", cn_edit: "连接器",
+    cn_list: "连接器", cn_list_sub: "登记你的数据库(MongoDB / PostgreSQL / MySQL / Redis / SQLite 文件), 助理就能查它——只读, 代码里没有写库的命令。密码只存在本机 0600 的文件里, 页面和助理都拿不回原文。", cn_new: "新建连接器", cn_edit: "连接器",
     cn_edit_sub: "填好先点\"测试连接\", 通了再保存。关掉开关助理就看不见它; 删除会立刻删掉密码。", cn_name: "名字", cn_name_ph: "如 quant: 小写字母、数字、连字符", cn_kind: "类型", cn_host: "地址", cn_port: "端口", cn_db: "库名(Redis 填编号)", cn_user: "账号(没开鉴权留空)", cn_pw: "密码", cn_pw_saved: "已保存, 留空不改", cn_authdb: "认证库(默认 admin)", cn_path: "数据库文件路径",
-    cn_test: "测试连接", cn_testing: "连接中…", cn_test_ok: "✓ {0} · {1} ms", cn_test_fail: "✗ {0}", cn_empty: "还没有连接器。点\"新建\", 填地址、账号、密码, 测试通了保存。", cn_toggle: "开着助理才能查这个库; 关掉就当没登记过, 填的都还在", cn_on: "{0} 已打开", cn_off: "{0} 已关闭, 助理查不到它了",
+    cn_test: "测试连接", cn_testing: "连接中…", cn_test_ok: "✓ {0} · {1} ms", cn_test_fail: "✗ {0}", cn_empty: "还没有连接器。点右下角 +, 填地址、账号、密码, 测试通了保存。", cn_toggle: "开着助理才能查这个库; 关掉就当没登记过, 填的都还在", cn_on: "{0} 已打开", cn_off: "{0} 已关闭, 助理查不到它了",
     cn_delete_confirm: "删除连接器 {0}? 密码立刻删掉, 其它信息进回收目录。", cn_bad_name: "名字只能是 1~24 位小写字母、数字、连字符", cls_db: "查库",
     sk_tpl: "---\nname: {0}\ndescription: 一句话说清什么任务该用这个技能(助理只凭这句决定要不要读全文)\n---\n\n# {0}\n\n## 什么时候用\n\n\n## 步骤(用助理自己的工具, 不写命令、不放脚本)\n\n1. \n2. \n\n## 结果应该长什么样\n\n\n## 参考\n\n- reference/ 放模板和示例, 助理用 read_file 读\n",
     act_sec: "安全", act_info: "沙盒: {0} · 浏览器: {1} · 工作区: {2}", act_nobrowser: "本机没有火狐", act_run: "允许在沙盒里跑程序(run: 没有网络, 只能写工作区, 不逐次审批)", act_toolbox: "工具箱: 已有 {0} · 缺 {1}", act_toolbox_none: "(没有)",
@@ -1396,9 +1398,9 @@ const I18N = {
     sk_delete: "Delete", sk_delete_confirm: "Delete skill {0}? The folder moves to the trash folder, nothing is destroyed.", sk_files: "Files", sk_files_sub: "Templates, examples, references. Only md / txt / csv / json / yaml / images / pdf / docx / xlsx / pptx; script files are refused, and md or txt files may not contain commands or code blocks (the whole file is rejected with the line number). The assistant can read them, never change them.", sk_addfile: "Add files",
     sk_empty: "No skills yet. Click New to write one, or Import folder to pick a skill folder that contains SKILL.md.", sk_path: "Folder: {0}", sk_bad_name: "A skill name is 1-64 lowercase letters, digits or hyphens", sk_imported: "Imported {0}: {1} files", sk_import_nomd: "That folder has no SKILL.md (pick the skill folder itself, not its parent)", sk_files_n: "{0} files", sk_import_fail: "{0} was not imported: {1}",
     sk_toggle: "On: the assistant can use this skill. Off: it acts as if the skill were not installed, and tools that exist only for it (finance's market data, for example) go too; the files stay", sk_on: "{0} turned on", sk_off: "{0} turned off; the assistant will not use it",
-    cn_list: "Connectors", cn_list_sub: "Register your databases (MongoDB / PostgreSQL / MySQL / Redis / an SQLite file) and the assistant can query them, read-only: the code has no writing commands. Passwords live only in a 0600 file on this machine; neither the page nor the assistant can read them back.", cn_new: "New", cn_edit: "Connector",
+    cn_list: "Connectors", cn_list_sub: "Register your databases (MongoDB / PostgreSQL / MySQL / Redis / an SQLite file) and the assistant can query them, read-only: the code has no writing commands. Passwords live only in a 0600 file on this machine; neither the page nor the assistant can read them back.", cn_new: "New connector", cn_edit: "Connector",
     cn_edit_sub: "Fill it in, click Test connection, then save. Switched off, the assistant does not see it; deleting removes the password at once.", cn_name: "Name", cn_name_ph: "e.g. quant: lowercase letters, digits, hyphens", cn_kind: "Kind", cn_host: "Host", cn_port: "Port", cn_db: "Database (Redis: number)", cn_user: "User (empty if no auth)", cn_pw: "Password", cn_pw_saved: "saved; leave empty to keep", cn_authdb: "Auth database (default admin)", cn_path: "Database file path",
-    cn_test: "Test connection", cn_testing: "connecting…", cn_test_ok: "✓ {0} · {1} ms", cn_test_fail: "✗ {0}", cn_empty: "No connectors yet. Click New, fill in host, user and password, test, then save.", cn_toggle: "On: the assistant can query this database; off: as if it were not registered, nothing is lost", cn_on: "{0} is on", cn_off: "{0} is off; the assistant can no longer query it",
+    cn_test: "Test connection", cn_testing: "connecting…", cn_test_ok: "✓ {0} · {1} ms", cn_test_fail: "✗ {0}", cn_empty: "No connectors yet. Tap + at the bottom right, fill in host, user and password, test, then save.", cn_toggle: "On: the assistant can query this database; off: as if it were not registered, nothing is lost", cn_on: "{0} is on", cn_off: "{0} is off; the assistant can no longer query it",
     cn_delete_confirm: "Delete connector {0}? The password is removed at once; the rest goes to the trash folder.", cn_bad_name: "A name is 1-24 lowercase letters, digits or hyphens", cls_db: "database",
     sk_tpl: "---\nname: {0}\ndescription: One sentence saying which tasks this skill is for (the assistant decides from this line alone whether to read the rest)\n---\n\n# {0}\n\n## When to use\n\n\n## Steps (with the assistant's own tools; no commands, no scripts)\n\n1. \n2. \n\n## What the result should look like\n\n\n## Reference\n\n- reference/ holds templates and examples, read with read_file\n",
     act_sec: "Security", act_info: "Sandbox: {0} · Browser: {1} · Workspace: {2}", act_nobrowser: "no Firefox on this machine", act_run: "Allow running programs in the sandbox (run: no network, writes only in the workspace, no per-call approval)", act_toolbox: "Toolbox: have {0} · missing {1}", act_toolbox_none: "(none)",
