@@ -9,7 +9,7 @@
 #
 # 包里放两条流程要的东西, 不放模型(三百多 GB, 页面里下):
 #   跑模型: ds4-server + ds4-train(主进程: 页面、起服、训练编排全在它的 C 里) + web/ 页面 + hf_install.sh(模型页下载, hf CLI 的包装)
-#   助理: skills/(自带技能 pptx / finance; ds4-train 启动时默认装进 ~/.ds4/assistant/skills, 见 docs/assistant_skills.md §1.2)
+#   助理: skills/(自带技能 pptx / finance / lottery / research; ds4-train 启动时默认装进 ~/.ds4/assistant/skills, 见 docs/assistant_skills.md §1.2)
 #   改图: ds4-seg(分割程序, 几百 KB; 它读的 41 MB 权重不进包, 模型页下载时从作者的 HF 仓库取到 gguf/hub/model/seg/)
 #   跑训练: ds4(训练器与判决学生都是它) + anchor_metrics(wt2 门的五指标)
 #           + 保持料 hold.jsonl + 判决料 wt2.ids + 当前底座的 FP 教师锚 teacher_g7_wt2_n512_<底座>.bin(265 MB: 要 HF 出厂权重才能出, 拿包的人出不了)

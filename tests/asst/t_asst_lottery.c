@@ -101,14 +101,17 @@ static void test_exec(void) {
     free(tj);
 }
 
-/* 仓库 skills/lottery 过脚本检查、装得进、use_skill 列得出 */
+/* 仓库 skills/lottery 过脚本检查、装得进、use_skill 列得出。科研技能 skills/research(10-19, 没有专属工具所以也住这里) 同口:
+ * 正文里有数据源网址、pdftotext、统计检验表, 随附 reference/templates.md, 都不许被脚本检查当成命令拒掉 */
 static void test_skill(const char *base) {
     char saved_root[ASST_PATH], saved_sk[ASST_PATH], msg[1024]; snprintf(saved_root, sizeof saved_root, "%s", asst_root); snprintf(saved_sk, sizeof saved_sk, "%s", asst_skills);
     snprintf(asst_root, sizeof asst_root, "%s/lotroot", base); mkdir(asst_root, 0700);
     snprintf(asst_skills, sizeof asst_skills, "%s/skills", asst_root); mkdir(asst_skills, 0700);
-    CHECK(asst_skills_seed("skills", msg, sizeof msg) >= 3 && strstr(msg, "installed lottery") && !strstr(msg, "skipped"), "repo skills incl. lottery pass the script check: %s", msg);
-    ds4_buf b = {0}; CHECK(asst_skill_build_tool(NULL, &b) && strstr(b.ptr, "- lottery: "), "use_skill lists lottery"); ds4_buf_free(&b);
+    CHECK(asst_skills_seed("skills", msg, sizeof msg) >= 4 && strstr(msg, "installed lottery") && strstr(msg, "installed research") && !strstr(msg, "skipped"), "repo skills incl. lottery and research pass the script check: %s", msg);
+    ds4_buf b = {0}; CHECK(asst_skill_build_tool(NULL, &b) && strstr(b.ptr, "- lottery: ") && strstr(b.ptr, "- research: 科研、学术、论文相关的事用这个"), "use_skill lists lottery and research"); ds4_buf_free(&b);
     char *body = asst_skill_load("lottery"); CHECK(body && strstr(body, "lottery_data"), "lottery body loads"); free(body);
+    body = asst_skill_load("research");
+    CHECK(body && strstr(body, "  reference/templates.md (") && strstr(body, "---\n# 科研助理\n") && strstr(body, "api.openalex.org") && strstr(body, "pdftotext") && strstr(body, "Mann-Whitney"), "research body loads with its template listed: %.200s", body ? body : "(null)"); free(body);
     snprintf(asst_root, sizeof asst_root, "%s", saved_root); snprintf(asst_skills, sizeof asst_skills, "%s", saved_sk);
 }
 

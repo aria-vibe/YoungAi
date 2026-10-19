@@ -15,7 +15,8 @@
 python 脚本干活)会在导入时整份被拒(§1.1 有实测)。仓库自带两份合规技能, **ds4-train 起来时默认装上**(§1.2):
 `skills/pptx/` 走本机的 `write_document` 出 .pptx(六种版式 + 五套主题, 版式由内容形状决定, 见 docs/assistant_office.md §3.4);
 `skills/finance/` 教助理用 `market_data` 工具查股票、指数、财报、公告、资讯(§7);
-`skills/lottery/` 教助理用 `lottery_data` 工具查体彩福彩开奖、竞彩足球篮球的赔率和赛果(§8)。
+`skills/lottery/` 教助理用 `lottery_data` 工具查体彩福彩开奖、竞彩足球篮球的赔率和赛果(§8);
+`skills/research/` 教助理做科研的活: 找文献做综述、读论文、复现方法、统计分析画图、写论文和审稿回复(§9, 不带新工具, 全靠 visit_page / run / render_image / write_document)。
 
 ## 1. 怎么装
 
@@ -241,3 +242,41 @@ league 只在本地按中文简称/全称筛, 不发出去; 期号和日期拼�
 - 真接口: spark 上 11 个玩法 draws + 足球/篮球的 matches 与 results 全跑通, 一次 3~4 秒; 号码与当天官方公告一致(双色球 2026119 期 12 22 23 25 27 30 + 04)。
 - 默认装上: spark 生产 `train_ui_spark.sh restart` 后日志 `ds4-train: 自带技能 installed lottery;`, 账本 `skills.seeded` 多一行 lottery。
 - 待跑: 真模型问"今晚双色球开了什么""明天英超有哪些比赛" → 审计里先 `use_skill(lottery)` 再 `lottery_data`, 终稿号码与工具结果逐个对得上。
+
+## 9. 科研技能 research(10-19)
+
+用户原话: "设计一个科研skill, 辅助科研人员, 论文研究, 技术实现, 包括但是不限于数据等等常见学科, 然后默认装到spark上面"。
+
+**和金融、彩票不一样: 没有新工具。** 科研要的手(查网页、读文件、跑程序、画图、出文档)助理都已经有了, 缺的是"怎么组合、什么能信、什么不能写"。
+所以只有 `skills/research/SKILL.md`(三条底线 → 按任务选做法 → 找文献用哪个源 → 读论文 → 复现与实现 → 数据分析 → 写作 → 回答怎么写)
+加 `reference/templates.md`(综述 / IMRaD 论文 / 实验记录 / 审稿回复 / 开题与基金立项依据 / 组会页次 / GB/T 7714、APA、IEEE 引用格式)。
+
+**三条底线写在最前面**, 因为这是模型做科研最常犯的错: ① 引用必须是这次 `visit_page` 打开过的(凭记忆写的题目、作者、DOI 经常不存在);
+② 数字只从数据来; ③ 没跑过的不说跑过。
+
+**文献源是 10-19 在 spark(南京电信出口)用 `--tool visit_page` 逐个实测过的**, 技能里只写通的:
+
+| 源 | 通不通 | 技能里怎么用 |
+|---|---|---|
+| arXiv 搜索页 / 摘要页 / HTML 全文 | 通(5~7 s) | 搜索页按公布日期倒序; 2023 年底以后的论文有 HTML 全文, 直接读正文 |
+| OpenAlex `api.openalex.org/works` | 通, JSON 原样进结果 | 全学科 + 引用数 + 按年筛; 没 key 时和同一出口的人共用每日免费额度(返回里有提示), 够查 |
+| Crossref `api.crossref.org/works` | 通 | DOI 查元数据、按题目找 DOI |
+| Europe PMC REST | 通 | 生物医学(PubMed 全部 + 预印本), 有 PMC 号的能开全文 XML |
+| Bing(`web_search`) | 通 | 定关键词、找 PDF 和代码仓库、中文文献 |
+| arXiv Atom 接口 export.arxiv.org | **火狐里 20 s 超时**(curl 0.6 s 就回, 是火狐把 Atom 当下载不算加载完) | 技能明写别用, 走搜索页 |
+| PubMed 网站搜索页 | 通但正文全是筛选器 | 不推荐, 走 Europe PMC |
+| Google Scholar / Hugging Face papers / GitHub | 打不开或超时 | 技能明写 Scholar 别试; 代码仓库打不开就如实说 |
+| Semantic Scholar 接口 | 429 限流 | 不写 |
+
+**沙盒里能用什么(spark 实测)**: `run` 的 python3 只有标准库 —— numpy、sympy、networkx、torch 装在用户 `~/.local`, 沙盒看不见(`--tool run` 里导入 numpy 报 ModuleNotFoundError);
+pdftotext、jq、sqlite3 在; pandoc、LaTeX、R 没有。所以技能里统计检验那段写明: 标准库没有检验函数, p 值自己按公式算或用置换检验 / 自助法(只要 random);
+xlsx 没库时请用户另存 csv 或用 zipfile 解。要让沙盒看见科学库, 得装到系统目录(apt 的 python3-numpy 这类)再重启主进程(工具箱只探一次), 这是用户的事, 技能里让模型把缺的库写在回答里。
+
+出错会怎样:
+- 技能正文提了 pdftotext、网址、统计检验名, 都不在命令表里, 脚本检查放行; 但写作时不许把 `run` 放在行首或表格格首(`run` 在命令表里), 技能里一律写"用 `run` 工具"。
+- 某个源在用户的出口打不开(海外出口开 arXiv 没问题, 开 OpenAlex 也没问题; 国内别的出口未测) → `visit_page` 报超时, 模型按技能换别的源或如实说。
+
+验证(10-19):
+- 离线: `./ds4_asst_test` 的 `asst lottery` 里加 2 项(技能没有专属工具, 测试住在彩票那份的自带技能段): 仓库 skills/ 四个技能全过脚本检查、use_skill 列出 research 带描述、正文装进来且列出 reference/templates.md。Mac 45/45, 全套绿, linecount 过。
+- 真服务: spark 重启 ds4-train 后日志 `自带技能 installed research;`, `GET /api/assistant/skills` 列出 research。
+- 待跑: 真模型问"帮我查一下滑动窗口注意力量化方向最近有什么论文" → 审计里先 `use_skill(research)` 再 `visit_page` 开 arXiv 搜索页, 终稿每篇都有打开过的链接。
