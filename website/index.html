@@ -61,7 +61,7 @@
     <div class="stats">
       <div class="stat"><b>0 B</b><span lang="zh-CN">上云的数据</span><span lang="en">of your data sent to a cloud</span></div>
       <div class="stat"><b>1M</b><span lang="zh-CN">token 上下文，满载 KV 只要 0.89 GB</span><span lang="en">token context; full KV cache is 0.89 GB</span></div>
-      <div class="stat"><b>45.7 t/s</b><span lang="zh-CN">写字速度（真实 7.7k token 请求）</span><span lang="en">generation on a real 7.7k-token request</span></div>
+      <div class="stat"><b>48.2 t/s</b><span lang="zh-CN">DGX Spark 写字速度（真实 9.2k token 请求）</span><span lang="en">generation on a DGX Spark (a real 9.2k-token request)</span></div>
       <div class="stat"><b>30+</b><span lang="zh-CN">个工具，每次都在内核沙盒里跑</span><span lang="en">tools, each call in a kernel sandbox</span></div>
     </div>
   </div>
@@ -296,15 +296,15 @@
     <div class="kicker"><span lang="zh-CN">背后的模型</span><span lang="en">The model behind it</span></div>
     <h2 lang="zh-CN">510 GB 的前沿模型，装进一台 128 GB 的机器</h2>
     <h2 lang="en">A 510 GB frontier model on a 128 GB machine</h2>
-    <p class="sub" lang="zh-CN">DeepSeek V4.1 Flash 的 1017 版原样发布是 510 GB。我们自己写的推理引擎（纯 C99 + CUDA / Metal，一个 Makefile）把它压到 113.6 GB，跑在一台 DGX Spark 上。</p>
-    <p class="sub" lang="en">DeepSeek V4.1 Flash, the 1017 release, is 510 GB as published. Our own inference engine (plain C99 + CUDA / Metal, one Makefile) shrinks it to 113.6 GB and runs it on one DGX Spark.</p>
+    <p class="sub" lang="zh-CN">DeepSeek V4.1 Flash 的 1017 版原样发布是 510 GB。我们自己写的推理引擎（纯 C99 + CUDA / Metal，一个 Makefile）把它压到 113.6 GB，一台 128 GB 的 DGX Spark 或 Mac 就能跑。</p>
+    <p class="sub" lang="en">DeepSeek V4.1 Flash, the 1017 release, is 510 GB as published. Our own inference engine (plain C99 + CUDA / Metal, one Makefile) shrinks it to 113.6 GB and runs it on one 128 GB machine, a DGX Spark or a Mac.</p>
     <div class="table-wrap"><table>
       <tr><th><span lang="zh-CN">项</span><span lang="en">Item</span></th><th><span lang="zh-CN">数</span><span lang="en">Number</span></th></tr>
       <tr><td lang="zh-CN">体积</td><td lang="en">Size</td>
           <td lang="zh-CN">官方 510 GB → 基座 113.6 GB（每 8 个权重一起向量量化，约 1.6 bit/权重，不用训练数据）</td>
           <td lang="en">510 GB → 113.6 GB base (8 weights vector-quantized together, ~1.6 bit/weight, no training data)</td></tr>
-      <tr><td lang="zh-CN">读提示</td><td lang="en">Reading</td><td>999 token/s <span lang="zh-CN">（真实 7.7k token 请求，挂编程侧车）</span><span lang="en">(a real 7.7k-token request, coding sidecar on)</span></td></tr>
-      <tr><td lang="zh-CN">写回答</td><td lang="en">Writing</td><td>45.7 token/s <span lang="zh-CN">（同一请求，投机解码开；不开 30.1）</span><span lang="en">(same request, speculative decoding on; 30.1 without)</span></td></tr>
+      <tr><td lang="zh-CN">读提示</td><td lang="en">Reading</td><td><span lang="zh-CN">DGX Spark 1,040–1,070 token/s（真实 9.2k token 请求，挂编程侧车）；Mac Studio M5 Max 627 token/s（25.5k token 提示，贡献者测）</span><span lang="en">DGX Spark 1,040–1,070 token/s (a real 9.2k-token request, coding sidecar on); Mac Studio M5 Max 627 token/s (25.5k-token prompt, measured by a contributor)</span></td></tr>
+      <tr><td lang="zh-CN">写回答</td><td lang="en">Writing</td><td><span lang="zh-CN">DGX Spark 48.2 token/s（同一请求，投机解码开；不开 29.9）；Mac Studio M5 Max 35–42 token/s（投机解码开，贡献者测）</span><span lang="en">DGX Spark 48.2 token/s (same request, speculative decoding on; 29.9 without); Mac Studio M5 Max 35–42 token/s (speculative decoding on, measured by a contributor)</span></td></tr>
       <tr><td lang="zh-CN">上下文</td><td lang="en">Context</td><td>1M token <span lang="zh-CN">· 满载 KV 缓存 0.89 GB</span><span lang="en">· full KV cache 0.89 GB</span></td></tr>
       <tr><td lang="zh-CN">领域侧车</td><td lang="en">Domain sidecars</td>
           <td lang="zh-CN">金融 / 编程 / 法律 / 医疗 / 科研，各约 40 MB；挂上后与原版全精度模型下一个字的一致率高 2.6–3.8 个百分点</td>
@@ -324,6 +324,8 @@
       <h2 lang="en">Three commands, then open a browser</h2>
       <p lang="zh-CN">需要一台 DGX Spark（Linux aarch64 + CUDA 13 运行库，SSD 空闲约 320 GB）。上网工具要火狐，Spark 上的 Ubuntu 自带。</p>
       <p lang="en">You need a DGX Spark (Linux aarch64 with the CUDA 13 runtime, ~320 GB free SSD). The web tools need Firefox, which Ubuntu on the Spark ships.</p>
+      <p lang="zh-CN">128 GB 的 Mac 上：<code>make</code> 编 Metal 版，直接起模型服务（命令见 <a href="https://github.com/fodelf/YoungAi/blob/restructure/README.zh-CN.md#上手">README</a>）；工作台的下载、加载按钮只在 Spark 上跑过。</p>
+      <p lang="en">On a 128 GB Mac: <code>make</code> builds the Metal version; start the model server directly (commands in the <a href="https://github.com/fodelf/YoungAi/blob/restructure/README.md#get-started">README</a>). The Studio's Download and Load buttons have only been run on the Spark.</p>
       <ol class="steps">
         <li lang="zh-CN">第一次打开页面，先设一个用户名和密码。</li>
         <li lang="en">The first visit asks you to set a username and password.</li>

@@ -56,11 +56,11 @@
       <h3><span lang="zh-CN">要什么</span><span lang="en">What you need</span></h3>
       <div class="table-wrap"><table>
         <tr><th><span lang="zh-CN">项</span><span lang="en">Item</span></th><th><span lang="zh-CN">要求</span><span lang="en">Requirement</span></th></tr>
-        <tr><td><span lang="zh-CN">机器</span><span lang="en">Machine</span></td><td><span lang="zh-CN">NVIDIA DGX Spark（128 GB 统一内存）。本页所有数字都来自它。</span><span lang="en">NVIDIA DGX Spark (128 GB unified memory). Every number on this site comes from it.</span></td></tr>
+        <tr><td><span lang="zh-CN">机器</span><span lang="en">Machine</span></td><td><span lang="zh-CN">NVIDIA DGX Spark（128 GB 统一内存），或 128 GB 的 Apple Silicon Mac。Spark 是我们做端到端验证的机器；Mac 整模型的速度来自一位贡献者的 M5 Max。</span><span lang="en">An NVIDIA DGX Spark (128 GB unified memory), or an Apple Silicon Mac with 128 GB. We test end to end on the Spark; the Mac's full-model speeds come from a contributor's M5 Max.</span></td></tr>
         <tr><td><span lang="zh-CN">系统</span><span lang="en">OS</span></td><td><span lang="zh-CN">Linux aarch64 + CUDA 13 运行库</span><span lang="en">Linux aarch64 with the CUDA 13 runtime</span></td></tr>
         <tr><td><span lang="zh-CN">硬盘</span><span lang="en">Disk</span></td><td><span lang="zh-CN">SSD 空闲约 320 GB（模型约 317 GB）</span><span lang="en">~320 GB free SSD (the model is ~317 GB)</span></td></tr>
         <tr><td><span lang="zh-CN">火狐</span><span lang="en">Firefox</span></td><td><span lang="zh-CN">上网、做视频要用。Spark 上的 Ubuntu 自带；没有火狐时这几个工具不出现在工具表里，别的照常。</span><span lang="en">Needed for the web and video tools. Ubuntu on the Spark ships it; without it those tools simply do not appear, everything else works.</span></td></tr>
-        <tr><td>Mac</td><td><span lang="zh-CN"><code>make</code> 编出 Metal 版，GPU 核测试全过；整模型还没在 Mac 上跑过。</span><span lang="en"><code>make</code> builds the Metal version and its GPU kernel tests pass; the full model has not run on a Mac yet.</span></td></tr>
+        <tr><td>Mac</td><td><span lang="zh-CN"><code>make</code> 编出 Metal 版，128 GB 的 Mac 能跑整模型（M5 Max 上写 35–42 token/s、读 627 token/s）。在 Mac 上直接起模型服务，命令见 README；工作台的下载、加载按钮只在 Spark 上跑过。</span><span lang="en"><code>make</code> builds the Metal version, and a 128 GB Mac runs the full model (35–42 tokens/s writing, 627 tokens/s reading on an M5 Max). On a Mac, start the model server directly (commands in the README); the Studio's Download and Load buttons have only been run on the Spark.</span></td></tr>
       </table></div>
 
       <h3><span lang="zh-CN">编译并启动</span><span lang="en">Build and start</span></h3>
