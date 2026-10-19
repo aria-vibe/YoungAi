@@ -8,7 +8,7 @@
 
 ## 0. 一句话
 
-**连接器 = 你在技能页登记的一个数据源(名字 / 类型 / 地址 / 端口 / 库名 / 账号 / 密码)。** 登记好、开关打开,
+**连接器 = 你在连接器页(侧栏技能后一格)登记的一个数据源(名字 / 类型 / 地址 / 端口 / 库名 / 账号 / 密码)。** 登记好、开关打开,
 助理的工具表里就多一个**只读**的 `query_db` 工具, 描述里列着每个开着的连接器叫什么、是什么库、怎么查;
 你问"交易 agent 最近推荐了什么", 它自己调 `query_db` 查, 把查到的数据写成一页 HTML(内联 SVG / canvas 画图), 回答下面直接渲染出来。
 
@@ -18,7 +18,7 @@
 
 ## 1. 怎么用
 
-工作台"技能"tab(侧栏第三格)里, "已装技能"卡下面多一张卡**"连接器"**:
+工作台侧栏**"技能"后面单独一格"连接器"**(手机外壳在"更多 → 助理"组里, 也在技能后面), 点进去:
 
 | 操作 | 怎么做 | 落盘 |
 |---|---|---|
@@ -139,7 +139,7 @@ src/sandbox/sbx_guard.c         query_db: cls=db, 放行; asst_guard_mark 置 ta
 src/sandbox/sbx_toolbox.c       asst_toolbox_has("sqlite3")
 src/assistant/asst_store.c      asst_init 建 connectors/
 src/assistant/asst_api.c        GET/POST /api/assistant/connectors
-web/studio.html                 技能页第二张卡: 列表(名字 · 类型 地址:端口/库 · 开关) / 表单(类型下拉 + 按类型显隐字段 + 端口默认值) / 测试连接 / 保存 / 删除
+web/studio.html                 连接器页(#conns, 侧栏技能后一格): 列表(名字 · 类型 地址:端口/库 · 开关) / 表单(类型下拉 + 按类型显隐字段 + 端口默认值) / 测试连接 / 保存 / 删除
 tests/asst/t_asst_db.c          §8 的离线项 + 本机有 Mongo 才跑的 live 段
 tests/asst/e2e_device.mjs       连接器页 17 项
 ```

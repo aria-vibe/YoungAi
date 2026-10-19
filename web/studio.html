@@ -688,6 +688,7 @@
     <a data-tab="phone" id="nav-phone" hidden><svg class="i" viewBox="0 0 24 24"><rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18h2"/></svg><span data-i18n="tab_phone">云手机</span></a>
     <a data-tab="mem"><svg class="i" viewBox="0 0 24 24"><path d="M12 4a4 4 0 0 1 4 4c0 1.5-.8 2.7-2 3.4V13h-4v-1.6A4 4 0 0 1 12 4z"/><path d="M10 17h4M10.5 20h3"/></svg><span data-i18n="tab_mem">记忆</span></a>
     <a data-tab="skills"><svg class="i" viewBox="0 0 24 24"><path d="M10 4h4v3a2 2 0 1 0 4 0h2v4h-3a2 2 0 1 0 0 4h3v5h-5v-2a2 2 0 1 0-4 0v2H6v-5H4a2 2 0 1 0 0-4h2V7h4z"/></svg><span data-i18n="tab_skills">技能</span></a>
+    <a data-tab="conns"><svg class="i" viewBox="0 0 24 24"><path d="M9 3v4M15 3v4"/><path d="M6 7h12v4a6 6 0 0 1-12 0z"/><path d="M12 17v4"/></svg><span data-i18n="tab_conns">连接器</span></a>
     <a data-tab="act"><svg class="i" viewBox="0 0 24 24"><path d="M12 3l7 3v6c0 4.2-3 7.7-7 9-4-1.3-7-4.8-7-9V6z"/><path d="M9 12l2 2 4-4"/></svg><span data-i18n="tab_act">活动</span></a>
     <a data-tab="models"><svg class="i" viewBox="0 0 24 24"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/></svg><span data-i18n="tab_models">模型</span><span class="ext" id="nav-dl"></span></a>
     <a data-tab="train"><svg class="i" viewBox="0 0 24 24"><path d="M3 17l5-5 4 4 8-9"/><path d="M14 7h6v6"/></svg><span data-i18n="tab_train">训练</span></a>
@@ -785,9 +786,14 @@
         <div style="margin-top:8px"><button id="sk-addfile" data-i18n="sk_addfile">添加文件</button><input type="file" id="sk-addfile-in" multiple style="display:none"></div>
       </div>
     </div>
-    <!-- 连接器(方案稿 docs/assistant_connectors.md): 登记数据库(类型下拉由 GET /api/assistant/connectors 的 kinds 给, 表单字段按种类显隐), 测试连接 / 保存 / 开关 / 删除;
-         密码只往上送不往下回(has_password); 助理那头是只读的 query_db 工具, 开着的连接器才进工具表 -->
-    <div class="sk-grid" style="margin-top:16px">
+  </section>
+
+  <!-- ============ 连接器 ============
+       方案稿 docs/assistant_connectors.md。侧栏紧跟"技能"的独立一格(10-19 用户要独立菜单, 不再塞技能页底下)。
+       登记数据库(类型下拉由 GET /api/assistant/connectors 的 kinds 给, 表单字段按种类显隐), 测试连接 / 保存 / 开关 / 删除;
+       密码只往上送不往下回(has_password); 助理那头是只读的 query_db 工具, 开着的连接器才进工具表 -->
+  <section class="view" id="v-conns">
+    <div class="sk-grid">
       <div class="card"><div class="card-title" data-i18n="cn_list">连接器</div><div class="muted" data-i18n="cn_list_sub"></div>
         <div id="cn-list" class="sk-list"></div>
         <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-top:12px"><button class="primary" id="cn-new" data-i18n="cn_new">新建</button></div></div>
@@ -1210,6 +1216,7 @@ const I18N = {
     mem_habits: "怎么做事", mem_habits_sub: "你说过的\"以后…\"\"默认…\": 助理以后照这样做。每行一条, 删掉一行 = 让它忘掉。",
     mem_env: "设备与账号", mem_env_sub: "设备上装了什么、登了什么账号、联系人怎么存。只在这次对话能操作你别的 app(分享、打开 app、云手机)时才给助理看。",
     mem_rules: "规矩", mem_rules_sub: "你给助理定的规矩, 只有你能写, 压过它自己的默认做法, 只管规矩说的那类事。例如: 回复用中文; 不要碰 ~/Documents/财务。新开的对话生效。", save: "保存", saved: "已保存", mem_path: "文件: {0}",
+    tab_conns: "连接器", hint_conns: "把你的数据库登记给助理: 填地址、账号、密码, 测试通了保存, 开着它就能只读地查",
     tab_skills: "技能", hint_skills: "教助理某类活怎么干: 一个文件夹一个技能, SKILL.md 写步骤, 旁边放脚本和资料; 任务对上了它自己会去读",
     sk_list: "已装技能", sk_list_sub: "助理只在工具表里看到每个技能的名字和一句描述, 任务对上了才读全文(省上下文)。Claude Code 等别处写好的技能文件夹原样导入就能用。",
     sk_new: "新建", sk_import: "导入文件夹", sk_name_ph: "技能名: 小写字母、数字、连字符, 如 weekly-report", sk_edit: "SKILL.md", sk_edit_sub: "开头 --- 之间的 description 是助理决定\"要不要用这个技能\"的唯一依据, 写清楚什么任务用它; 正文写步骤、用哪些工具、脚本怎么跑(路径相对技能文件夹)。",
@@ -1382,6 +1389,7 @@ const I18N = {
     mem_habits: "How to work", mem_habits_sub: "What you said with \"from now on…\" or \"by default…\": the assistant works that way later. One per line; delete a line to make it forget.",
     mem_env: "Devices and accounts", mem_env_sub: "What is installed or signed in on your devices and how contacts are saved. Only shown to the assistant when the conversation can act in your other apps (share, open apps, the cloud phone).",
     mem_rules: "Rules", mem_rules_sub: "Rules you give the assistant; only you write them. They override its own defaults, only for the kind of thing they talk about. E.g.: reply in English; never touch ~/Documents/finance. New conversations pick them up.", save: "Save", saved: "Saved", mem_path: "File: {0}",
+    tab_conns: "Connectors", hint_conns: "Register your databases with the assistant: host, user, password, test, save; switched on, it can query them read-only",
     tab_skills: "Skills", hint_skills: "Teach the assistant how a kind of task is done: one folder per skill, steps in SKILL.md, scripts and references beside it; it reads the skill itself when a task matches",
     sk_list: "Installed skills", sk_list_sub: "The assistant only sees each skill's name and one-line description in its tool list and reads the full text when a task matches (saves context). Skill folders written elsewhere (Claude Code etc.) import as they are.",
     sk_new: "New", sk_import: "Import folder", sk_name_ph: "Skill name: lowercase letters, digits, hyphens, e.g. weekly-report", sk_edit: "SKILL.md", sk_edit_sub: "The description between the leading --- lines is the only thing the assistant uses to decide whether this skill applies, so say which tasks it is for; the body holds the steps, the tools to use and how to run the scripts (paths relative to the skill folder).",
@@ -1474,8 +1482,8 @@ async function getJSON(url, opt) { const r = await fetch(url, Object.assign({ ca
 
 /* ---------------- 状态 ---------------- */
 let status = null, runs = [], detail = null, selected = null, userPicked = false, switching = 0, failCount = 0;
-const TABS = ["chat", "tasks", "search", "mem", "skills", "act", "models", "train", "data", "runs", "api", "monitor", "phone", "more"];   /* 标题 = t("tab_<名>"), 副标题 = t("hint_<名>")(没有就空) */
-const SUB = ["mem", "skills", "act", "models", "train", "data", "runs", "api", "monitor"];   /* app 外壳里这几页没有自己的底栏格: 底栏点亮进来的那一格(见 subFrom), 顶栏左键是返回 */
+const TABS = ["chat", "tasks", "search", "mem", "skills", "conns", "act", "models", "train", "data", "runs", "api", "monitor", "phone", "more"];   /* 标题 = t("tab_<名>"), 副标题 = t("hint_<名>")(没有就空) */
+const SUB = ["mem", "skills", "conns", "act", "models", "train", "data", "runs", "api", "monitor"];   /* app 外壳里这几页没有自己的底栏格: 底栏点亮进来的那一格(见 subFrom), 顶栏左键是返回 */
 const isApp = () => document.documentElement.dataset.shell === "app";
 /* 没有 #hash(直接开 http://host:8000/)时答"正显示的那页"(showTab 记下的): 曾经答 null, 页面明明在聊天页,
    poll 却以为不在、不再拉 /api/models/list, 后训练开关一切换就永远卡在"切换中…"且按钮灰掉(10-11 实撞)。
@@ -1489,7 +1497,7 @@ function showTab(tab) {
   text("page-title", t("tab_" + tab)); $("page-hint").textContent = I18N.zh["hint_" + tab] ? t("hint_" + tab) : "";
   syncShell(tab);
   /* 手机上程序聚焦输入框会直接弹键盘, 盖住半屏: app 外壳不自动聚焦, 用户点输入框才弹 */
-  if (tab === "train") { loadDetail(); if (isApp() && !trainPane) setTrainPane(training() || runs.length ? "prog" : "cfg"); } if (tab === "data") loadData(); if (tab === "chat") { if (!isApp()) inputEl.focus(); loadSessions(); } if (tab === "tasks") loadTasks(); if (tab === "models") loadModels(); if (tab === "mem") loadMem(true); if (tab === "skills") { loadSkills(); loadConns(); } if (tab === "act") loadAct(); if (tab === "api") loadApi(); if (tab === "monitor") syncMonitor(); if (tab === "more") renderMore(); if (tab === "search") srLoad(); phView(tab === "phone");
+  if (tab === "train") { loadDetail(); if (isApp() && !trainPane) setTrainPane(training() || runs.length ? "prog" : "cfg"); } if (tab === "data") loadData(); if (tab === "chat") { if (!isApp()) inputEl.focus(); loadSessions(); } if (tab === "tasks") loadTasks(); if (tab === "models") loadModels(); if (tab === "mem") loadMem(true); if (tab === "skills") loadSkills(); if (tab === "conns") loadConns(); if (tab === "act") loadAct(); if (tab === "api") loadApi(); if (tab === "monitor") syncMonitor(); if (tab === "more") renderMore(); if (tab === "search") srLoad(); phView(tab === "phone");
 }
 document.querySelectorAll("nav a[data-tab], .tabbar a[data-tab]").forEach(a => a.onclick = () => { location.hash = a.dataset.tab; });
 
@@ -1562,7 +1570,7 @@ function labelRows(tb) {
   document.querySelectorAll("table.cards tbody").forEach(tb => { mo.observe(tb, { childList: true }); labelRows(tb); }); }
 
 /* ---------------- 更多(app 外壳底栏最后一格) ---------------- */
-const MORE = [["more_g_asst", ["mem", "skills", "act"]], ["more_g_train", ["models", "train", "data", "runs"]], ["more_g_dev", ["api", "monitor"]]];   /* 助理/任务/搜索/云手机在底栏(云手机等手机 ready 才显示), 不在这里重复 */
+const MORE = [["more_g_asst", ["mem", "skills", "conns", "act"]], ["more_g_train", ["models", "train", "data", "runs"]], ["more_g_dev", ["api", "monitor"]]];   /* 助理/任务/搜索/云手机在底栏(云手机等手机 ready 才显示), 不在这里重复 */
 let installEvt = null;   /* 安卓 Chrome 判定能装时发 beforeinstallprompt: 留着, 用户在"更多"里点安装时再弹系统框 */
 window.addEventListener("beforeinstallprompt", e => { installEvt = e; if (curTab() === "more") renderMore(); });
 window.addEventListener("appinstalled", () => { installEvt = null; if (curTab() === "more") renderMore(); });

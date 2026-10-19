@@ -211,7 +211,7 @@ const skDir = path.join(ASST, "skills", "e2e-weekly-report");
   const p4 = await ctx4.newPage(); p4.on("pageerror", e => console.log("pageerror:", e.message));
   await p4.goto(`http://127.0.0.1:${PORT}/#skills`); await login(p4); await sleep(300);
   const navNames = await p4.evaluate(() => [...document.querySelectorAll("nav a[data-tab]")].filter(a => !a.hidden).map(a => a.dataset.tab));
-  ok(navNames[1] === "tasks" && navNames[3] === "skills", "侧栏导航: 助理后面是任务(10-14), 技能在第四格(云手机没起时): " + navNames.join(","));
+  ok(navNames[1] === "tasks" && navNames[3] === "skills" && navNames[4] === "conns", "侧栏导航: 助理后面是任务(10-14), 技能在第四格, 紧跟着连接器(10-19)(云手机没起时): " + navNames.join(","));
   /* 这台机器上可能本来就装着技能(10-14 起 Mac 上装着 pptx), 所以不假定空表: 只看页打开了、测试用的那个还不在 */
   ok(await p4.evaluate(() => curTab()) === "skills" && await p4.locator("#sk-list .row b", { hasText: "e2e-weekly-report" }).count() === 0, "技能页打开, 测试技能还不在");
   await p4.locator("#sk-new").click(); await p4.locator("#sk-name").fill("E2E Weekly Report");   /* 大写空格: 页面净化成小写连字符 */
@@ -238,15 +238,16 @@ const skDir = path.join(ASST, "skills", "e2e-weekly-report");
   await ctx4.close();
 }
 
-/* ---- 连接器(10-19, 技能页第二张卡): 新建 → 类型下拉来自接口 kinds, 端口按类型自动填; 测试连接(本机有 Mongo 就 ✓, 没有就 ✗ 带具体原因);
+/* ---- 连接器(10-19, 侧栏技能后面的独立一格): 新建 → 类型下拉来自接口 kinds, 端口按类型自动填; 测试连接(本机有 Mongo 就 ✓, 没有就 ✗ 带具体原因);
    保存 → connectors/<名>.json 落盘 + 密码进 secrets/conn_<名>(0600) 且接口不回密码; 开关 → enabled:false; 删除 → json 进 trash/connectors, 密码文件没了 ---- */
 {
   const cnFile = path.join(ASST, "connectors", "e2e-quant.json"), cnSecret = path.join(ASST, "secrets", "conn_e2e_quant");
   if (existsSync(cnFile)) rmSync(cnFile); if (existsSync(cnSecret)) rmSync(cnSecret);
   const ctx5 = await browser.newContext({ locale: "zh-CN" });
   const p5 = await ctx5.newPage(); p5.on("pageerror", e => console.log("pageerror:", e.message));
-  await p5.goto(`http://127.0.0.1:${PORT}/#skills`); await login(p5); await sleep(300);
-  ok(await p5.locator("#cn-list .row").count() === 0 || await p5.locator("#cn-list .row b", { hasText: "e2e-quant" }).count() === 0, "连接器卡在技能页, 测试连接器还不在");
+  await p5.goto(`http://127.0.0.1:${PORT}/#conns`); await login(p5); await sleep(300);
+  ok(await p5.evaluate(() => curTab()) === "conns" && await p5.locator("#v-conns").isVisible() && await p5.locator("#v-skills #cn-list").count() === 0, "连接器是独立页(#conns), 不在技能页里");
+  ok(await p5.locator("#cn-list .row b", { hasText: "e2e-quant" }).count() === 0, "测试连接器还不在");
   await p5.locator("#cn-new").click(); await sleep(100);
   const kinds = await p5.locator("#cn-kind option").allTextContents();
   ok(kinds.includes("MongoDB") && kinds.includes("PostgreSQL") && kinds.includes("MySQL / MariaDB") && kinds.includes("Redis") && kinds.includes("SQLite file"), "类型下拉来自接口 kinds: " + kinds.join(","));
