@@ -55,6 +55,9 @@ SKILL_OBJS := src/skill/skill.o src/skill/skill_seed.o
 # 推送密码学(src/push/: P-256 / AES-GCM / HKDF / RFC 8291 加密 / VAPID JWT); 纯主机 C, 零依赖; 金标 tests/push/t_push.c
 PUSH_SRCS := $(sort $(wildcard src/push/*.c))
 PUSH_OBJS := $(PUSH_SRCS:.c=.o)
+# 数据库连接器(src/db/: BSON / MongoDB 线协议 / SCRAM-SHA-256 / 只读查询, 方案稿 docs/assistant_connectors.md); 纯主机 C, 零依赖
+DB_SRCS := $(sort $(wildcard src/db/*.c))
+DB_OBJS := $(DB_SRCS:.c=.o)
 # 官方产出工具的格式基元(src/office/: zip/deflate/Markdown/docx/xlsx, 方案稿 docs/assistant_office.md); 纯主机 C, 零依赖
 OFFICE_SRCS := $(sort $(wildcard src/office/*.c))
 OFFICE_OBJS := $(OFFICE_SRCS:.c=.o)
@@ -296,9 +299,11 @@ tests/phone/adbprobe: tests/phone/adbprobe.c src/sandbox/sbx_adb.o src/common/ds
 # 图像模块(改图工具): 要在 ds4-train 规则之前定义 —— 规则的依赖读到时就展开, 定义在后面依赖就是空的, 新加的 .c 不会被编(10-15 实撞 img_grid.o)
 IMAGE_SRCS := $(sort $(wildcard src/image/*.c))
 IMAGE_OBJS := $(IMAGE_SRCS:.c=.o)
-ds4-train: src/studio/studio_main.o src/studio/studio_http.o src/studio/studio_proxy.o $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) src/common/ds4_json.o
-	$(CC) $(CFLAGS) -o $@ src/studio/studio_main.o src/studio/studio_http.o src/studio/studio_proxy.o $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) src/common/ds4_json.o $(LDLIBS)
+ds4-train: src/studio/studio_main.o src/studio/studio_http.o src/studio/studio_proxy.o $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) src/common/ds4_json.o
+	$(CC) $(CFLAGS) -o $@ src/studio/studio_main.o src/studio/studio_http.o src/studio/studio_proxy.o $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) src/common/ds4_json.o $(LDLIBS)
 src/push/%.o: src/push/%.c src/push/ds4_push.h src/common/ds4_sha256.h
+	$(CC) $(CFLAGS) -c $< -o $@
+src/db/%.o: src/db/%.c src/db/db.h src/db/bson.h src/db/mongo.h src/common/ds4_json.h src/common/ds4_sha256.h
 	$(CC) $(CFLAGS) -c $< -o $@
 ds4_push_test: tests/push/t_push.c $(PUSH_OBJS) src/common/ds4_sha256.o
 	$(CC) $(CFLAGS) -o $@ tests/push/t_push.c $(PUSH_OBJS) src/common/ds4_sha256.o $(LDLIBS)
@@ -371,8 +376,8 @@ tests/asst/fake/ds4-server: tests/asst/fake_model.c
 asst-e2e: ds4-train tests/asst/fake/ds4-server
 	node tests/asst/e2e_device.mjs
 # 沙盒逃逸单测 + 纯逻辑单测 + 工作台登录单测(不要模型, 秒级; make test 里跑)
-ds4_asst_test: tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o
-	$(CC) $(CFLAGS) -o $@ tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o $(LDLIBS)
+ds4_asst_test: tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o
+	$(CC) $(CFLAGS) -o $@ tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o $(LDLIBS)
 
 
 # Standalone capability modules (self-contained, no engine coupling): z 隐变量
@@ -562,7 +567,7 @@ linecount:
 	if [ -n "$$viol" ]; then echo "linecount: 以下文件超 500 行(豁免走 .linecount-exempt, 要带理由):"; echo "$$viol"; exit 1; \
 	else echo "linecount: ok (≤500 行, 豁免清单外零超标)"; fi
 clean:
-	rm -f ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4-phone ds4-seg ds4_cpu ds4_native ds4_server_test ds4_test ds4_unit ds4_asst_test ds4_office_test ds4_image_test ds4_seg_test ds4_video_test ds4_push_test tests/video/vidcheck e0-pingpong mm-ui mm-ocr *.o src/assistant/*.o src/assistant/tools/*.o src/sandbox/*.o src/sandbox/phone/*.o src/skill/*.o src/model/*.o src/studio/*.o src/push/*.o src/office/*.o src/image/*.o src/seg/*.o src/video/*.o src/cli/*.o src/bench/*.o src/kv/*.o src/web/*.o src/eval/*.o src/agent/*.o src/dist/*.o src/server/*.o src/core/*.o src/common/*.o src/metal/*.o tests/server_tests_*.o tests/t_*.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o
+	rm -f ds4 ds4-server ds4-bench ds4-eval ds4-agent ds4-phone ds4-seg ds4_cpu ds4_native ds4_server_test ds4_test ds4_unit ds4_asst_test ds4_office_test ds4_image_test ds4_seg_test ds4_video_test ds4_push_test tests/video/vidcheck e0-pingpong mm-ui mm-ocr *.o src/assistant/*.o src/assistant/tools/*.o src/sandbox/*.o src/sandbox/phone/*.o src/skill/*.o src/db/*.o src/model/*.o src/studio/*.o src/push/*.o src/office/*.o src/image/*.o src/seg/*.o src/video/*.o src/cli/*.o src/bench/*.o src/kv/*.o src/web/*.o src/eval/*.o src/agent/*.o src/dist/*.o src/server/*.o src/core/*.o src/common/*.o src/metal/*.o tests/server_tests_*.o tests/t_*.o tests/cuda_long_context_smoke tests/cuda_long_context_smoke.o
 
 # Task 04 / E0: standalone thunderbolt ping-pong latency gate (no core deps, no
 # model). Defined after the default targets so it never becomes the default goal.
