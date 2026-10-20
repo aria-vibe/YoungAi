@@ -16,6 +16,7 @@ int ds4_engine_is_v41(ds4_engine *e);
 void ds4_engine_v41_set_prof(int on);   /* --v41-prof: 每次前向打逐层毫秒(每层同步一次, 只在查速度时开) */
 void ds4_engine_v41_set_decoder_full(int on);   /* --decoder-full: 关 CED, 提示每块跑满全部层(精确路) */
 void ds4_engine_v41_set_chunk(int n);           /* --v41-chunk: 预填分块大小(0 = 默认) */
+void ds4_engine_v41_set_replay(int k);          /* --decoder-replay K: 预填最后一块的解码器段只回放末尾 K 行(默认 140 = 官方 keep_tokens; 0 = 整块) */
 void ds4_engine_v41_set_dspark(int mode);       /* 投机: 0 关 / 1 默认开(采样请求自动走纯解码) / 2 显式 --dspark(与采样同开硬拒); 见 core_v41_api.c */
 void ds4_engine_v41_set_graph(int on);          /* --no-graph 关解码整步 CUDA graph(默认开; 只作 A/B 与定位, 输出逐字节同) */
 void ds4_engine_v41_set_vq_group(int on);       /* --no-vq-group: 验证批/草稿塔的 VQ 专家核回逐对形态(默认分组核; 只作 A/B, 输出逐字节同) */

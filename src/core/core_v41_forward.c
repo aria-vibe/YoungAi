@@ -300,8 +300,18 @@ bool v41_spec_rollback(ds4_v41_state *st, uint32_t keep) {
 /* 前向主体: embed → 各层 → 出口 head。直发(v41_forward)与解码整步 graph 的捕获(core_decode_graph.c)共用 ——
  * 里面没有任何主机等待/同步拷贝/位置推进, 那些各归调用方。CED 收工与钩子早停走 st->ced_done / st->stop_early 出去。 */
 bool v41_forward_body(ds4_engine *e, ds4_v41_state *st) {
-    const uint32_t n = st->n, E = DS4_N_EMBD;
+    uint32_t n = st->n;
+    const uint32_t E = DS4_N_EMBD;
     st->ced_done = 0;
+    /* ★解码器有界回放(2026-10-20, docs/deepinfer_compare.md §3.2)★: 最后一块(不被 CED 跳过的那块)到分界层时, 先按整块把分界层的全局 KV 写进缓存
+     * (与 CED 中间块同一段代码), 再把残差流(hc / pre_mix)与位置表的末尾 K 行搬到头, 余下的解码器段只对这 K 行跑。官方 keep_tokens=140 的
+     * compact 模式(DeepInfer prepare_tensor_input_v4.cpp fill_yoco_truncation_metadata)就是这个语义: 解码器层对提示只回放末尾 K 个 query,
+     * SWA 可见域截在这 K 行的矩形内(这里由 win_from 钳住), 全局 KV 仍来自整块。只在生成路(head_last_only)开: 打分/取料/训练/钩子/对拍要
+     * 全部位置的输出, 不动。K = 0(默认)= 现状(整块跑满, 回放宽度 = 块长 ≤ 2048); 09-29 "正好 window" 判负的存档在 v41_prefill_chunk 头注,
+     * 真因是草稿器目标层(37/38/39)全在解码器段、回放窄了隐态变差 —— 所以 K 由尺扫(接受率 + 首 token), 不写死。 */
+    const uint32_t replay = (uint32_t)g_ds4_v41_replay;
+    const bool do_replay = replay > 0u && replay < n && st->head_last_only && !st->ced_skip && !st->draft && !st->tsave &&
+                           !g_ds4_v41_hook && !st->dump_prefix && !st->graph;
     bool ok = v41_embed(&e->model, st->x, st->tok, e->weights.token_embd, DS4_N_VOCAB, n, E) != 0;
     /* 图片 span 的位置用视觉嵌入盖掉词嵌入(官方 merge_image_embeddings 在 embed 之后、hc 展开之前); 只有带图片的预填块才开 */
     if (ok && st->vrows_on) ok = ds4_gpu_v41_row_select_tensor(st->x, st->vimg->embd, st->vrows, n, E) != 0;
@@ -322,6 +332,26 @@ bool v41_forward_body(ds4_engine *e, ds4_v41_state *st) {
             /* 分界层及其后的层这一块没写窗口环 ⇒ 它们的环里最早有效位置推进到下一块开头(注意力核按它钳窗口下界) */
             for (uint32_t l = ced_edge; l < DS4_N_LAYER; l++) st->win_from[l] = st->pos0 + n;
             return ok;   /* 中间块不出 logits(没人读: 生成只要最后一块的末位) */
+        }
+        if (do_replay && il == ced_edge) {   /* 回放: 整块写分界层全局 KV → 末尾 K 行搬到头 → 分界层起只跑这 K 行 */
+            const uint32_t K = replay, off = n - K, HC = DS4_N_HC;
+            ok = v41_hc_half(e, st, &e->weights.layer[il], true) && v41_attention_kv_only(e, st, il);
+            /* hc_half 把本层 attn_pre 换进了 pre_mix 槽, 换回去: 下面 v41_layer 自己会再做一次 hc_half, 它要的是上一层的 ffn_pre */
+            { ds4_gpu_tensor *t = st->pre; st->pre = st->pre_mix; st->pre_mix = t; }
+            /* 尾行搬头: hc → hc2(乒乓, 此刻空闲) / pre_mix → pre(散件) / pos → posg(散件; pos 自拷可能重叠) / 图片行号 → tok(embed 之后没人读) */
+            if (ok) ok = ds4_gpu_tensor_copy(st->hc2, 0, st->hc, (uint64_t)off * HC * E * 4, (uint64_t)K * HC * E * 4) &&
+                         ds4_gpu_tensor_copy(st->pre, 0, st->pre_mix, (uint64_t)off * HC * 4, (uint64_t)K * HC * 4) &&
+                         ds4_gpu_tensor_copy(st->posg, 0, st->pos, (uint64_t)off * 4, (uint64_t)K * 4) &&
+                         ds4_gpu_tensor_copy(st->pos, 0, st->posg, 0, (uint64_t)K * 4);
+            if (ok && st->vrows_on) ok = ds4_gpu_tensor_copy(st->tok, 0, st->vrows, (uint64_t)off * 4, (uint64_t)K * 4) &&
+                                         ds4_gpu_tensor_copy(st->vrows, 0, st->tok, 0, (uint64_t)K * 4);
+            if (!ok) break;
+            { ds4_gpu_tensor *t = st->hc; st->hc = st->hc2; st->hc2 = t; }
+            { ds4_gpu_tensor *t = st->pre; st->pre = st->pre_mix; st->pre_mix = t; }
+            st->n = n = K; st->pos0 += off;
+            /* 分界层及其后: 这一块只给末尾 K 个位置写环, 前面的槽是脏的(与 CED 中间块之后同一语义) */
+            for (uint32_t l = ced_edge; l < DS4_N_LAYER; l++) st->win_from[l] = st->pos0;
+            /* 分界层随后在 v41_layer 里对这 K 行再算一遍压缩源(同 xn 同核 ⇒ 写回同一批组、同一个值, 幂等); 索引源/候选块只算这 K 行 */
         }
         ok = v41_layer(e, st, il);
         if (ok && (g_ds4_v41_prof || n >= 64u) && ds4_gpu_flush_commands() == 0) ok = false;   /* 解码不逐层同步(省 40 次停等), 查速度/大块才同步 */
@@ -416,12 +446,12 @@ bool v41_forward(ds4_engine *e, ds4_v41_state *st, const int32_t *ids, uint32_t 
     st->vrows_on = 0;   /* 图片行只属于这一块 */
     if (!body_ok) return false;
     if (ds4_gpu_end_commands() == 0 || ds4_gpu_synchronize() == 0) return false;
-    if (st->mainh && st->mainh_wrote) {   /* mainh 环的账: 与上一段连续就接着数, 断了(CED 跳过的块)就从头数 */
-        const int64_t first = (int64_t)st->pos0 + (int64_t)(n - st->mainh_wrote);
+    if (st->mainh && st->mainh_wrote) {   /* mainh 环的账: 与上一段连续就接着数, 断了(CED 跳过的块)就从头数。st->n/pos0: 回放块里被截成末尾 K 行 */
+        const int64_t first = (int64_t)st->pos0 + (int64_t)(st->n - st->mainh_wrote);
         const bool contig = st->mainh_n > 0 && st->mainh_end == first - 1;
         const uint32_t nn = contig ? st->mainh_n + st->mainh_wrote : st->mainh_wrote;
         st->mainh_n = nn > st->mainh_cap ? st->mainh_cap : nn;
-        st->mainh_end = (int64_t)st->pos0 + (int64_t)n - 1;
+        st->mainh_end = (int64_t)st->pos0 + (int64_t)st->n - 1;
     }
     st->n_past += n;
     if (n == 1u && !st->draft && !st->ced_done && !st->stop_early) st->n_direct1++;   /* 解码整步 graph 的"暖过了"计数 */

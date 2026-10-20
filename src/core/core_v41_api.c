@@ -103,6 +103,10 @@ int ds4_engine_v41_ctx(void) { return (int)g_ds4_v41.ctx; }   /* 模型元数据
 /* --v41-chunk 也管生成路的预填分块(以前只管 --score-ids): 专家路每层要把 384 个专家全解一遍, 代价与块里有几个 token 无关, 块小就摊不开(实测账在 core_v41.h) */
 int g_ds4_v41_chunk = 0;
 void ds4_engine_v41_set_chunk(int n) { g_ds4_v41_chunk = n > 0 ? n : 0; }
+/* --decoder-replay K(2026-10-20, docs/deepinfer_compare.md §3.2): 预填最后一块的解码器段只回放末尾 K 行(0 = 整块跑满)。
+ * 语义与机制在 core_v41_forward.c v41_forward_body 的回放块; 默认 = 官方线上的 140(DS4_V41_REPLAY_ROWS, 账在 core_v41.h), 尺 speed-bench/decoder_replay_scan_spark.sh。 */
+int g_ds4_v41_replay = DS4_V41_REPLAY_ROWS;
+void ds4_engine_v41_set_replay(int k) { g_ds4_v41_replay = k > 0 ? k : 0; }
 
 /* 取下一个 token 的三条路(设备 argmax / 设备采样核 / 主机惩罚路)在 core_v41_sample.c(2026-09-28); 以前"采样 = 读回 517 KB 主机采样"
  * 的那版量过每步只贵 0.32 ms, 真正丢的是投机(采样下关掉, −32%), 所以采样进了设备核, 投机在采样下按拒绝采样走。 */

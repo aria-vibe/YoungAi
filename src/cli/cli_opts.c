@@ -362,6 +362,7 @@ cli_config parse_options(int argc, char **argv) {
             c.gen.no_lanes = 1;
         } else if (!strcmp(arg, "--no-idx-mma")) {   /* indexer 打分退回标量核(张量核 10-20 起默认, 见 cuda_v41_indexer.inc.cu); 全局 setter 同 --weight-cache-mb */
             ds4_gpu_v41_set_indexer_mma(0);
+        } else if (!strcmp(arg, "--decoder-replay")) { ds4_engine_v41_set_replay(atoi(need_arg(&i, argc, argv, arg)));   /* 0 = 整块; 语义见 ds4_v41_api.h */
         } else if (!strcmp(arg, "--score-out")) {
             c.gen.score_out_path = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--draft-amp")) {

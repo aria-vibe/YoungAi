@@ -347,6 +347,11 @@ bool v41_moe(const ds4_model *m, const ds4_layer_weights *l, ds4_v41_state *st, 
 bool v41_engram_rows(ds4_engine *e, ds4_v41_state *st, uint32_t il);    /* core_v41_engram.c: 收行 → 上传 → 解码行进 st->erows(按请求) */
 bool v41_engram_apply(ds4_engine *e, ds4_v41_state *st, uint32_t il);   /* core_v41_engram.c: erows → wkv → 门 → 就地改 st->hc(可按批) */
 extern int g_ds4_v41_chunk;   /* --v41-chunk(core_v41_api.c): 预填分块, 0 = DS4_V41_CHUNK */
+extern int g_ds4_v41_replay;  /* --decoder-replay(core_v41_api.c): 最后一块解码器段的回放行数, 0 = 整块(见 v41_forward_body) */
+/* ★默认回放宽度 = 官方线上配置★(用户 2026-10-20 定"K 用官方配置"): DeepInfer 默认 DEEPINFER_YOCO_PREFILL_KEEP_TOKENS=140, 约束 ≥ 窗口 128 +
+ * 最大回退(草稿块 5 + 1)。10-20 扫尺(fable5): 134 档 短提示预填 −30%、9210 token −5%, 代价 = 三条真实请求翻 2 条文本、接受 2.46 → 2.26;
+ * 512 档三条全逐字节同但只省 −12~20%/−2.5%。这是官方同款近似, 不是逐字节同; --decoder-replay 0 退回整块。 */
+#define DS4_V41_REPLAY_ROWS 140
 /* 单请求路的 KV 前缀复用(core_v41_kvreuse.c): 预填完存检查点 / 新请求接上就从检查点位置起填(返回起点, 0 = 整段, = np 同提示一块不填) / 热切插件时作废 */
 extern int g_ds4_v41_kv_reuse;
 void v41_kvreuse_save(const ds4_v41_state *st, const int32_t *prompt, uint32_t np, const uint64_t *sig);        /* sig = 每位的图片指纹(无图 NULL) */
