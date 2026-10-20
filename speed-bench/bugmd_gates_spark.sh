@@ -267,6 +267,7 @@ engref)
   # 参考 = v41_judge.sh file: 档产的落盘学生(官方 model.py 读同一份量化权重)。同权重只差实现 ⇒ KLD / same-top 按位置分桶掉下来 = 引擎在
   # 那一段走样, 不掉 = 引擎干净。为什么要它: 引擎对参考实现的对拍以前只做到 24,400 位, 而两次思考段崩塌都在 46.9k~47.6k 位。
   IDS="${2:?ids(行数 = 参考文件的 S)}"; REFBIN="${3:?参考实现学生 .bin}"; TAG="${4:-$(basename "$IDS" .ids)}"; NP="${5:-1}"; ENTRY="${6:-0}"
+  MODEL="${7:-$MODEL}"   # 第 7 参数 = 底座 GGUF(2026-10-20, 1017 底座; 与 scoreids 的第 7 参数同义), 不给就是上面的默认 v3
   [ -s "$IDS" ] && [ -s "$REFBIN" ] || { LOG "★缺 $IDS 或 $REFBIN★"; exit 1; }
   STU="$ROOT/gguf/v41judge/stu_${TAG}_eng_bare.bin"
   LOG "== engref $TAG: 裸引擎全 logits $(wc -l < "$IDS") 位(块 512) → $STU"

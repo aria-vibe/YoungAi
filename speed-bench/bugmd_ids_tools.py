@@ -428,6 +428,41 @@ def cmd_minp(topk_path, ids_path, n_prompt, entry="0", min_p="0.02", tok="128822
             print("     生成第 %6d 位 p(出口)=%.5f p(top-1)=%.3f 门 %.5f %s" % (gpos, pt, p1, min_p * p1, "过门" if ok else "★被砍★"))
 
 
+def cmd_agree(topk_path, ids_path, n_prompt, bucket="1000"):
+    """解码路(真吐)对预填路(top-K 重打分)的逐位一致率, 按位置分桶(2026-10-20, 用户"引擎里有魔法数字"):
+    喂一条温 0 的真实轨迹 —— 真吐 = 解码路(投机验证批/纯解码)在该位的 argmax, 重打分 top-1 = 预填路(块 512)同一位的 argmax。
+    两条路状态都对就只剩浮点近平局的分歧, 一致率应当平着不随位置掉; 某个偏移起掉下去 / 周期性塌 = 解码路把状态写坏了, 偏移就是魔法数字。
+    每桶报: 一致率、分歧里预填 p(top-1) 的中位(近平局应 <0.6)、"预填 p1>0.7 却被解码路选别的"(09-22 位平面 bug 的指纹)计数。"""
+    ids = [int(x) for x in open(ids_path).read().split()]
+    n_prompt, bucket = int(n_prompt), int(bucket)
+    f = open(topk_path, "rb")
+    magic, K, S, V = struct.unpack("<4I", f.read(16))
+    assert magic == 0x44475445, "不是 ETGD 文件"
+    row = struct.Struct("<Iiff" + "%di" % K + "%df" % K)
+    g0 = n_prompt - 1
+    b = {}
+    while True:
+        buf = f.read(row.size)
+        if len(buf) < row.size: break
+        v = row.unpack(buf); i = v[0]
+        if i < g0 or i + 1 >= len(ids): continue
+        tid, pr = v[4:4 + K], v[4 + K:4 + 2 * K]
+        p1 = max(pr); top = tid[pr.index(p1)]; y = ids[i + 1]
+        k = (i - g0) // bucket
+        s = b.setdefault(k, [0, 0, [], 0, 0])   # n, same, 分歧时 p1 列表, p1>0.7 分歧数, 真吐不在 top-K
+        s[0] += 1
+        if top == y: s[1] += 1
+        else:
+            s[2].append(p1); s[3] += p1 > 0.7; s[4] += y not in tid
+    print("解码路真吐 vs 预填路 top-1, 每 %d 生成位: 一致率 | 分歧数 | 分歧处预填 p1 中位 | p1>0.7 被翻 | 真吐不在 top-%d" % (bucket, K))
+    tot = [0, 0, 0]
+    for k in sorted(b):
+        n, same, dl, hi, miss = b[k]; med = sorted(dl)[len(dl) // 2] if dl else float("nan")
+        tot[0] += n; tot[1] += same; tot[2] += hi
+        print("  %6d~%6d: %6.2f%% | %4d | %.3f | %3d | %3d" % (k * bucket, k * bucket + bucket - 1, 100.0 * same / n, n - same, med, hi, miss))
+    print("全段 %d 位: 一致 %.2f%%, p1>0.7 被翻 %d" % (tot[0], 100.0 * tot[1] / max(tot[0], 1), tot[2]))
+
+
 def cmd_cyclescan(min_run="256", *traces):
     """思考段死环检测器的离线误报/漏报账(2026-10-17): 判据 = 生成段里出现"周期 P ≤ 256、逐 token 与 P 位前相同"的连续段,
     段长(含第一圈) ≥ max(3P, min_run) 就算触发。为什么按 token 精确周期: 饿了么 r316 进环后 p(top-1)=1.000、逐 id 周期 43,
@@ -519,7 +554,7 @@ def cmd_temper(topk_path, ids_path, n_prompt, entry="0", temps="1.0,1.2,1.5,2.0"
 if __name__ == "__main__":
     cmds = {"extract": cmd_extract, "cut": cmd_cut, "cmp-emit": cmd_cmp_emit, "cmp-topk": cmd_cmp_topk,
             "eos-scan": cmd_eos_scan, "rows": cmd_rows, "loopstat": cmd_loopstat, "faith": cmd_faith,
-            "anchor-faith": cmd_anchor_faith, "tokprobe": cmd_tokprobe, "minp": cmd_minp,
+            "anchor-faith": cmd_anchor_faith, "tokprobe": cmd_tokprobe, "minp": cmd_minp, "agree": cmd_agree,
             "cyclescan": cmd_cyclescan, "temper": cmd_temper}
     if len(sys.argv) < 2 or sys.argv[1] not in cmds:
         sys.exit(__doc__ + "  rows <rows.txt> <ids> <n_prompt> <入口位置> [tokenizer.json] [窗口=12]   --row-out 的分桶命中率 + 入口逐行解码\n")
