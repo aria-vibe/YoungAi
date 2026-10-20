@@ -1,5 +1,6 @@
 /* core_bpe.c — BPE 分词/词表加载/chat 模板 (机械拆分自 ds4.c, 重构阶段4)。 */
 #include "core_internal.h"
+#include "src/common/ds4_pretok.h"
 typedef struct {
     char *ptr;
     uint64_t len;
@@ -98,181 +99,16 @@ static void bpe_emit_piece(const ds4_vocab *vocab, ds4_str raw_piece, token_vec 
     free(encoded);
 }
 
-static uint64_t next_utf8_char(const char *s, uint64_t len, uint64_t pos) {
-    int n = utf8_len_from_first_byte((uint8_t)s[pos]);
-    if (pos + (uint64_t)n > len) n = 1;
-    return pos + (uint64_t)n;
-}
-
-static bool ascii_alpha(uint8_t c) {
-    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
-}
-
-static bool ascii_digit(uint8_t c) {
-    return c >= '0' && c <= '9';
-}
-
-static bool ascii_space(uint8_t c) {
-    return c == ' ' || c == '\t' || c == '\n' || c == '\r' ||
-           c == '\v' || c == '\f';
-}
-
-static bool ascii_newline(uint8_t c) {
-    return c == '\n' || c == '\r';
-}
-
-static bool joyai_ascii_punct_symbol(uint8_t c) {
-    return (c >= '!' && c <= '/') ||
-           (c >= ':' && c <= '@') ||
-           (c >= '[' && c <= '`') ||
-           (c >= '{' && c <= '~');
-}
-
-static bool utf8_is_cjk_hira_kata(uint32_t cp) {
-    return (cp >= 0x4e00 && cp <= 0x9fa5) ||
-           (cp >= 0x3040 && cp <= 0x309f) ||
-           (cp >= 0x30a0 && cp <= 0x30ff);
-}
-
-static uint32_t utf8_peek_one(const char *s, uint64_t len, uint64_t pos, uint64_t *next) {
-    const uint8_t c0 = (uint8_t)s[pos];
-    int n = utf8_len_from_first_byte(c0);
-    if (pos + (uint64_t)n > len) n = 1;
-    *next = pos + (uint64_t)n;
-
-    if (n == 1) return c0;
-    if (n == 2) {
-        return ((uint32_t)(c0 & 0x1f) << 6) |
-               ((uint32_t)((uint8_t)s[pos + 1] & 0x3f));
-    }
-    if (n == 3) {
-        return ((uint32_t)(c0 & 0x0f) << 12) |
-               ((uint32_t)((uint8_t)s[pos + 1] & 0x3f) << 6) |
-               ((uint32_t)((uint8_t)s[pos + 2] & 0x3f));
-    }
-    return ((uint32_t)(c0 & 0x07) << 18) |
-           ((uint32_t)((uint8_t)s[pos + 1] & 0x3f) << 12) |
-           ((uint32_t)((uint8_t)s[pos + 2] & 0x3f) << 6) |
-           ((uint32_t)((uint8_t)s[pos + 3] & 0x3f));
-}
-
-static bool joyai_letter_like_at(const char *s, uint64_t len, uint64_t pos) {
-    (void)len;
-    uint8_t c = (uint8_t)s[pos];
-    if (c < 128) return ascii_alpha(c);
-
-    /*
-     * The JoyAI tokenizer maps Unicode letters into a collapsed regex alphabet before
-     * applying the JoyAI pre-tokenizer.  The prompts we care about are mostly
-     * ASCII, but treating non-ASCII non-control bytes as letters preserves the
-     * useful behavior for ordinary UTF-8 text such as Italian accents.  CJK and
-     * kana are isolated by the JoyAI pre-tokenizer before the generic letter
-     * rule, below.
-     */
-    return true;
-}
-
-static uint64_t joyai_consume_letters(const char *s, uint64_t len, uint64_t pos) {
-    while (pos < len && joyai_letter_like_at(s, len, pos)) {
-        pos = next_utf8_char(s, len, pos);
-    }
-    return pos;
-}
-
-static bool joyai_cjk_at(const char *s, uint64_t len, uint64_t pos) {
-    if ((uint8_t)s[pos] < 128) return false;
-    uint64_t next = pos;
-    uint32_t cp = utf8_peek_one(s, len, pos, &next);
-    return utf8_is_cjk_hira_kata(cp);
-}
-
-/*
- * DeepSeek V4 Flash declares tokenizer.ggml.pre = "joyai-llm".  The split
- * below mirrors the JoyAI BPE pre-tokenizer for the cases this model
- * uses in normal text and source-code prompts:
- *
- *   \p{N}{1,3}
- *   [CJK/Hiragana/Katakana]+
- *   [P/S][A-Za-z]+
- *   [^\r\n\p{L}\p{P}\p{S}]?[\p{L}\p{M}]+
- *    ?[\p{P}\p{S}]+[\r\n]*
- *   \s*[\r\n]+
- *   \s+(?!\S)
- *   \s+
- *
- * The punctuation rule intentionally keeps trailing newlines in the same BPE
- * word (for example ">;\n").  Splitting those newlines separately changes the
- * token stream for code prompts and produces wrong long-context logits.
- */
-/* JoyAI/DeepSeek pre-tokenization.  The split shape matters: different pieces
- * lead to different BPE merges even when the final text bytes are identical. */
+/* 预切分(tokenizer.json 的 pre_tokenizer)在 src/common/ds4_pretok.c: 切片形状决定 BPE 合并, 字节一样切法不同 token 就不同。
+ * 2026-10-20 前这里只认 ASCII 标点/数字、把一切非 ASCII 当字母, 中文标点跟着的换行被切开("。\n" 官方一个 token, 这里两个),
+ * 一条 11k 的真实中文系统提示有 27 处与官方不同 —— 模型看到的是训练里没见过的序列。现在按官方正则的 Unicode 类别切, 金标见 ds4_unit。 */
 void bpe_tokenize_text(const ds4_vocab *vocab, const char *text, token_vec *out) {   /* 聊天角色帧(core_chat_frame.c)也用 */
-    const uint64_t len = strlen(text);
-    uint64_t pos = 0;
-
-    while (pos < len) {
-        uint64_t start = pos;
-        uint8_t c = (uint8_t)text[pos];
-
-        if (ascii_digit(c)) {
-            int ndigits = 0;
-            while (pos < len && ascii_digit((uint8_t)text[pos]) && ndigits < 3) {
-                pos++;
-                ndigits++;
-            }
-        } else if (joyai_cjk_at(text, len, pos)) {
-            do {
-                pos = next_utf8_char(text, len, pos);
-            } while (pos < len && joyai_cjk_at(text, len, pos));
-        } else if (joyai_ascii_punct_symbol(c) &&
-                   pos + 1 < len &&
-                   ascii_alpha((uint8_t)text[pos + 1])) {
-            pos++;
-            while (pos < len && ascii_alpha((uint8_t)text[pos])) pos++;
-        } else if (joyai_letter_like_at(text, len, pos)) {
-            pos = joyai_consume_letters(text, len, pos);
-        } else if (!ascii_newline(c) &&
-                   !joyai_ascii_punct_symbol(c) &&
-                   pos + 1 < len &&
-                   joyai_letter_like_at(text, len, pos + 1)) {
-            pos++;
-            pos = joyai_consume_letters(text, len, pos);
-        } else if (c == ' ' &&
-                   pos + 1 < len &&
-                   joyai_ascii_punct_symbol((uint8_t)text[pos + 1])) {
-            pos++;
-            while (pos < len && joyai_ascii_punct_symbol((uint8_t)text[pos])) pos++;
-            while (pos < len && ascii_newline((uint8_t)text[pos])) pos++;
-        } else if (joyai_ascii_punct_symbol(c)) {
-            while (pos < len && joyai_ascii_punct_symbol((uint8_t)text[pos])) pos++;
-            while (pos < len && ascii_newline((uint8_t)text[pos])) pos++;
-        } else if (ascii_space(c)) {
-            uint64_t p = pos;
-            uint64_t last_newline_end = 0;
-            while (p < len && ascii_space((uint8_t)text[p])) {
-                uint8_t sc = (uint8_t)text[p++];
-                if (ascii_newline(sc)) last_newline_end = p;
-            }
-            if (last_newline_end) {
-                pos = last_newline_end;
-            } else if (p < len && p > pos + 1 &&
-                       (joyai_letter_like_at(text, len, p) ||
-                        joyai_ascii_punct_symbol((uint8_t)text[p]))) {
-                /*
-                 * JoyAI lets a single leading space join the following word or
-                 * punctuation run.  For "    int", the pre-tokenizer therefore emits
-                 * "   " then " int", not "    " then "int".
-                 */
-                pos = p - 1;
-            } else {
-                pos = p;
-            }
-        } else {
-            pos = next_utf8_char(text, len, pos);
-        }
-
-        if (pos == start) pos = next_utf8_char(text, len, pos);
-        bpe_emit_piece(vocab, (ds4_str){ text + start, pos - start }, out);
+    const size_t len = strlen(text);
+    ds4_pretok st = {0};
+    for (size_t pos = 0; pos < len;) {
+        size_t end = ds4_pretok_next(&st, text, len, pos);
+        bpe_emit_piece(vocab, (ds4_str){ text + pos, (uint64_t)(end - pos) }, out);
+        pos = end;
     }
 }
 
