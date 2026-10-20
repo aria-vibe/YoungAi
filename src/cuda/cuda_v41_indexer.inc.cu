@@ -95,7 +95,10 @@ __global__ static void v41_indexer_score_kernel(float *score, const float *q, co
 static int v41_indexer_score_mma_launch(ds4_gpu_tensor *score, const ds4_gpu_tensor *q, const ds4_gpu_tensor *k, const ds4_gpu_tensor *weights,
                                         const ds4_gpu_tensor *cand_list, uint32_t cand_bs, uint32_t cand_cap, uint32_t n_tok, uint32_t pos0,
                                         uint32_t ng, uint32_t n_head, uint32_t dk, uint32_t ratio, const ds4_gpu_tensor *posd);
-static int g_v41_idx_mma = 0;   /* --idx-mma: 打分走张量核(默认关; 数值顺序见 cuda_v41_indexer_mma.inc.cu 文件头, 开关只作判决用) */
+/* ★默认走张量核(2026-10-20 转正)★: 09-30 落地时默认关, 理由是四块相加顺序与标量核不同、理论上不保证逐字节同(12k/106k 门实测逐字节同)。
+ * 转正依据 = 官方线上(DeepInfer index_attn.py)就是张量核打分(deep_gemm fp8_fp4_paged_mqa_logits, fp4 索引键), 标量核的累加序并不比张量核更"官方";
+ * 收益 106k 预填 133 → 96 s, 1M 三路解码外推 90 → 72 ms/步(fable5 09-30 节)。--no-idx-mma 退回标量核(只作判决/对拍用)。 */
+static int g_v41_idx_mma = 1;
 void ds4_gpu_v41_set_indexer_mma(int on) { g_v41_idx_mma = on ? 1 : 0; }
 int ds4_gpu_v41_indexer_score_tensor(ds4_gpu_tensor *score, const ds4_gpu_tensor *q, const ds4_gpu_tensor *k,
                                      const ds4_gpu_tensor *weights, const ds4_gpu_tensor *cand_list, uint32_t cand_bs, uint32_t cand_cap,

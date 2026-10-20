@@ -64,7 +64,7 @@ int ds4_gpu_v41_sparse_attn_tensor(ds4_gpu_tensor *o, const ds4_gpu_tensor *q, c
 }
 int ds4_gpu_v41_attn_scratch_prepare(uint32_t n_tok, uint32_t n_head, uint32_t head_dim) { (void)n_tok; (void)n_head; (void)head_dim; return 1; }   /* 标量核不用暂存 */
 int ds4_gpu_v41_indexer_scratch_prepare(uint32_t n_tok, uint32_t n_head) { (void)n_tok; (void)n_head; return 1; }
-void ds4_gpu_v41_set_indexer_mma(int on) { if (on) fprintf(stderr, "ds4: [v41-metal] --idx-mma 在 Metal 上没有张量核打分版, 走标量核\n"); }
+void ds4_gpu_v41_set_indexer_mma(int on) { (void)on; }   /* Metal 只有标量打分核(张量核版是 CUDA 的默认路, 2026-10-20); 开关在这里没有对象 */
 
 static uint32_t v41_cand_ns(uint32_t ng, uint32_t bs, uint32_t cap) { const uint64_t full = (uint64_t)cap * bs; return full < ng ? (uint32_t)full : ng; }
 int ds4_gpu_v41_indexer_score_tensor(ds4_gpu_tensor *score, const ds4_gpu_tensor *q, const ds4_gpu_tensor *k, const ds4_gpu_tensor *weights, const ds4_gpu_tensor *cand_list,

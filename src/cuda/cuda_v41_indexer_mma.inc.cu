@@ -168,7 +168,7 @@ __global__ static void __launch_bounds__(256) v41_indexer_score_mma_kernel(float
     }
 }
 
-/* 打分核的张量核入口(与 ds4_gpu_v41_indexer_score_tensor 同一份契约, 由它按 --idx-mma 分发)。
+/* 打分核的张量核入口(与 ds4_gpu_v41_indexer_score_tensor 同一份契约, 由它按 g_v41_idx_mma 分发; 2026-10-20 起默认走这里)。
  * grid: (行, 组块); 每 warp 连做 tiles 个 8 组的片(q 尾数每 block 装一次 shared 多用), tiles 按"至少铺满 2 波 SM"从 ns 与 SM 数算, 不写死。 */
 static int v41_indexer_score_mma_launch(ds4_gpu_tensor *score, const ds4_gpu_tensor *q, const ds4_gpu_tensor *k, const ds4_gpu_tensor *weights,
                                         const ds4_gpu_tensor *cand_list, uint32_t cand_bs, uint32_t cand_cap, uint32_t n_tok, uint32_t pos0,

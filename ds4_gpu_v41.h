@@ -204,9 +204,9 @@ int ds4_gpu_v41_attn_scratch_prepare(uint32_t n_tok, uint32_t n_head, uint32_t h
 /* 同上, 候选块核的 [nb] 块分 + 选中标记暂存(n_tok 行, 每行 nb 个): 捕获前按桶上限的块数长够。
  * 这两个数组 2026-09-21 从 shared 挪进了全局暂存 —— shared 那 48 KB 正是 ctx 曾经卡在 32768 的原因。 */
 int ds4_gpu_v41_candidate_scratch_prepare(uint32_t n_tok, uint32_t nb);
-/* ★indexer 打分上张量核(2026-09-30, cuda_v41_indexer_mma.inc.cu)★: --idx-mma 打开后 ds4_gpu_v41_indexer_score_tensor 走 s8 mma 版
- * (每块 32 维的点积精确, 只有四块相加的顺序与 CUDA 核的蝶形树不同, 详见该文件头); 默认关。它要一份每路的 q 整数尾数暂存, graph 路捕获前
- * 由 ds4_gpu_v41_indexer_scratch_prepare 按验证批行数长够(开关关着时是 no-op)。 */
+/* ★indexer 打分上张量核(2026-09-30, cuda_v41_indexer_mma.inc.cu; 2026-10-20 起默认开)★: ds4_gpu_v41_indexer_score_tensor 走 s8 mma 版
+ * (每块 32 维的点积精确, 只有四块相加的顺序与标量核的蝶形树不同, 详见该文件头); --no-idx-mma 退回标量核(判决/对拍用)。它要一份每路的
+ * q 整数尾数暂存, graph 路捕获前由 ds4_gpu_v41_indexer_scratch_prepare 按验证批行数长够(关着时是 no-op)。Metal 没有张量核版, setter 空实现。 */
 void ds4_gpu_v41_set_indexer_mma(int on);
 int ds4_gpu_v41_indexer_scratch_prepare(uint32_t n_tok, uint32_t n_head);
 /* 后端暂存的"代号": 任何一块暂存重分配(换了指针)就 +1。解码整步 graph 烤死的是捕获时的指针, 所以发图前要对一下,
