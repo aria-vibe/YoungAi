@@ -8,18 +8,33 @@
 #   域默认 law med sci fin41(编程由用户先单独发车, 不在默认表里; 要补就把 code 写进域表)。
 #   先等机上正在跑的 amp_campaign.sh / v41_judge.sh / v41_amp_run 退完再开(不抢机器, 也不与它们双装)。
 # 停车规则: 任一域失败就停(exit 1), 不跳到下一个 —— 少一个侧车必须让人看见, 不许"跑完了"却缺一格。
+#   --fit-variant think(2026-10-20): 拟合份逐窗套官方思考模板再解(amp_campaign.sh stage_fit_think), 判决份不变; 侧车名带 fit_think。
+# 模型子进程(2026-10-20): 工作台正在服务时机器被 113 GB 底座占着, 解算器与引擎学生各要整机 ⇒ 子进程 idle 就停它, 跑完按
+#   gguf/serve_pick.txt 装回(model_restart_spark.sh, 与页面同路); 子进程不是 idle(有人在聊)就不停、直接退出。
 set -uo pipefail
 ROOT="$HOME/ds4-main"; cd "$ROOT" || exit 1
-GG=""; HF=""; DOMS=()
+GG=""; HF=""; DOMS=(); FITV=()
 while [ $# -gt 0 ]; do case "$1" in
   --gguf) GG="${2:?--gguf 要文件}"; shift 2;;
   --hf) HF="${2:?--hf 要目录}"; shift 2;;
+  --fit-variant) FITV=(--fit-variant "${2:?--fit-variant 要值 think}"); shift 2;;
   -*) echo "★不认识的参数 $1★"; exit 2;;
   *) DOMS+=("$1"); shift;;
 esac; done
 [ -s "$GG" ] && [ -s "$HF/config.json" ] || { echo "★要 --gguf <存在的 gguf> 与 --hf <出厂权重目录>★"; exit 2; }
 [ ${#DOMS[@]} -gt 0 ] || DOMS=(law med sci fin41)
 M(){ echo "[sidecars $(date '+%m-%d %H:%M:%S')] $*"; }
+# 停空闲的模型子进程(停/装回的写法与 model_restart_spark.sh 同源: 装回就直接调它)
+st=$(curl -s --noproxy '*' --max-time 5 127.0.0.1:8001/metrics | tr ',' '\n' | grep -o '"state":"[a-z]*"' | head -1)
+[ -z "$st" ] || [ "$st" = '"state":"idle"' ] || { M "★模型子进程 $st, 不是 idle, 不停, 退出★"; exit 1; }
+if pgrep -x ds4-server >/dev/null; then
+    M "停模型子进程 $(pgrep -x ds4-server | tr '\n' ' ')"; pkill -x -TERM ds4-server
+    for _ in $(seq 1 60); do pgrep -x ds4-server >/dev/null || break; sleep 2; done
+    pgrep -x ds4-server >/dev/null && { pkill -x -KILL ds4-server; sleep 5; }
+    pgrep -x ds4-server >/dev/null && { M "★ds4-server 杀不掉★"; exit 1; }
+    sleep 6
+    trap 'rc=$?; M "装回模型子进程"; bash gguf-tools/scripts/model_restart_spark.sh; echo "SIDECARS_EXIT $rc"' EXIT
+fi
 BUSY="amp_campaign[.]sh|v41_judge[.]sh|v41_amp_ru[n] |v41_teacher[.]py|ds[4] -m"
 if pgrep -f "$BUSY" >/dev/null; then
     M "机上还有反修/判决在跑, 等它退完再开:"; pgrep -a -f "$BUSY" | head -3 | cut -c1-160
@@ -30,8 +45,8 @@ fi
 NEW="gguf-tools/scripts/amp_campaign.sh.new"
 [ -s "$NEW" ] && { mv -f "$NEW" gguf-tools/scripts/amp_campaign.sh; M "amp_campaign.sh 已换成 .new 那版"; }
 for d in "${DOMS[@]}"; do
-    M "===== 域 $d: amp_campaign.sh --profile $d --gguf $GG --hf $HF sidecar ====="
-    bash gguf-tools/scripts/amp_campaign.sh --profile "$d" --gguf "$GG" --hf "$HF" sidecar || { M "★域 $d 失败, 停车★"; echo "SIDECARS_EXIT 1"; exit 1; }
+    M "===== 域 $d: amp_campaign.sh --profile $d --gguf $GG --hf $HF ${FITV[*]} sidecar ====="
+    bash gguf-tools/scripts/amp_campaign.sh --profile "$d" --gguf "$GG" --hf "$HF" "${FITV[@]}" sidecar || { M "★域 $d 失败, 停车★"; exit 1; }
     M "域 $d 收工"
 done
 M "全部域收工: ${DOMS[*]}"; echo "SIDECARS_EXIT 0"

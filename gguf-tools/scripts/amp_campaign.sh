@@ -47,10 +47,12 @@ G7="$ROOT/gguf/go-onebit/g7"
 PROFILE=general
 GG_SET=""   # --gguf: sidecar 段的基座 GGUF(2026-10-17 新底座 1017 反修; 空 = 现役部署基座)
 HF_OVR=""   # --hf: 出厂权重目录覆盖(与 --gguf 成对给: 教师锚/链态夹具必须是这份基座自己的出厂权重, v41_judge.sh --hf 按目录名另存缓存)
+FIT_VARIANT=""   # --fit-variant think(2026-10-20 用户令"直接用现在的编程语料加 think 模板反修"): 拟合份逐窗套官方思考模板, 见 stage_fit_think
 while [ $# -gt 0 ]; do case "${1:-}" in
   --profile) PROFILE="${2:?--profile 要值 general|fin|fin41|code|law|med|sci}"; shift 2;;
   --gguf) GG_SET="${2:?--gguf 要文件}"; shift 2;;
   --hf) HF_OVR="${2:?--hf 要目录}"; shift 2;;
+  --fit-variant) FIT_VARIANT="${2:?--fit-variant 要值 think}"; shift 2;;
   *) break;;
 esac; done
 HF_SET=""
@@ -510,7 +512,63 @@ PY
 #      旧的裸读数就不是同一个二进制出的, 拿它当对照是两个变量混在一起
 # 出错会怎样: 任一步 v41_judge.sh 非 0 就停在那一步(DIE)。不停的话 ② 会少几格对照, 表上看不出是缺了还是本来没有。
 # 耗时(09-26 编程实测): 判决份教师 29 min + 拟合份夹具 31 min + 解算 124 min + 每个学生 ~2.5 min。
+# ★拟合份套思考模板(2026-10-20 用户令"直接用现在的编程语料加 think 模板反修")★
+# 为什么: 10-18/10-20 两条助理会话思考几万位不收口, 收口位 `</think>` 概率全精度 22~49% / 量化 2~6%; 而全仓标定语料里一个
+# <think> 都没有, 反修解算器从没在"思考模式里该收口"这个态上对过账。料不新造: 同一份 fit.ids 的每个 128 窗按官方模板包起来 ——
+#   <BOS><System>Reasoning Effort: 75 …\n\n<User>窗前 1/4 <Assistant><think>窗中 1/2 </think>窗后 1/4 <EOS>
+# 用户段/思考段/回答段都是这个窗的代码(模型在思考里起草代码再收口交付, 正是 10-20 那条会话的形状), 一个自造的字都没有。
+# ★窗宽不变★: 每窗只保留前 128−T 个源 token(T = 模板 token 数, 分词一次量出来), 包完正好还是 128 行 ⇒ 行数、布局与 fit.ids 逐字同,
+# 解算器的内存账与现役那趟一样。首版把窗撑到 160(19,200 行)多吃 25% 的行, v41_judge 看门狗在第 10 层 available 7G < 8G 停车(10-20 09:13)。
+# 产物: <fit>_think.ids + .layout(v41_judge.sh 按"目录_文件名"拼侧车名 ⇒ <基座>-grrb-code_fit_think_n15360-engine), 判决份不动,
+# 五指标仍在同一份 judge.ids 上量 —— 与现役 code_fit_n15360 侧车直接可比。
+# 出错会怎样: 模板片段分词不是单 token / 布局行数与 ids 对不上 / 某域不是整窗 都硬停; 已有产物就跳过(要重做先 mv 走)。
+stage_fit_think(){
+    local SRC="$1" DST="$2"
+    [ -s "$SRC" ] && [ -s "$SRC.layout" ] || DIE "缺拟合份 $SRC(.layout): 先切 idshalf"
+    if [ -s "$DST" ] && [ -s "$DST.layout" ]; then LOG "①think 拟合份已在 $DST($(grep -c . "$DST") 行), 跳过"; return 0; fi
+    LOG "①拟合份套思考模板 $SRC → $DST"
+    python3 - "$SRC" "$DST" "$DS4_HF" <<'PY' || DIE "套模板失败"
+import sys
+from tokenizers import Tokenizer
+src, dst, hf = sys.argv[1:4]
+tok = Tokenizer.from_file(f"{hf}/tokenizer.json")
+def ids(s): return tok.encode(s, add_special_tokens=False).ids
+PARTS = ["<｜begin▁of▁sentence｜>", "<｜System｜>", "<｜User｜>", "<｜Assistant｜>", "<think>", "</think>", "<｜end▁of▁sentence｜>"]
+BOS, SYS, USR, AST, TO, TC, EOS = (ids(s) for s in PARTS)
+for s, t in zip(PARTS, (BOS, SYS, USR, AST, TO, TC, EOS)):
+    assert len(t) == 1, f"★{s} 不是单个 token: {t}★"
+EFF = ids("Reasoning Effort: 75 (range 1-100, the higher the value, the more thorough the reasoning)\n\n")   # 助理默认档, core_globals.c 同一行
+toks = [int(x) for x in open(src).read().split()]
+win, rows = 128, []
+for ln in open(src + ".layout"):
+    p = ln.split()
+    if not p or p[0].startswith("#"): continue
+    if p[0] == "win": win = int(p[1])
+    else: rows.append((p[0], int(p[1]), int(p[2])))
+assert sum(r[2] for r in rows) == len(toks), f"★布局 {sum(r[2] for r in rows)} 行 ≠ ids {len(toks)}★"
+T = len(BOS + SYS + EFF + USR + AST + TO + TC + EOS)
+keep = win - T                      # 每窗保留的源 token 数(其余丢掉), 包完正好 win 行
+assert keep >= 32, f"★模板 {T} token 吃掉窗 {win} 太多★"
+a, b = keep // 4, keep // 4 * 3     # 用户 1/4 / 思考 1/2 / 回答 1/4
+def wrap(w): return BOS + SYS + EFF + USR + w[:a] + AST + TO + w[a:b] + TC + w[b:keep] + EOS
+out = []
+for dom, off, cnt in rows:
+    assert cnt % win == 0, f"★域 {dom} {cnt} 行不是整窗({win})★"
+    for k in range(cnt // win): out += wrap(toks[off + k * win: off + (k + 1) * win])
+assert len(out) == len(toks)
+open(dst, "w").write("\n".join(map(str, out)) + "\n")
+with open(dst + ".layout", "w") as f:   # 行数、窗宽、各域起止与源逐字同, 只换文件名与说明
+    f.write("# %s 的行布局 — stage_fit_think 自动产出(与 %s.layout 同布局: 每窗 = 思考模板 %d + 源窗前 %d 个 token), 勿手改\n" % (dst.split("/")[-1], src.split("/")[-1], T, keep))
+    f.write("# win=每域内的等距窗宽(窗与窗之间是源语料里的跳跃=上下文断点)\n# 每行: <域名> <起始行> <行数>\n")
+    f.write("win %d\n" % win)
+    for dom, off, cnt in rows: f.write("%s %d %d\n" % (dom, off, cnt))
+print("  模板 %d token/窗 + 源 %d(用户 %d / 思考 %d / 回答 %d), %d 窗 → %d 行, %d 域" % (T, keep, a, b - a, keep - b, len(out) // win, len(out), len(rows)))
+print("  第一窗解码(看模板形状):\n" + tok.decode(out[:win], skip_special_tokens=False).replace("\n", "⏎")[:700])
+PY
+}
+
 # 用法: amp_campaign.sh --profile law sidecar   (idshalf 没切会先切; 三个域串行跑就在外面一个 for 循环)
+#       amp_campaign.sh --profile code --fit-variant think --gguf … --hf … sidecar   (拟合份套思考模板, 判决份同一份)
 stage_sidecar(){
     case "$PROFILE" in code|law|med|sci|fin41) ;; *) DIE "sidecar 段只给 code/law/med/sci/fin41, 收到 $PROFILE";; esac
     stage_idshalf
@@ -524,16 +582,23 @@ stage_sidecar(){
     # --hf 跟着基座走: 新底座的侧车要用新底座的出厂权重出教师锚与拟合份链态夹具(v41_judge.sh --hf 对非默认目录另存 _<目录名> 缓存),
     # 拿旧底座的锚解新底座 = 把两个模型的差当量化误差去修。HF_SET 等于默认目录时 v41_judge.sh 行为与不传逐字同。
     local HFARG=(--hf "$HF_SET")
+    local FIT_N="$SPLIT_N"   # 拟合份 token 数: 原样 = SPLIT_N; 套了思考模板的份每窗多 T 个模板 token, 按文件行数取
+    if [ -n "$FIT_VARIANT" ]; then
+        case "$PROFILE" in code|law|med|sci) ;; *) DIE "--fit-variant 只给 code/law/med/sci(拟合份叫 fit 的那几个), 收到 $PROFILE";; esac
+        case "$FIT_VARIANT" in think) ;; *) DIE "--fit-variant 只认 think, 收到 $FIT_VARIANT";; esac
+        stage_fit_think "$VQD/$FITN.ids" "$VQD/${FITN}_$FIT_VARIANT.ids"
+        FITN="${FITN}_$FIT_VARIANT"; FIT_N=$(grep -c . "$VQD/$FITN.ids")
+    fi
     local FIT="$VQD/$FITN.ids" JUD="$VQD/$JUDN.ids" WT2="$G7/wt2.ids" f d
     for f in "$GG" "$FIT" "$FIT.layout" "$JUD" "$WT2" "$HF_SET/config.json"; do [ -s "$f" ] || DIE "缺 $f"; done
-    LOG "基座 $(basename "$GG") / 出厂权重 $HF_SET"
+    LOG "基座 $(basename "$GG") / 出厂权重 $HF_SET / 拟合份 $FITN n=$FIT_N / 判决份 $JUDN n=$SPLIT_N"
     # 与 v41_judge.sh engamp 档的命名逐字同(<基座>-<模式>-<目录>_<文件名>_n<N>-engine), 对不上 ② 就会把自己当成"别的侧车"
     # code: <基座>-grrb-code_fit_n15360-engine(与改前逐字同); fin41: <基座>-grrb-vqfin41_vqhalf_a_n8192-engine(与现役金融侧车同名法)
-    local ARM="$ROOT/gguf/v41/$(basename "$GG" .gguf)-grrb-$(basename "$VQD")_${FITN}_n${SPLIT_N}-engine"
+    local ARM="$ROOT/gguf/v41/$(basename "$GG" .gguf)-grrb-$(basename "$VQD")_${FITN}_n${FIT_N}-engine"
     LOG "① 解 $NAME 侧车 + $NAME 判决份五指标 → $ARM"
     # 基座与拟合料传仓库相对路径(v41_judge.sh 先 cd 到仓库根): 解算器把这两个参数原样写进侧车 manifest.txt, 传绝对路径
     # 就是把 /home/<本机用户>/ 写进要公开发布的文件, hf_publish_spark.sh 的 stage 会因此拒发(09-28 实撞, 三份 manifest 手工改回)
-    "$J" "$JUD" "$SPLIT_N" "${HFARG[@]}" "engamp:${FIT#$ROOT/}:$SPLIT_N:${GG#$ROOT/}:0:40:grrb" || DIE "① 解侧车/判决失败"
+    "$J" "$JUD" "$SPLIT_N" "${HFARG[@]}" "engamp:${FIT#$ROOT/}:$FIT_N:${GG#$ROOT/}:0:40:grrb" || DIE "① 解侧车/判决失败"
     grep -q "^# 完成" "$ARM/manifest.txt" 2>/dev/null || DIE "侧车目录没有完成标记: $ARM"
     local CMP=("engine:$GG")
     for d in "$ROOT/gguf/v41/$(basename "$GG" .gguf)"-grrb-*-engine; do
@@ -1380,7 +1445,8 @@ ST="${1:-all}"
 case "$ST" in
   preflight) stage_preflight;; ids) stage_ids;; anchor) stage_anchor;;
   capture) stage_capture;; probe) stage_probe;; solve) stage_solve;; pass2) stage_pass2;;
-  chain) stage_chain;; judge) stage_judge;; dilute) stage_dilute;; idshalf) stage_idshalf;; sidecar) stage_sidecar;; idshalf_ext) shift; stage_idshalf_ext "$@";; vqmerge) stage_vqmerge;; vqcap) stage_vqcap;; vqsolve) stage_vqsolve;; dynladder) stage_dynladder;; dynquant) shift; stage_dynquant "$@";; dynjudge) stage_dynjudge;; champbf) shift; stage_champbf "$@";; champ86) stage_champ86;; champreset) stage_champ_reset;; champ3rd) stage_champ3rd;; corpdiff) stage_corpdiff;; anchors3) stage_anchors3;; anchorwt2) stage_anchor_wt2;; champ3) stage_champ3;; elmprobe) stage_elmprobe;; probe3) stage_probe3;; judge3) shift; stage_judge3 "$@";; champrb) stage_champ_rbsweep;; chainx) stage_chainx;; full) shift; stage_full "$@";;
+  fitthink) stage_fit_think "$VQD/fit.ids" "$VQD/fit_think.ids";;   # 只产套模板的拟合份(发车前看一眼形状; 不碰模型)
+  chain) stage_chain;; judge) stage_judge;; dilute) stage_dilute;; idshalf) stage_idshalf;; sidecar) stage_sidecar;; idshalf_ext) shift; stage_idshalf_ext"$@";; vqmerge) stage_vqmerge;; vqcap) stage_vqcap;; vqsolve) stage_vqsolve;; dynladder) stage_dynladder;; dynquant) shift; stage_dynquant "$@";; dynjudge) stage_dynjudge;; champbf) shift; stage_champbf "$@";; champ86) stage_champ86;; champreset) stage_champ_reset;; champ3rd) stage_champ3rd;; corpdiff) stage_corpdiff;; anchors3) stage_anchors3;; anchorwt2) stage_anchor_wt2;; champ3) stage_champ3;; elmprobe) stage_elmprobe;; probe3) stage_probe3;; judge3) shift; stage_judge3 "$@";; champrb) stage_champ_rbsweep;; chainx) stage_chainx;; full) shift; stage_full "$@";;
   all) stage_preflight; stage_ids; stage_anchor; stage_capture
        stage_solve; stage_chain; stage_judge;;
   *) echo "未知段: $ST"; echo "段: preflight ids anchor capture solve pass2 chain judge dilute all (probe/dilute=诊断)"; exit 2;;
