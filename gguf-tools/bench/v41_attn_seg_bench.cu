@@ -9,7 +9,8 @@
  *   V3 = 一次 gather 整段(≤64 键), S 片与键片留在 shared, 第二遍不再 gather/不再算 S(只做 P·V);
  *   V4 = V1 + fp4 查表走 shfl(16 个值 lane 各持一个, 引擎的 static const 表是 LDC 按 lane 下标重放)+ 乘完直接 cvt.rn;
  *   V5 = V3 + 同样的查表; V6 = 每层先一发预解核把 n 行的键解成 bf16, seg 核只搬(同一批键原来被 4 头组 × 2 遍解 8 次);
- *   V7 = V4 + 在线 max/sum 并行版 + 出口两轮; V8 = V7 但一 block 32 头; V9/V10 = 目标段数 12(诊断, 不逐位同引擎)。
+ *   V7 = V4 + 在线 max/sum 并行版 + 出口两轮; V8 = V7 但一 block 32 头; V9/V10 = 目标段数 12(诊断, 不逐位同引擎);
+ *   V11/V12(10-20, _rq.cuh) = V7 但 Q 片住寄存器不住 shared(42 → 26 KB), V12 再 __launch_bounds__(256, 3) 钉 3 block/SM(寄存器 ≤80)。
  * 09-29 实测(12k 形状, ms/步 seg+merge, n=1/4/6): V0 2.4/7.8/10.6 → V4 1.5/4.8/7.1 → V7 1.5/4.5/6.9(引擎取 V7);
  *   V6 5.1(解码已不是大头) / V8 5.7(59 KB shared ⇒ 每 SM 只挂 1 个 block; 板子 shared/SM 100 KB) / V10 1.95/4.3/5.6(段减半:
  *   n=1 填不满 48 个 SM 反而慢, 且分段变了不逐位同 —— 段数按位置定是"投机 == 纯解码"的前提, 不能随 n 变)。合并核占 ~0.4~0.5。
@@ -296,6 +297,8 @@ __global__ static void attn_seg_hb_kernel(float *pacc, float *pmax, float *psum,
     if (threadIdx.x < HB) { pmax[pbase + threadIdx.x] = rmax[threadIdx.x]; psum[pbase + threadIdx.x] = rsum[threadIdx.x]; }
 }
 
+#include "v41_attn_seg_bench_rq.cuh"   /* V11/V12: 依赖上面的 gather_v1 / attn_stats_par */
+
 /* ---- 数据: 按 (层, 位置/组, 维) 哈希生成, 同一位置在任何排法里值相同(单行/多行对拍要靠这个) ---- */
 static uint32_t h32(uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
     uint32_t x = a * 0x9E3779B1u ^ (b + 0x7F4A7C15u) * 0x85EBCA6Bu ^ (c + 0x165667B1u) * 0xC2B2AE35u ^ (d * 0x27D4EB2Fu);
@@ -385,9 +388,21 @@ int main(int argc, char **argv) {
     auto smem_hb = [&](uint32_t HB) { return (size_t)(HB + 16u) * HD * 2 + 8u * 256u * 4 + (size_t)HB * 16u * 4 + 256u * 2 + 2u * HB * 4 + 16u * 4; };
     CK(cudaFuncSetAttribute(attn_seg_hb_kernel<16u>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_hb(16u)));
     CK(cudaFuncSetAttribute(attn_seg_hb_kernel<32u>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_hb(32u)));
-    const char *vname[11] = { "V0 引擎现核", "V1 缩放一次解", "V2 一次 32 键", "V3 整段留片", "V4 V1+shfl查表", "V5 V3+shfl查表", "V6 预解一发+搬",
-                              "V7 16头+并行和", "V8 32头+并行和", "V9 32头 段12", "V10 16头 段12" };
-    const uint32_t vtseg[11] = { 24u, 24u, 24u, 24u, 24u, 24u, 24u, 24u, 24u, 12u, 12u };   /* 段 12 的两个是诊断, 与 V0 不同是预期 */
+    CK(cudaFuncSetAttribute(attn_seg_rq_kernel<2>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_rq_bytes()));
+    CK(cudaFuncSetAttribute(attn_seg_rq_kernel<3>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem_rq_bytes()));
+    {   /* 占用率账(cudaOccupancy 按真实寄存器/shared 算; 这就是 V11/V12 要改的那个数) */
+        int b0 = 0, b7 = 0, b11 = 0, b12 = 0;
+        CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&b0, v41_attn_mma_seg_kernel, 256, smem0));
+        CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&b7, attn_seg_hb_kernel<16u>, 256, smem_hb(16u)));
+        CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&b11, attn_seg_rq_kernel<2>, 256, smem_rq_bytes()));
+        CK(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&b12, attn_seg_rq_kernel<3>, 256, smem_rq_bytes()));
+        cudaFuncAttributes a7, a11, a12; CK(cudaFuncGetAttributes(&a7, attn_seg_hb_kernel<16u>)); CK(cudaFuncGetAttributes(&a11, attn_seg_rq_kernel<2>)); CK(cudaFuncGetAttributes(&a12, attn_seg_rq_kernel<3>));
+        printf("每 SM 可驻 block: V0 %d / V7 %d(寄存器 %d, shared %zu KB) / V11 %d(寄存器 %d, local %zu B, shared %zu KB) / V12 %d(寄存器 %d, local %zu B)\n",
+               b0, b7, a7.numRegs, (smem_hb(16u) + a7.sharedSizeBytes) >> 10, b11, a11.numRegs, a11.localSizeBytes, (smem_rq_bytes() + a11.sharedSizeBytes) >> 10, b12, a12.numRegs, a12.localSizeBytes);
+    }
+    const char *vname[13] = { "V0 引擎现核", "V1 缩放一次解", "V2 一次 32 键", "V3 整段留片", "V4 V1+shfl查表", "V5 V3+shfl查表", "V6 预解一发+搬",
+                              "V7 16头+并行和", "V8 32头+并行和", "V9 32头 段12", "V10 16头 段12", "V11 Q入寄存器", "V12 V11+钉3块" };
+    const uint32_t vtseg[13] = { 24u, 24u, 24u, 24u, 24u, 24u, 24u, 24u, 24u, 12u, 12u, 24u, 24u };   /* 段 12 的两个是诊断, 与 V0 不同是预期 */
     /* 发一层: v = 变体; n 行, pos0 起; 局部件按 nseg 排 */
     auto run = [&](int v, const layer_bufs &b, uint32_t n, uint32_t p0, const float *q, const float *kvw, const int32_t *idx, float *o) {
         uint32_t nseg = 1u; const uint32_t tseg = vtseg[v];
@@ -404,13 +419,15 @@ int main(int argc, char **argv) {
             attn_prep_kernel<<<dim3((nkmax + 7u) / 8u, n), 256>>>(kbuf, kvalid, kvw, b.kvc, idx, p0, window, ng, topk, nkmax);
             attn_seg_v_kernel<16u, 0, 2><<<g, 256, smem_v(16u)>>>(pacc, pmax, psum, q, kvw, b.kvc, idx, p0, window, ng, topk, NH, scale, ratio, nseg, kbuf, kvalid, nkmax); break;
         case 7: case 10: attn_seg_hb_kernel<16u><<<g, 256, smem_hb(16u)>>>(pacc, pmax, psum, q, kvw, b.kvc, idx, p0, window, ng, topk, NH, scale, ratio, nseg, tseg); break;
+        case 11: attn_seg_rq_kernel<2><<<g, 256, smem_rq_bytes()>>>(pacc, pmax, psum, q, kvw, b.kvc, idx, p0, window, ng, topk, NH, scale, ratio, nseg); break;
+        case 12: attn_seg_rq_kernel<3><<<g, 256, smem_rq_bytes()>>>(pacc, pmax, psum, q, kvw, b.kvc, idx, p0, window, ng, topk, NH, scale, ratio, nseg); break;
         default:         attn_seg_hb_kernel<32u><<<g32, 256, smem_hb(32u)>>>(pacc, pmax, psum, q, kvw, b.kvc, idx, p0, window, ng, topk, NH, scale, ratio, nseg, tseg); break;
         }
         if (!(timing && no_merge)) v41_sparse_attn_merge_kernel<<<dim3(NH, n), 256>>>(o, pacc, pmax, psum, b.sink, nseg, NH, HD);
     };
     const uint32_t ns_list[4] = { 1u, 2u, 4u, 6u };
     if (e64 != cudaSuccess) return 2;   /* 整段变体抬不上 shared: 这台板子不在讨论范围 */
-    const int nv = 11;
+    const int nv = 13;
     float *ref = (float *)malloc((size_t)NMAX * NH * HD * 4), *got = (float *)malloc((size_t)NMAX * NH * HD * 4);
     /* ① 逐位门(层 0): 变体 vs V0; n 行批第 i 行 vs 单行在自己位置(单行的窗口环按 pos0 = p_i 重排, 值同一位置同) */
     float *kvw1; CK(cudaMalloc(&kvw1, (size_t)(window + 1u) * HD * 4));

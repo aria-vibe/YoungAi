@@ -32,6 +32,11 @@
 /* ★判负存档(2026-10-07)★ "合并并进 seg 核(threadfence 归约: 每个 (行, 头组) 最后到的 block 按段号固定序做合并, 省掉每层那一发
  * v41_sparse_attn_merge_kernel)": 逐字节同, 但同请求 A/B 46.33 → 45.66 t/s(验证 59.0 → 60.0 ms) —— 合并尾巴压在 n_tok × 4 = 16 个 block
  * 里串行做(16 个 SM 干活), 原来独立那发是 n_head × n_tok = 256 个 block 并行, 虽多一发核却更快。已回退到两发。 */
+/* ★Q 片住寄存器(2026-10-20, 微基准 gguf-tools/bench/v41_attn_seg_bench_rq.cuh V11)★: 每个 warp 的 4 个 A 片(16 头 × 自己那 64 维)整段
+ * 常驻寄存器, 不再每个键块从 shared 重载; Q 的 bf16 转换借 ks 那 16 KB 做一次, 片装完再让 gather 覆盖。shared 41.7 → 25.7 KB。
+ * 12k 形状微基准 ms/步 n=1/2/4/6: 旧 1.55/2.63/4.86/6.99 → 1.46/2.46/4.67/6.70(−4~6%), 四档逐位同 V0 且 n 行批各行 == 单行自跑。
+ * 同场量过的另一半: 再用 __launch_bounds__(256, 3) 把寄存器压到 80 钉 3 block/SM(V12)不再快(1.63/2.63/4.66/6.57) ⇒
+ * 这核的瓶颈不是占用率(与 09-16 D2 的结论一致), 快的那几个点来自少了每键块 4 次 A 片 shared 重载, 所以不钉。 */
 __global__ static void v41_attn_mma_seg_kernel(float *pacc, float *pmax, float *psum,
                                                const float *q, const float *kvw, const uint8_t *kvc,
                                                const int32_t *idx, uint32_t pos0, uint32_t window,
@@ -43,8 +48,7 @@ __global__ static void v41_attn_mma_seg_kernel(float *pacc, float *pmax, float *
     if (posd) { pos0 = (uint32_t)posd[0]; ng = ratio ? (pos0 + gridDim.z) / ratio : 0u; if (ng < topk) topk = ng; }
     namespace wmma = nvcuda::wmma;
     extern __shared__ char ds4_attn_mma_smem[];
-    __nv_bfloat16 *qs = (__nv_bfloat16 *)ds4_attn_mma_smem;
-    __nv_bfloat16 *ks = qs + DS4_ATTN_MMA_HEADS * DS4_ATTN_MMA_HD;
+    __nv_bfloat16 *ks = (__nv_bfloat16 *)ds4_attn_mma_smem;   /* [16 键][512]; 开头借来放 bf16 Q(正好 16 头 × 512), 片装进寄存器后才给 gather */
     float *spart = (float *)(ks + DS4_ATTN_MMA_KT * DS4_ATTN_MMA_HD);
     float *stile = spart + DS4_ATTN_MMA_WARPS * 256u;
     __nv_bfloat16 *ptile = (__nv_bfloat16 *)(stile + 256u);
@@ -75,21 +79,26 @@ __global__ static void v41_attn_mma_seg_kernel(float *pacc, float *pmax, float *
     }
     const uint32_t k1 = (k0 + seg_keys) < nkeys ? (k0 + seg_keys) : nkeys;
     for (uint32_t e = threadIdx.x; e < DS4_ATTN_MMA_HEADS * DS4_ATTN_MMA_HD; e += blockDim.x)
-        qs[e] = __float2bfloat16(q[((uint64_t)i * n_head + h0 + e / DS4_ATTN_MMA_HD) * DS4_ATTN_MMA_HD + e % DS4_ATTN_MMA_HD]);
+        ks[e] = __float2bfloat16(q[((uint64_t)i * n_head + h0 + e / DS4_ATTN_MMA_HD) * DS4_ATTN_MMA_HD + e % DS4_ATTN_MMA_HD]);
     if (threadIdx.x < DS4_ATTN_MMA_HEADS) { rmax[threadIdx.x] = -1e30f; rsum[threadIdx.x] = 0.f; }
     __syncthreads();
+    const uint32_t warp = threadIdx.x >> 5;
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> qa[DS4_ATTN_MMA_HD / 16u / DS4_ATTN_MMA_WARPS];
+    #pragma unroll
+    for (uint32_t s = 0; s < DS4_ATTN_MMA_HD / 16u / DS4_ATTN_MMA_WARPS; s++)
+        wmma::load_matrix_sync(qa[s], ks + (warp * (DS4_ATTN_MMA_HD / 16u / DS4_ATTN_MMA_WARPS) + s) * 16u, DS4_ATTN_MMA_HD);
+    __syncthreads();   /* 全部 warp 装完片, ks 才能被第一遍的 gather 覆盖 */
 
     for (uint32_t base = k0; base < k1; base += DS4_ATTN_MMA_KT) {   /* 第一遍: 本段的 max 与 exp 和 */
         const uint32_t nt = (k1 - base) < DS4_ATTN_MMA_KT ? (k1 - base) : DS4_ATTN_MMA_KT;
         __syncthreads();
         ds4_attn_mma_gather_keys(ks, valid, kvw, kvc, idx, i, base, nt, nwin, lo, pos0, window, ng, topk, ring);
         __syncthreads();
-        ds4_attn_mma_scores(stile, spart, qs, ks, valid, nt, scale);
+        ds4_attn_mma_scores_rq(stile, spart, qa, ks, valid, nt, scale);
         ds4_attn_mma_stats(stile, rmax, rsum);   /* 在线 max/sum(并行版, 逐位同串行版; cuda_sparse_attn_mma.inc.cu) */
     }
     __syncthreads();
 
-    const uint32_t warp = threadIdx.x >> 5;
     wmma::fragment<wmma::accumulator, 16, 16, 16, float> oacc[4];
     for (int j = 0; j < 4; j++) wmma::fill_fragment(oacc[j], 0.0f);
     for (uint32_t base = k0; base < k1; base += DS4_ATTN_MMA_KT) {   /* 第二遍: 重算 S → P(bf16) → O */
@@ -97,7 +106,7 @@ __global__ static void v41_attn_mma_seg_kernel(float *pacc, float *pmax, float *
         __syncthreads();
         ds4_attn_mma_gather_keys(ks, valid, kvw, kvc, idx, i, base, nt, nwin, lo, pos0, window, ng, topk, ring);
         __syncthreads();
-        ds4_attn_mma_scores(stile, spart, qs, ks, valid, nt, scale);
+        ds4_attn_mma_scores_rq(stile, spart, qa, ks, valid, nt, scale);
         for (uint32_t e = threadIdx.x; e < 256u; e += blockDim.x)
             ptile[e] = __float2bfloat16(expf(stile[e] - rmax[e >> 4]));
         __syncthreads();
@@ -161,7 +170,7 @@ static int v41_attn_mma_decode(float *o, const float *q, const float *kvw, const
      * n_tok==1 —— 于是会话开头那几步"纯解码走 split、验证批走预填核", 连核都不是同一个, 必然不同轨。
      * 键少时这个核只有一段, 开销就是一次 q 载入, 不值得为它留第二条路(铁律: 不留兜底路)。 */
     static int s_ok = 0;                             /* 0 未试 / 1 可用 / -1 抬不上去 */
-    const size_t smem = ds4_attn_mma_seg_smem_bytes();   /* seg 核仍是 qs+ks 两片的旧布局; 预填核 09-29 换了单遍形态, 两者 shared 账不同 */
+    const size_t smem = ds4_attn_mma_seg_rq_smem_bytes();   /* 10-20 起 Q 片住寄存器, 只剩 ks 一片; 预填核另有自己的账(ds4_attn_mma_smem_bytes) */
     if (s_ok == 0) {
         s_ok = cudaFuncSetAttribute(v41_attn_mma_seg_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
                                     (int)smem) == cudaSuccess ? 1 : -1;

@@ -100,6 +100,35 @@ __device__ __forceinline__ static void ds4_attn_mma_scores(
     __syncthreads();
 }
 
+/* 同上, 但 A 片(Q)来自调用方寄存器里常驻的 4 个 fragment, 不再每个键块从 shared 重载(2026-10-20, 解码 seg 核用; 微基准 V11)。
+ * 为什么另写一份而不改上面: cuda_draft_attn.inc.cu(草稿器蒸馏的批量块注意力)还在用 qs 住 shared 的那份, 它一个字没动。
+ * ★逐位同★: qa[s] 的内容就是上面 load_matrix_sync(a, qs + d0) 装出来的同一片, k 步序、spart 固定序相加全同。 */
+__device__ __forceinline__ static void ds4_attn_mma_scores_rq(
+        float *stile, float *spart,
+        const nvcuda::wmma::fragment<nvcuda::wmma::matrix_a, 16, 16, 16, __nv_bfloat16, nvcuda::wmma::row_major> *qa,
+        const __nv_bfloat16 *ks, const int *valid, uint32_t nt, float scale) {
+    namespace wmma = nvcuda::wmma;
+    const uint32_t warp = threadIdx.x >> 5;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> b;
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> c;
+    wmma::fill_fragment(c, 0.0f);
+    const uint32_t ksteps = DS4_ATTN_MMA_HD / 16u / DS4_ATTN_MMA_WARPS;
+    #pragma unroll
+    for (uint32_t s = 0; s < ksteps; s++) {
+        wmma::load_matrix_sync(b, ks + (warp * ksteps + s) * 16u, DS4_ATTN_MMA_HD);
+        wmma::mma_sync(c, qa[s], b, c);
+    }
+    wmma::store_matrix_sync(spart + (size_t)warp * 256u, c, 16, wmma::mem_row_major);
+    __syncthreads();
+    for (uint32_t e = threadIdx.x; e < 256u; e += blockDim.x) {
+        float v = 0.f;
+        for (uint32_t w = 0; w < DS4_ATTN_MMA_WARPS; w++) v += spart[(size_t)w * 256u + e];
+        const uint32_t k = e & 15u;
+        stile[e] = (k < nt && valid[k]) ? v * scale : -1e30f;
+    }
+    __syncthreads();
+}
+
 /* 一个键块的在线 max/sum, 并行版(2026-09-29, 微基准 V7): warp w 管头 2w(lane 0..15)与 2w+1(lane 16..31), 每 lane 一个键。
  * 原来 16 个线程各自串行做 16 次 fmaxf + 16 次 expf, 其余 240 个线程干等。
  * ★逐位同★: max 是精确运算(序无关); 和 = 先 rsum·expf(m−tm), 再按 k = 0..15 顺序加 expf(s_k−tm) —— 与串行版同一序同一值。
@@ -289,8 +318,15 @@ static size_t ds4_attn_mma_smem_bytes(void) {
          + (size_t)DS4_ATTN_MMA_HEADS * DS4_ATTN_MMA_KT * (sizeof(float) + sizeof(__nv_bfloat16))
          + 3u * DS4_ATTN_MMA_HEADS * sizeof(float) + DS4_ATTN_MMA_KT * sizeof(int);
 }
-static size_t ds4_attn_mma_seg_smem_bytes(void) {
+static size_t ds4_attn_mma_seg_smem_bytes(void) {   /* 旧布局 qs + ks: 现在只有 cuda_draft_attn.inc.cu 的块注意力核还用它 */
     return (size_t)(DS4_ATTN_MMA_HEADS + DS4_ATTN_MMA_KT) * DS4_ATTN_MMA_HD * sizeof(__nv_bfloat16)
+         + (size_t)DS4_ATTN_MMA_WARPS * 256u * sizeof(float) + 256u * sizeof(float)
+         + 256u * sizeof(__nv_bfloat16) + 2u * DS4_ATTN_MMA_HEADS * sizeof(float)
+         + DS4_ATTN_MMA_KT * sizeof(int);
+}
+/* 解码 seg 核(2026-10-20 起 Q 片住寄存器): 只剩 ks 16 KB + spart 8 KB + stile 1 KB + ptile 0.5 KB + 杂 = 25.7 KB(原 41.7) */
+static size_t ds4_attn_mma_seg_rq_smem_bytes(void) {
+    return (size_t)DS4_ATTN_MMA_KT * DS4_ATTN_MMA_HD * sizeof(__nv_bfloat16)
          + (size_t)DS4_ATTN_MMA_WARPS * 256u * sizeof(float) + 256u * sizeof(float)
          + 256u * sizeof(__nv_bfloat16) + 2u * DS4_ATTN_MMA_HEADS * sizeof(float)
          + DS4_ATTN_MMA_KT * sizeof(int);
