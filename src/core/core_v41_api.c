@@ -162,6 +162,10 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
         dspark = 0;
     }
     float *rowbuf = penal ? xmalloc((size_t)DS4_N_VOCAB * 4u) : NULL;
+    /* 真喂进 KV 的生成 token(按喂入顺序): 解码结束存检查点用(core_v41_kvreuse.c 槽 1)。与"吐出的"不同: EOS 吐了不喂; 上下文满那一位吐了不喂;
+     * 投机一轮接受的几位(含首位)都喂了, 哪怕其中有 EOS 之后的几位(它们在 KV 里, 清单就得有, 下一条提示对不上自然接不上)。 */
+    int32_t *fed = xmalloc(((size_t)(n_predict > 0 ? n_predict : 0) + DS4_MTP_MAX_BLOCK + 2u) * 4u);
+    uint32_t nf = 0, last_row = 0;   /* last_row = 最后一次前向后, 末位 logits 在 st.logits 的哪一行 */
     v41_hist hist = {NULL, 0, 0, NULL};
     if (penal) {
         hist.cap = (uint32_t)(n_predict > 0 ? n_predict : 0) + 2u;
@@ -271,6 +275,7 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
                 int32_t nt = 0;
                 const double ts0 = now_sec();
                 if (!v41_graph_launch(e, &st, (int32_t)tok, 0)) { ok = false; break; }
+                fed[nf++] = (int32_t)tok; last_row = 0;
                 if (emit && emit(tok, ud) != 0) { (void)v41_graph_wait(e, &st, &nt); break; }   /* 图已发, 等完再走 */
                 if (!v41_graph_wait(e, &st, &nt)) { ok = false; break; }
                 if (spec) v41_sched_cost(&cal, 1u, (now_sec() - ts0) * 1e3);   /* 纯解码一步的墙钟 = 调度器的比价基准 */
@@ -378,6 +383,8 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
                 if (!v41_spec_rollback(&st, 1u + a)) { ok = false; break; }
                 ms_snap += (now_sec() - tb0) * 1e3;
             }
+            for (uint32_t i = 0; i <= a; i++) fed[nf++] = batch[i];   /* 首位 + 接受的几位留在了 KV 里; 第 a 行的 logits 预测下一位 */
+            last_row = a;
             const int tok_next = (int)want[a];
             /* ★先发下一轮草稿, 再 emit★(2026-10-07): nsys 量到验证完→下一轮草稿首核之间 GPU 空 1.26 ms, 大头是 emit(fwrite+fflush,
              * 每个接受 token 一次)与簿记。下一轮草稿只依赖回滚后的状态(已回滚)与 tok_next, 这里就能发; 会停的轮不发(多跑一次草稿无害但没必要)。
@@ -427,10 +434,11 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
         g_v41_last_spec_rounds = (int)spec_rounds; g_v41_last_spec_off = (int)spec_off; g_v41_last_spec_acc = (int)spec_acc;
         if (spec) v41_draft_free(&dr);
         const double t2 = now_sec();
+        if (ok) v41_kvreuse_save_end(&st, prompt, np, isig, fed, nf, last_row);   /* 解码结束的检查点: 下一条"提示 + 刚吐的 + 新的一段"从这里接 */
         const int n_out = produced - (hit_eos ? 1 : 0);   /* 真吐出的 token 数, 与服务端 usage.completion_tokens 同口径 */ if (n_out > 0) fprintf(stderr, "\n[v41] decode %d token %.1fs (%.2f t/s)\n", n_out, t2 - t1, (double)n_out / (t2 - t1 + 1e-9));
         rc = ok ? 0 : 1;
     } while (0);
-    free(rowbuf); free(hist.tok); free((void *)hist.brk);
+    free(rowbuf); free(hist.tok); free((void *)hist.brk); free(fed);
     if (am) ds4_gpu_tensor_free(am);
     v41_state_free(&st);
     return rc;

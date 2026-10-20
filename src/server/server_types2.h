@@ -244,7 +244,7 @@ typedef struct {
 } visible_live_state;
 
 struct server {
-    ds4_engine *engine;
+    ds4_engine *engine; v41_live_seq v41_live;   /* 上一条生成的文本 + id(server_v41_live.c), 类型在 server_types.h */
     ds4_session *session;
     struct ds4_asr *asr;       /* --asr DIR 装的语音识别模型(src/model/asr/); 空 = 没装, /v1/audio/transcriptions 答 404 */
     int ctx_size;              /* 批处理快路建临时会话用 */

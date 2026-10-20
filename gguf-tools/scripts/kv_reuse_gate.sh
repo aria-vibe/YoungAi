@@ -12,6 +12,8 @@
 #   故意不恢复压缩器余行, 200 个 token 照样全对(只错一组压缩 KV, logit 动得翻不动 argmax), 比指纹才抓得到。
 #   前提要先核: B 的提示 id 必须恰好 = A 的提示 id + [g0](t1 接在 P 后面重新分词没和前面粘成别的 token), 不成立就换 P 的字数再跑。
 # 判读: 打印 "PASS" / "FAIL 第 k 位分叉", 以及 B 的复用数(trace 的 "kv reuse: …" 行)。没有复用行 = 没接上, 也算 FAIL。
+#   2026-10-20 起 B 会从解码结束的检查点(槽 1 = P+t1)整份接上("kv reuse: n of n"), 之前是从提示末尾的槽接上再填 1 个; 两种都满足门。
+#   后半段(E/F/G)专门门解码结束的检查点 + 服务端沿用上一条 id(server_v41_live.c), 先惩罚路(有指纹)再投机档(只比 token)。
 # 出错会怎样: 端口不对 → curl 报连不上; trace 没开 → 找不到 token ids 块, 脚本直接说。
 set -uo pipefail
 PORT="${1:-8001}"; FILE="${2:-docs/TECHNICAL.md}"; NCH="${3:-12000}"; N="${4:-48}"
@@ -57,3 +59,41 @@ for ((k = 0; k < ${#CG[@]}; k++)); do
     [ "${CS[$k]}" = "${BS[$k]}" ] || { echo "FAIL 同提示第 $k 步 logits 不同: C=${CS[$k]} B=${BS[$k]}"; exit 1; }
 done
 echo "PASS: 同提示 C 整份接上($R), ${#CG[@]} 个 token 与 B 逐个相同, 每步 logits 指纹逐位相同"
+
+# ---- 解码结束的检查点(槽 1, 2026-10-20) + 服务端沿用上一条 id(server_v41_live.c) ----
+# E = 提示 P 要 N+M 个(参照, 长解码); F = 提示 P 要 N 个(解码结束存槽 1 = P + N 位); G = P + F 吐的 N 位文本, 要 M 个:
+#   服务端看到 G 的文本以 F 的文本开头 ⇒ 提示 id = F 的 P id + F 真吐的 N 个 id ⇒ 引擎槽 1 等长接上, 一块不预填, 第一个 token 从存下的 logits 行采。
+#   G 的 M 个 id 必须逐个等于 E 的第 N+1..N+M 个, 逐步指纹也相同(G 第 0 步的指纹 = 存下来的那行, E 第 N 步重算的那行)。
+#   N 步解码把窗口环转过、压缩组推进过、投机回滚过(第二遍 spec 档), 槽 1 漏存哪一样这里都对不上。
+M=$N
+n0=$(nblk); req "$P" "$((N + M))" > /tmp/kvgate_e.json; wait_blk "$n0"; mapfile -t E < <(last_ids); read -ra ES <<< "$(last_sums)"; read -ra EG <<< "${E[1]}"
+n0=$(nblk); req "$P" "$N" > /tmp/kvgate_f.json; wait_blk "$n0"; mapfile -t Fv < <(last_ids); read -ra FG <<< "${Fv[1]}"
+TF=$(jq -j '.choices[0].text' /tmp/kvgate_f.json; printf x); TF="${TF%x}"
+for ((k = 0; k < ${#FG[@]}; k++)); do [ "${FG[$k]}" = "${EG[$k]}" ] || { echo "FAIL: F 第 $k 位 ${FG[$k]} ≠ E ${EG[$k]}(同提示温 0 两趟就该一样, 与检查点无关, 先查这个)"; exit 1; }; done
+n0=$(nblk); req "$P$TF" "$M" > /tmp/kvgate_g.json; wait_blk "$n0"; mapfile -t G < <(last_ids); read -ra GS <<< "$(last_sums)"; read -ra GP <<< "${G[0]}"; read -ra GG <<< "${G[1]}"
+[ "${#GP[@]}" -eq $(( ${#AP[@]} + ${#FG[@]} )) ] || { echo "FAIL: G 的提示 ${#GP[@]} 个 id ≠ P ${#AP[@]} + F 吐的 ${#FG[@]}(服务端没沿用上一条的 id, 或 F 末位是 EOS)"; exit 1; }
+for ((k = 0; k < ${#FG[@]}; k++)); do [ "${GP[$((${#AP[@]} + k))]}" = "${FG[$k]}" ] || { echo "FAIL: G 提示第 $((${#AP[@]} + k)) 位 ${GP[$((${#AP[@]} + k))]} ≠ F 吐的 ${FG[$k]}(沿用的不是采样 id)"; exit 1; }; done
+R=$(last_reuse); [ "$R" = "kv reuse: ${#GP[@]} of ${#GP[@]}" ] || { echo "FAIL: 解码结束检查点没整份接上(trace: ${R:-无})"; exit 1; }
+[ "${#GG[@]}" -eq "$M" ] || { echo "FAIL: G 生成 ${#GG[@]} ≠ $M"; exit 1; }
+for ((k = 0; k < M; k++)); do
+    [ "${GG[$k]}" = "${EG[$((N + k))]}" ] || { echo "FAIL 解码结束第 $k 位分叉: G=${GG[$k]} E=${EG[$((N + k))]}"; echo "E: $(jq -r '.choices[0].text' /tmp/kvgate_e.json | tail -c 300)"; echo "G: $(jq -r '.choices[0].text' /tmp/kvgate_g.json | head -c 300)"; exit 1; }
+done
+[ "${#GS[@]}" -ge "$M" ] && [ "${#ES[@]}" -ge $((N + M)) ] || { echo "FAIL: 指纹步数不够(E ${#ES[@]} / G ${#GS[@]})"; exit 1; }
+for ((k = 0; k < M; k++)); do
+    [ "${GS[$k]}" = "${ES[$((N + k))]}" ] || { echo "FAIL 解码结束第 $k 步 logits 不同(token 还一样): G=${GS[$k]} E=${ES[$((N + k))]}"; exit 1; }
+done
+echo "PASS: 解码结束检查点 G 整份接上($R), $M 个 token 与 E 的第 $((N + 1))..$((N + M)) 个逐个相同, 每步 logits 指纹逐位相同"
+# 第二遍走投机(不带惩罚 = 设备 argmax + DSpark, 没有逐步指纹): 槽 1 存的是回滚后的状态, 只比 token。
+# 没有 "logit sums" 行可等, 改等 token ids 块数涨了且文件不再长(id 行几万字节, stdio 会分几次刷出来, 数涨了不等于写完了)
+nids() { grep -c '^--- token ids:' "$TR"; }
+wait_ids() { local sz0=-1 sz; for _ in $(seq 1 100); do if [ "$(nids)" -gt "$1" ]; then sz=$(stat -c %s "$TR"); [ "$sz" = "$sz0" ] && return 0; sz0=$sz; fi; sleep 0.3; done; echo "等了 30 s trace 里没有写完的 token ids 块"; exit 1; }
+reqs() { jq -n --arg p "$1" --argjson n "$2" '{prompt:$p, raw:true, max_tokens:$n, temperature:0}' | curl -s --noproxy '*' --max-time 900 "$U" -H 'Content-Type: application/json' -d @-; }
+n0=$(nids); reqs "$P" "$((N + M))" > /tmp/kvgate_e2.json; wait_ids "$n0"; mapfile -t E2 < <(last_ids); read -ra E2G <<< "${E2[1]}"
+n0=$(nids); reqs "$P" "$N" > /tmp/kvgate_f2.json; wait_ids "$n0"; mapfile -t F2 < <(last_ids); read -ra F2G <<< "${F2[1]}"
+TF2=$(jq -j '.choices[0].text' /tmp/kvgate_f2.json; printf x); TF2="${TF2%x}"
+n0=$(nids); reqs "$P$TF2" "$M" > /tmp/kvgate_g2.json; wait_ids "$n0"; mapfile -t G2 < <(last_ids); read -ra G2P <<< "${G2[0]}"; read -ra G2G <<< "${G2[1]}"
+R=$(last_reuse); [ "$R" = "kv reuse: ${#G2P[@]} of ${#G2P[@]}" ] || { echo "FAIL(投机档): 解码结束检查点没整份接上(trace: ${R:-无})"; exit 1; }
+for ((k = 0; k < ${#G2G[@]}; k++)); do
+    [ "${G2G[$k]}" = "${E2G[$((${#F2G[@]} + k))]}" ] || { echo "FAIL(投机档) 第 $k 位分叉: G=${G2G[$k]} E=${E2G[$((${#F2G[@]} + k))]}"; exit 1; }
+done
+echo "PASS(投机档): 解码结束检查点 G 整份接上($R), ${#G2G[@]} 个 token 与投机参照 E 的第 $(( ${#F2G[@]} + 1 ))..$(( ${#F2G[@]} + ${#G2G[@]} )) 个逐个相同"

@@ -223,6 +223,14 @@ uint64_t ds4_runtime_mem_budget_bytes(void) {
     return g_mem_budget_bytes;
 }
 
+/* 离看门狗红线还有多少字节: 运行期要再分一块大的(KV 检查点那种按上下文长的)先问它, 超了就不分 ——
+ * 不然分下去的是看门狗 200 ms 后 _exit(137)。没设预算 = 不限(护栏没武装, 与启动闸同一语义)。 */
+uint64_t ds4_runtime_mem_headroom_bytes(void) {
+    if (!g_mem_budget_bytes) return UINT64_MAX;
+    const uint64_t line = (uint64_t)((double)g_mem_budget_bytes * DS4_WATCHDOG_TRIP_FRAC), fp = ds4_phys_footprint_bytes();
+    return fp < line ? line - fp : 0;
+}
+
 __attribute__((constructor)) static void ds4_stage0_autostart(void) {
     ds4_mem_watchdog_start();
 }

@@ -463,6 +463,7 @@ int ds4_session_load_layer_payload(ds4_session *s, FILE *fp,
  * against the headroom rather than a fixed cap. */
 uint64_t ds4_runtime_phys_footprint_bytes(void);
 uint64_t ds4_runtime_mem_budget_bytes(void);
+uint64_t ds4_runtime_mem_headroom_bytes(void);   /* 到看门狗红线的余量; 没设预算 = UINT64_MAX */
 
 /* ---- 取料入口(2026-08-22: 从 env 迁到 CLI) --------------------------------
  * 捕获/评估的入口过去是 DS4_CAP_DIR / DS4_EVAL_IDS / DS4_EVAL_HDUMP /

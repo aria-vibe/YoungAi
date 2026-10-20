@@ -5,8 +5,9 @@
  * 所以这条路与 generate_job(V4)的区别只在"token 从哪来": 这里 token 从回调来, 其余 ——
  * 文本累积 / 思考段跟踪 / DSML 工具标记 / 停止串 / 三种流式 / 收尾响应 —— 与 V4 用同一批函数,
  * 客户端看到的协议一个字节不差。
- * 没有的东西(如实, 别猜): ①磁盘 KV 与任意位置的回退 —— KV 复用只有一种(2026-10-11, core_v41_kvreuse.c): 提示以上一条的提示开头
- *   就从那条提示末尾的检查点接着填, 否则整段预填;
+ * 没有的东西(如实, 别猜): ①磁盘 KV 与任意位置的回退 —— KV 复用只有前缀一种(core_v41_kvreuse.c): 提示以上一条的提示开头就从
+ *   那条提示末尾的检查点接着填(2026-10-11); 提示以"上一条提示 + 它吐的"开头就从解码结束的检查点接(2026-10-20, 提示 id 由
+ *   server_v41_live.c 沿用上一条真吐的 id, 重新分词对不上采样序列); 都不是就整段预填;
  * ②工具调用出错后的续写修复(continue_after_invalid_dsml 要会话); ③并发批处理; ④Responses/Anthropic 的活绑定
  * (它们指向会话 KV 位置, 这里没有 KV 可续)。
  * 有的: 采样与复读惩罚(见下面 ds4_engine_set_decode_sampling 那一段 —— 请求没带的采样参数落到 ds4.h 的官方默认);
@@ -99,7 +100,7 @@ static void v41_prefill_done(v41_gen *g) {
     const int reused = ds4_engine_v41_last_reused();
     g->j->req.cache_read_tokens = reused;
     g->j->req.cache_write_tokens = g->prompt_tokens - reused;
-    if (reused) { mon_set_cached(g->s, g->j->mon, reused); trace_event(g->s, g->trace_id, "kv reuse: %d of %d prompt tokens from the previous prompt's checkpoint", reused, g->prompt_tokens); }
+    if (reused) { mon_set_cached(g->s, g->j->mon, reused); trace_event(g->s, g->trace_id, "kv reuse: %d of %d prompt tokens from the previous request's checkpoint", reused, g->prompt_tokens); }
     g->decode_t0 = g->last_decode_log_t = now_sec();
     mon_first_token(g->s, g->j->mon);
     server_log(DS4_LOG_PREFILL, "ds4-server: %s ctx=%s%s%s prompt done %.3fs",
@@ -132,7 +133,7 @@ int v41_emit(int token, void *ud) {
             return 1;
         }
     }
-    if (s->trace) {   /* 记 id 要在 EOS 判断之前: EOS 没有文本, 但重放对拍要知道模型在哪一位停的 */
+    {   /* 记 id 要在 EOS 判断之前: EOS 没有文本, 但重放对拍要知道模型在哪一位停的。一律记(不只 --trace): 下一条提示要沿用这串 id(server_v41_live.c) */
         if (g->n_ids == g->cap_ids) {
             g->cap_ids = g->cap_ids ? g->cap_ids * 2 : 1024;
             g->ids = xrealloc(g->ids, (size_t)g->cap_ids * sizeof(int32_t));
@@ -462,6 +463,7 @@ void v41_gen_end(v41_gen *g, int rc) {
 /* 单 worker 路(不带 --batch): 引擎整段跑(预填 → 逐 token, 带投机), token 从回调来 */
 void generate_job_v41(server *s, job *j) {
     v41_gen g;
+    v41_live_splice(s, j);   /* 提示以上一条生成的文本开头 ⇒ 沿用上一条的 id, 引擎的解码结束检查点才接得上 */
     if (!v41_gen_begin(s, j, &g)) return;
     ds4_engine_set_decode_sampling(&g.sp);   /* 单 worker ⇒ 全局设置面按请求覆写即可 */
     server_log(DS4_LOG_PREFILL, "ds4-server: %s ctx=%s%s%s prompt start (V4.1 整段预填, decode_max=%d)",
@@ -472,6 +474,7 @@ void generate_job_v41(server *s, job *j) {
     ds4_engine_v41_set_progress(NULL, NULL);
     ds4_engine_set_decode_sampling(NULL);   /* 采样面里的 greedy_ud 指向栈上的 g, 请求结束就清, 不留悬空指针给下一个读全局的人 */
     ds4_engine_v41_last_spec_stats(&g.spec_rounds, &g.spec_offered, &g.spec_accepted);
+    if (rc == 0 && g.started) v41_live_store(s, j, &g);   /* 引擎正常走完才记: 失败的趟 KV 里是什么都不知道 */
     v41_gen_end(&g, rc);
 }
 

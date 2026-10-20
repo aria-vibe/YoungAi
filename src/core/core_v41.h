@@ -352,9 +352,11 @@ extern int g_ds4_v41_replay;  /* --decoder-replay(core_v41_api.c): 最后一块�
  * 最大回退(草稿块 5 + 1)。10-20 扫尺(fable5): 134 档 短提示预填 −30%、9210 token −5%, 代价 = 三条真实请求翻 2 条文本、接受 2.46 → 2.26;
  * 512 档三条全逐字节同但只省 −12~20%/−2.5%。这是官方同款近似, 不是逐字节同; --decoder-replay 0 退回整块。 */
 #define DS4_V41_REPLAY_ROWS 140
-/* 单请求路的 KV 前缀复用(core_v41_kvreuse.c): 预填完存检查点 / 新请求接上就从检查点位置起填(返回起点, 0 = 整段, = np 同提示一块不填) / 热切插件时作废 */
+/* 单请求路的 KV 前缀复用(core_v41_kvreuse.c): 预填完存槽 0、解码完存槽 1 / 新请求接上就从检查点位置起填(返回起点, 0 = 整段, = np 等长一块不填) / 热切插件时作废 */
 extern int g_ds4_v41_kv_reuse;
 void v41_kvreuse_save(const ds4_v41_state *st, const int32_t *prompt, uint32_t np, const uint64_t *sig);        /* sig = 每位的图片指纹(无图 NULL) */
+void v41_kvreuse_save_end(const ds4_v41_state *st, const int32_t *prompt, uint32_t np, const uint64_t *sig,
+                          const int32_t *fed, uint32_t nf, uint32_t logit_row);   /* fed = 真喂进 KV 的生成 token; logit_row = 末位 logits 所在行 */
 uint32_t v41_kvreuse_restore(ds4_v41_state *st, const int32_t *prompt, uint32_t np, const uint64_t *sig);
 void v41_kvreuse_drop(void);   /* 作废检查点但留着它的提示 token(ds4_engine_v41_kv_stale_prompt 取, 切换插件后预热用) */
 #define DS4_V41_LOGIT_LOG 1024   /* 逐步 logits 指纹最多记几步(core_v41_sample.c) */

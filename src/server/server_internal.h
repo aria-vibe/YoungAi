@@ -301,6 +301,8 @@ void think_loop_push(think_loop *d, int32_t tok);
 bool think_loop_hit(const think_loop *d, int *period, int *span);   /* true = 已成死环; period/span 可为 NULL */
 /* V4.1 服务生成路(server_generate_v41.c): 没有会话, token 从引擎回调来; generate_job 入口按模型分流 */
 void generate_job_v41(server *s, job *j);
+/* 上一条生成的序列接进下一条提示(server_v41_live.c): 生成前 splice(提示以上一条文本开头 ⇒ 沿用上一条的 id), 生成后 store */
+void v41_live_splice(server *s, job *j);   /* v41_live_store 在 v41_gen 定义之后声明 */
 /* 一条 V4.1 请求的生成期状态(2026-09-30 从 server_generate_v41.c 搬到头文件: 并发调度器 server_sched_v41.c 也要用)。
  * 三段: v41_gen_begin(校验/id/trace/采样面; 失败已回响应) → 引擎每出一个 token 调 v41_emit(文本累积/思考段/DSML/停止串/流式/挂断探测)
  * → v41_gen_end(收尾响应/trace/释放)。单请求路(generate_job_v41)与并发路走同一套, 客户端看到的字节一样。 */
@@ -340,6 +342,7 @@ typedef struct {
     bool think_loop_on;       /* 思考段检测只在提示以思考开场时开(非思考请求没有思考段); 正文检测一律开 */
     int think_end, loop_period, loop_span;   /* </think> 的 id; 强制收口/结束时记下的周期/段长, v41_emit 收到那个 token 时落日志 */
 } v41_gen;
+void v41_live_store(server *s, const job *j, const v41_gen *g);   /* 生成完(释放 g 之前)记下这条的文本 + id(server_v41_live.c) */
 /* 每多少个 token 探一次对端: 一次 poll 约 1 µs, 一步解码 40 ms ⇒ 开销在噪声里; 最坏多算 16 个 token。 */
 enum { V41_ALIVE_CHECK_TOKENS = 16 };
 bool v41_gen_begin(server *s, job *j, v41_gen *g);   /* false = 请求不合法, 错误响应已发 */
