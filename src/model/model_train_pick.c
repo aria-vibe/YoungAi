@@ -108,16 +108,18 @@ static paired pair_rows(const char *run_dir, const char *tag) {
 
 /* train.log 最后一趟(最后一个 "step 0 " 之后): 第 0 步与各轮的留出(行尾有 gen_kl 时取它: 泛化留出优先), 各轮收口 probe eNN stop k n base b。
  * 返回轮数; eval[0] = 第 0 步; stop[e] = 挂 ③ 收口数(-1 = 没有探针行), *base_stop = 部署态收口数, *gen = 1 表示按泛化留出 */
-static int last_run_epochs(const char *run_dir, double eval[100], int stop[100], int *base_stop, int *gen) {
+static int last_run_epochs(const char *run_dir, double eval[100], int stop[100], double dec[100], int *base_stop, int *gen) {
     char p[TR_PATH + 32]; snprintf(p, sizeof p, "%s/train.log", run_dir);
     char *t = tr_slurp(p, NULL); if (!t) return 0;
     char *start = t;
     for (char *q = t; (q = strstr(q, "step 0 ")); q += 7) if (q == t || q[-1] == '\n') start = q;
-    for (int i = 0; i < 100; i++) { eval[i] = -1; stop[i] = -1; }
+    for (int i = 0; i < 100; i++) { eval[i] = -1; stop[i] = -1; dec[i] = -1; }
     *gen = 0; *base_stop = -1;
     int n = 0; char *sv = NULL;
     for (char *ln = strtok_r(start, "\n", &sv); ln; ln = strtok_r(NULL, "\n", &sv)) {
         unsigned ep, k, nn; double ev; int b;
+        /* decision eNN kl X n N tp Y(10-22): 留出里 EOS / </think> 这些"停"决策位的平均 KL —— FP 教师那条路(docs/think_close.md)的选轮读数 */
+        if (sscanf(ln, "decision e%u kl %lf n %u", &ep, &ev, &nn) == 3 && ep < 100 && nn) { dec[ep] = ev; continue; }
         const bool is0 = sscanf(ln, "step 0 eval_kl %lf", &ev) == 1;
         if (is0 || sscanf(ln, "epoch %u eval_kl %lf", &ep, &ev) == 2) {
             if (is0) ep = 0;
@@ -153,8 +155,8 @@ bool tr_gate_pick(const char *run_dir, const char *mdl, const char *zch, char *c
     pick[0] = 0;
     char ev[TR_PATH + 48], ids_n[TR_PATH + 96], p[TR_PATH + 400];
     snprintf(ev, sizeof ev, "%s/eval", run_dir); mkdir(ev, 0755);
-    double eval[100]; int stop[100], base_stop = -1, by_gen = 0;
-    const int ne = last_run_epochs(run_dir, eval, stop, &base_stop, &by_gen);
+    double eval[100], dec[100]; int stop[100], base_stop = -1, by_gen = 0;
+    const int ne = last_run_epochs(run_dir, eval, stop, dec, &base_stop, &by_gen);
     if (!ne) { tr_logf(log, "★train.log 里没有这趟的 epoch 行★"); return false; }
     char ref[TR_PATH + 320]; tr_wt2_teacher(mdl, ref, sizeof ref);
     const bool drift = drift_ready(run_dir, ref, ids_n, sizeof ids_n, log);
@@ -193,8 +195,10 @@ bool tr_gate_pick(const char *run_dir, const char *mdl, const char *zch, char *c
         bool ok = true;
         if (eval[0] >= 0 && eval[e] >= eval[0]) { ok = false; snprintf(why, sizeof why, "不比第 0 步(%.4f)低", eval[0]); }
         else if (stop[e] >= 0 && base_stop >= 0 && stop[e] < base_stop) { ok = false; snprintf(why, sizeof why, "收口 %d < 部署态 %d", stop[e], base_stop); }
+        /* ④(10-22) 决策位 KL 不比第 0 步低 ⇒ 不参选: 原文段料没有问句, 贪心收口探针抽不到题(stop 行是 0/0), "还会不会停"改由留出里 EOS/</think> 位的 KL 答 */
+        else if (dec[e] >= 0 && dec[0] >= 0 && dec[e] >= dec[0]) { ok = false; snprintf(why, sizeof why, "决策位 KL %.4f 不比第 0 步 %.4f 低", dec[e], dec[0]); }
         else if (worse) { ok = false; snprintf(why, sizeof why, "通用漂移真退(≥ %.0f SE)", TR_DRIFT_SE); }
-        tr_logf(log, "选轮 ckpt_e%02u: %s %.4f | 收口 %d/部署态 %d | %s | %s%s", e, by_gen ? "泛化留出" : "留出", eval[e], stop[e], base_stop, dr, ok ? "参选" : "★不参选: ", why);
+        tr_logf(log, "选轮 ckpt_e%02u: %s %.4f | 收口 %d/部署态 %d | 决策位 KL %.4f/第 0 步 %.4f | %s | %s%s", e, by_gen ? "泛化留出" : "留出", eval[e], stop[e], base_stop, dec[e], dec[0], dr, ok ? "参选" : "★不参选: ", why);
         if (ok && (!any || eval[e] < best)) { any = true; best = eval[e]; snprintf(pick, pn, "ckpt_e%02u", e); }
     }
     free(base);
