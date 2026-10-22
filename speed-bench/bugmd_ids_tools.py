@@ -377,6 +377,135 @@ def cmd_tokprobe(anchor_path, ids_path, tok="1", n_prompt="0"):
         print("  几何均值 p(tok) = %.4f; 中位 %.4f; tok 是 argmax 的位置 %d/%d" % (gm, sorted(ps)[len(ps) // 2], sum(1 for h in hits if h[3] == tok), len(hits)))
 
 
+def cmd_ids2seqs(ids_path, manifest_path, out_path):
+    """docend 这类"几篇拼成一条"的 ids + manifest(篇号 子域 源行号 起点 EOS位置 篇长) → 一行一篇的序列文件(v41_teacher.py --seqs 的输入, 2026-10-22)。
+    每篇 = ids[起点 .. EOS位置](含 BOS 与 EOS)。"""
+    ids = [int(x) for x in open(ids_path).read().split()]
+    n = 0
+    with open(out_path, "w") as f:
+        for ln in open(manifest_path, encoding="utf-8"):
+            if ln.startswith("#") or not ln.strip(): continue
+            _, _, _, b0, e0, _ = ln.split()[:6]
+            f.write(" ".join(str(t) for t in ids[int(b0):int(e0) + 1]) + "\n"); n += 1
+    print("%s: %d 篇 → %s" % (manifest_path.split("/")[-1], n, out_path))
+
+
+def cmd_ptfcheck(anchor_path, ptf_path, seq_index, row0, kk="64"):
+    """★batch 维 FP 路的对拍门(2026-10-22)★: PTF1 top-K 表(v41_teacher_seqs.py, 多条序列一次前向)里第 seq_index 条 vs 全 logits 锚(单条流式前向)从第 row0 行起的同一批位置。
+    用法: 把 docend 的 25 篇按篇拆成序列(ids2seqs)一起打 top-K; 第 0 篇在流里从位置 0 起、前面没有别的篇 ⇒ 两条路必须逐位同(top-1 全同, |Δp| 在 bf16 噪声内);
+    第 k 篇(k ≥ 1)在流里带着前面 k 篇的上下文 ⇒ 差多少就是"拼接当一条"对教师分布的影响。
+    报: 位数 / top-1 同 / 表上 top-K 的 |Δp| 均值与最大 / 表的 top-1 概率均值 vs 锚的。"""
+    import math
+    import numpy as np
+    seq_index, row0, kk = int(seq_index), int(row0), int(kk)
+    f = open(ptf_path, "rb")
+    recs = []
+    while True:
+        hd = f.read(12)
+        if len(hd) < 12: break
+        magic, K, N = struct.unpack("<III", hd)
+        assert magic == 0x31465450, "不是 PTF1 段"
+        for _ in range(N):
+            L = struct.unpack("<I", f.read(4))[0]
+            ids = np.frombuffer(f.read(L * 4), dtype=np.int32)
+            ti = np.frombuffer(f.read((L - 1) * K * 4), dtype=np.int32).reshape(L - 1, K)
+            tp = np.frombuffer(f.read((L - 1) * K * 4), dtype=np.float32).reshape(L - 1, K)
+            rest = np.frombuffer(f.read((L - 1) * 4), dtype=np.float32)
+            recs.append((ids, ti, tp, rest))
+    ids, ti, tp, rest = recs[seq_index]
+    a = open(anchor_path, "rb")
+    S, V = struct.unpack("<ii", a.read(8))
+    n = ids.shape[0] - 1
+    same = 0; dsum = 0.0; dmax = 0.0; p1t = 0.0; p1a = 0.0; kls = 0.0
+    for i in range(n):
+        a.seek(8 + (row0 + i) * V * 4)
+        row = np.frombuffer(a.read(V * 4), dtype=np.float32).astype(np.float64)
+        m = row.max(); ex = np.exp(row - m); p = ex / ex.sum()
+        same += int(row.argmax() == ti[i, 0])
+        d = np.abs(p[ti[i]] - tp[i]); dsum += float(d.mean()); dmax = max(dmax, float(d.max()))
+        p1t += float(tp[i, 0]); p1a += float(p.max())
+        q = np.clip(tp[i].astype(np.float64), 1e-12, 1.0); pk = np.clip(p[ti[i]], 1e-12, 1.0)
+        kls += float((pk * np.log(pk / q)).sum())   # 锚 vs 表在表的 top-K 上的 KL 项(余量略), 只作量级
+    print("ptfcheck 表第 %d 条(%d 位) vs 锚第 %d 行起: top-1 同 %d/%d = %.2f%%; 表 top-K 上 |Δp| 均值 %.2e 最大 %.2e; top-1 p 表 %.4f / 锚 %.4f; KL(top-K 项) %.2e/位"
+          % (seq_index, n, row0, same, n, 100.0 * same / max(n, 1), dsum / max(n, 1), dmax, p1t / max(n, 1), p1a / max(n, 1), kls / max(n, 1)))
+
+
+def cmd_ptfstat(ptf_path, think_end="128822", eos="1", qmark="33"):
+    """每份 FP 教师落盘就看教师在决策位给了多少(2026-10-22 用户: "每一份结束能看下指标, 早点发现问题"): 不用 GPU, 只读 PTF1 top-K 表。
+    每条序列: 末位(目标 EOS)的 p / 含 </think> 的条上 </think> 位的 p / 非决策位上 EOS·</think> 的尾巴(top-K 里可见的 p, 不可见记 0 = 下界) / 问号位。
+    读法: 这是 ③ 要学的靶 —— 教师在 </think>·EOS 位给得高(docend 锚上 FP 真结尾几何均值 0.0629, 思考收口位 FP 常 0.2~0.9)说明渲染/尾段切法没毛病;
+    给得很低先怀疑料: 尾段切坏、前缀渲染错、补齐污染。目标不在 top-K 的位单列("不可见"), 几何均值把它按第 K 名的 p 记(上界)。"""
+    import math
+    import numpy as np
+    think_end, eos, qmark = int(think_end), int(eos), int(qmark)
+    f = open(ptf_path, "rb")
+    recs = []
+    while True:
+        hd = f.read(12)
+        if len(hd) < 12: break
+        magic, K, N = struct.unpack("<III", hd)
+        assert magic == 0x31465450, "不是 PTF1 段"
+        for _ in range(N):
+            L = struct.unpack("<I", f.read(4))[0]
+            ids = np.frombuffer(f.read(L * 4), dtype=np.int32)
+            ti = np.frombuffer(f.read((L - 1) * K * 4), dtype=np.int32).reshape(L - 1, K)
+            tp = np.frombuffer(f.read((L - 1) * K * 4), dtype=np.float32).reshape(L - 1, K)
+            f.read((L - 1) * 4)
+            recs.append((ids, ti, tp))
+
+    def p_of(ti_row, tp_row, tok):   # tok 在这一位 top-K 里的 p; 不在 → None
+        w = np.nonzero(ti_row == tok)[0]
+        return float(tp_row[w[0]]) if len(w) else None
+
+    # 四类序列分开报: 轨迹(<think>…</think>, 它的 </think> 是模型自己要停的收口位) / 中段(只有 <think> 没有 </think>: 思考开头一段当"这里别收"的负样本,
+    # 10-22 晚; 末位那个 EOS 是训练器补的, 教师在那儿应 ≈0, 单列不混进真结尾) / 问答(chat 模板 <｜Assistant｜></think>答案: 那个 </think> 是模板硬塞的,
+    # 模型从不采样, FP 在那里只给 ~3e-4, 不是决策位, 不计) / 文档(整篇, 只有末位 EOS)
+    think_start = 128821
+    def kind_of(ids):
+        has_s, has_e = (ids == think_start).any(), (ids == think_end).any()
+        if has_s and has_e: return "轨迹"
+        if has_s: return "中段"
+        if has_e: return "问答"
+        return "文档"
+    kinds = {}
+    def add(st, name, p, is_top, kth):
+        s = st.setdefault(name, {"v": [], "miss": 0, "bound": [], "top": 0})
+        if p is None: s["miss"] += 1; s["bound"].append(kth)
+        else: s["v"].append(p); s["top"] += int(is_top)
+    hit = tot = 0
+    for ids, ti, tp in recs:
+        n = len(ids) - 1; tgt = ids[1:]
+        hit += int((ti[:, 0] == tgt).sum()); tot += n
+        kd = kind_of(ids)
+        kk = kinds.setdefault(kd, {"stats": {}, "tails": {"EOS 非末位": [], "</think> 非收口位": [], "'?' 非问号位": []}, "n": 0, "rows": 0, "hit": 0})
+        kk["n"] += 1; kk["rows"] += n; kk["hit"] += int((ti[:, 0] == tgt).sum())
+        st, tails = kk["stats"], kk["tails"]
+        for i in range(n):
+            y = int(tgt[i]); kth = float(tp[i, -1]); top = int(ti[i, 0])
+            if y == eos and i == n - 1:
+                add(st, "EOS 末位" if kd != "中段" else "EOS 末位(补的,应≈0)", p_of(ti[i], tp[i], eos), top == eos, kth)
+            elif y == think_end and kd == "轨迹":
+                add(st, "</think> 收口位", p_of(ti[i], tp[i], think_end), top == think_end, kth)
+            elif y == qmark:
+                add(st, "'?' 问号位", p_of(ti[i], tp[i], qmark), top == qmark, kth)
+            if y != eos: tails["EOS 非末位"].append(p_of(ti[i], tp[i], eos) or 0.0)
+            if kd in ("轨迹", "中段") and y != think_end: tails["</think> 非收口位"].append(p_of(ti[i], tp[i], think_end) or 0.0)
+            if y != qmark: tails["'?' 非问号位"].append(p_of(ti[i], tp[i], qmark) or 0.0)
+    print("[ptfstat] %s: %d 条, %d 行, 教师 argmax 命中 %.2f%%; 分类 %s" % (ptf_path.split("/")[-1], len(recs), tot, 100.0 * hit / max(tot, 1),
+          ", ".join("%s %d" % (k, v["n"]) for k, v in kinds.items())))
+    for kd, kk in kinds.items():
+        print("  [%s] %d 条 %d 行, 命中 %.1f%%" % (kd, kk["n"], kk["rows"], 100.0 * kk["hit"] / max(kk["rows"], 1)))
+        for name in ("EOS 末位", "EOS 末位(补的,应≈0)", "</think> 收口位", "'?' 问号位"):
+            s = kk["stats"].get(name)
+            if not s: continue
+            allv = s["v"] + s["bound"]; n = len(allv)
+            gm = math.exp(sum(math.log(max(v, 1e-9)) for v in allv) / n)
+            print("    %-18s n %4d  几何均值 p %.4f  中位 %.4f  argmax 占比 %d/%d  不在 top-K %d"
+                  % (name, n, gm, float(np.median(allv)), s["top"], n, s["miss"]))
+        for name, v in kk["tails"].items():
+            if v: print("    %-18s 位数 %6d  均值 p %.2e(top-K 里可见的, 下界)" % (name, len(v), float(np.mean(v))))
+
+
 def cmd_minp(topk_path, ids_path, n_prompt, entry="0", min_p="0.02", tok="128822"):
     """采样截断是不是把出口切掉了(2026-10-16, 助理思考段 4.6 万 token 逐 id 复读、`</think>` 一次不出):
     faith 的 ② 只给 p(</think>) 的原始总和, 而产品采样在抽之前先按 min_p 砍(p < min_p·p(top-1) 的词不参与)。
@@ -555,6 +684,7 @@ if __name__ == "__main__":
     cmds = {"extract": cmd_extract, "cut": cmd_cut, "cmp-emit": cmd_cmp_emit, "cmp-topk": cmd_cmp_topk,
             "eos-scan": cmd_eos_scan, "rows": cmd_rows, "loopstat": cmd_loopstat, "faith": cmd_faith,
             "anchor-faith": cmd_anchor_faith, "tokprobe": cmd_tokprobe, "minp": cmd_minp, "agree": cmd_agree,
+            "ids2seqs": cmd_ids2seqs, "ptfcheck": cmd_ptfcheck, "ptfstat": cmd_ptfstat,
             "cyclescan": cmd_cyclescan, "temper": cmd_temper}
     if len(sys.argv) < 2 or sys.argv[1] not in cmds:
         sys.exit(__doc__ + "  rows <rows.txt> <ids> <n_prompt> <入口位置> [tokenizer.json] [窗口=12]   --row-out 的分桶命中率 + 入口逐行解码\n")
