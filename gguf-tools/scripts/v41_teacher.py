@@ -32,7 +32,8 @@ import torch
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from v41_hf_io import FP4_TABLE, build_index, load_raw, dq_fp8, dq_fp4, has_vq, load_vq, load_q4k
+from v41_hf_io import (FP4_TABLE, build_index, load_raw, dq_fp8, dq_fp4, has_vq, load_vq, load_q4k,
+                       prefetch_start, prefetch_ready, prefetch_drop)
 import v41_patches as P
 from v41_cli import parse_args
 
@@ -148,6 +149,9 @@ def main():
     # engram / indexer / KV 三种 cache 都按它分配, 超了会在 engram.py 里报
     # "The expanded size of the tensor (4096) must match the existing size (8192)" ——
     # 而且是前向跑到一半才炸, 前面几分钟的装载全白费。
+    if a.seqs:   # 多序列 top-K 档: 缓存按条数 × 最长位分(v41_teacher_seqs.py), 建模前定
+        import v41_teacher_seqs as TS
+        args.max_batch_size, a.ntok = TS.shape_of(a.seqs)
     if a.ntok > args.max_seq_len:
         args.max_seq_len = a.ntok
     print(f"[配置] {args.n_layers} 层 / dim {args.dim} / {args.n_routed_experts} 专家 "
@@ -306,17 +310,24 @@ def main():
             stat[0] += 1
             stat[1] += t.numel()
 
-    def hook_unit(mod, prefix, skip=None, tag=None, is_expert=False):
+    def hook_unit(mod, prefix, skip=None, tag=None, is_expert=False, layer_i=None):
         def pre(m, _a):
             m._t0 = time.time()
+            if layer_i is not None:    # 整层预读(v41_hf_io): 等本层字节到内存, 同时发下一层; 本层所有专家的 load_raw 都从内存切
+                m._pf = prefetch_ready(layer_i)
+                prefetch_start(idx, layer_i + 1, len(net.layers))
             materialize(m, prefix, skip)
             if vqlib is not None and qmode["on"] and is_expert and prefix.startswith("layers."):
                 do_vq(m, int(prefix.split(".")[1]))
 
         def post(m, _a, _o):
             release(m, prefix, skip)
+            if layer_i is not None:
+                prefetch_drop(layer_i)
             if tag:
-                print(f"  [{tag}] {time.time() - m._t0:.1f}s", flush=True)
+                pf = getattr(m, "_pf", None)
+                note = f"(预读 {pf[1]/1e9:.1f} GB 读 {pf[2]:.1f}s 等 {pf[0]:.1f}s)" if pf else ""
+                print(f"  [{tag}] {time.time() - m._t0:.1f}s{note}", flush=True)
 
         mod.register_forward_pre_hook(pre)
         mod.register_forward_hook(post)
@@ -335,9 +346,10 @@ def main():
             for j, ex in enumerate(ffn.experts):
                 if ex is not None:
                     hook_unit(ex, f"layers.{i}.ffn.experts.{j}", is_expert=True)
-        hook_unit(layer, f"layers.{i}", skip=tuple(skips) if skips else None, tag=f"L{i}")
+        hook_unit(layer, f"layers.{i}", skip=tuple(skips) if skips else None, tag=f"L{i}", layer_i=i)
     hook_unit(net.norm, "norm")
     hook_unit(net.head, "head")
+    prefetch_start(idx, 0, len(net.layers))    # 第 0 层的字节现在就开始读, 建模剩下的工序与它并行
 
     # ---- 反修原料: dump 每层 MoE 的 (x, y) / 或用教师的 x 强制喂入 ----
     # 【z 靶的语义】"教师 − 当层全部量化计算"(V4 时代 zlayer 同义): 必须用【同一个 x】
@@ -475,6 +487,11 @@ def main():
     # 有若干 torch.arange/zeros 不带 device 参数, 默认 cpu 的话会在 sparse_attn 那里报
     # "topk_idxs device_type expected cuda, but got cpu"。放在建模之后, 免得干扰 meta 建模。
     torch.set_default_device(dev)
+    if a.seqs:   # 多序列 top-K 档(后训练 ③ 的 FP 教师): 到这里为止与单序列路同一套流式/补丁, 只换输入形状与输出头
+        if not a.out:
+            raise SystemExit("★--seqs 要配 --out(top-K 表)★")
+        TS.run(a, net, dev, tok.eos_token_id, t0)
+        return
     ids = [int(x) for x in Path(a.ids).read_text().split()][: a.ntok]
     x = torch.tensor([ids], device=dev)
     print(f"[前向] {len(ids)} token", flush=True)

@@ -13,7 +13,11 @@
 解错不会报错, 只会静默出一整套好看的假数。
 """
 import json
+import mmap
+import os
 import struct
+import threading
+import time
 from pathlib import Path
 
 import numpy as np
@@ -73,16 +77,123 @@ def _mm(path):
 _VIEW = {"BF16": torch.bfloat16, "F16": torch.float16, "F32": torch.float32, "F8_E4M3": torch.float8_e4m3fn}
 
 
-def load_raw(idx, name, device):
-    """按索引把一个张量读上来(不解量化)。E8M0/I8/U8 一律当 uint8 收 —— 解释权在用它的地方。
-    Q4_K 按块字节读成一维 uint8(shape 是逻辑形状, 塞不进去), 解释权在 load_q4k。"""
-    p, off, dt, shp = idx[name]
+def tensor_nbytes(dt, shp):
+    """一个张量在文件里占的字节数。Q4_K 按块算(见 ELEM_BYTES 的注释), 其余 = 元素数 × 元素字节。"""
     if dt == "Q4_K":
         rows, cols = shp
-        nbytes = rows * (cols // 256) * 144
-        return torch.from_numpy(_mm(p)[off:off + nbytes]).to(device, non_blocking=True)
-    nbytes = int(np.prod(shp)) * ELEM_BYTES.get(dt, 1)
-    t = torch.from_numpy(_mm(p)[off:off + nbytes])
+        return rows * (cols // 256) * 144
+    return int(np.prod(shp)) * ELEM_BYTES.get(dt, 1)
+
+
+# ---------------- 整层预读(2026-10-22) ----------------
+# 为什么: 逐张量 mmap 切片是缺页驱动的小块读 —— 一层专家 2304 个张量 7.64 GB 实测 22.6 s(0.34 GB/s), 占教师一层 48 s
+#   的近半, 而盘本身 O_DIRECT 顺序读 8.4 GB/s、GPU 只有四成在干活。层 pre-hook 时把【下一层】全部张量所在的字节段在后台
+#   线程一次顺序读进内存, 本层到时 load_raw 直接从内存切: 字节一个不变 ⇒ 数值与 mmap 路逐位同(字节级对拍过才换上)。
+# 段怎么切: 本层张量按文件偏移排序, 相邻间隙 ≤ _PF_GAP 的并成一段连续读(间隙里夹的别层/别的张量白读一点, 比上千次小读便宜);
+#   engram 表(98 GB, 名字 layers.N.engram.embed.*)不在内, 它按行流式(StreamEngramEmbed)。
+# 内存: 最多两层在内存(当前层 + 预读中的下一层) ≈ 2 × 7.7 GB; 层 post-hook 丢掉本层。
+# 出错会怎样: O_DIRECT 要求偏移/长度/缓冲都 4 KB 对齐 —— 段两端向外对齐, 缓冲用匿名 mmap(页对齐), 多读的边角不用;
+#   文件尾不足一块 preadv 返回短读, 读到 0 字节就停。某层没预读到(比如别的索引 idx_fp 里的张量)就走原来的 mmap 路, 只慢不错。
+_PF = {}                 # 层号 → _Prefetch
+_PF_GAP = 16 << 20
+_PF_ALIGN = 4096
+_PF_CHUNK = 16 << 20
+
+
+class _Prefetch:
+    def __init__(self, idx, li):
+        pre, skip = f"layers.{li}.", f"layers.{li}.engram.embed."
+        spans = {}
+        for name, (p, off, dt, shp) in idx.items():
+            if name.startswith(pre) and not name.startswith(skip):
+                spans.setdefault(p, []).append((off, off + tensor_nbytes(dt, shp)))
+        self.runs = []       # [path, lo, hi, alo, buf]: 张量覆盖 [lo,hi), 实际读 [alo, 对齐(hi)), buf 从 alo 起
+        for p, sp in spans.items():
+            sp.sort()
+            lo, hi = sp[0]
+            for l2, h2 in sp[1:]:
+                if l2 - hi > _PF_GAP:
+                    self.runs.append([p, lo, hi, 0, None])
+                    lo, hi = l2, h2
+                else:
+                    hi = max(hi, h2)
+            self.runs.append([p, lo, hi, 0, None])
+        self.nbytes = sum(r[2] - r[1] for r in self.runs)
+        self.ready = False
+        self.t0 = time.time()
+        self.secs = 0.0
+        self.th = threading.Thread(target=self._read, daemon=True)
+        self.th.start()
+
+    def _read(self):
+        for run in self.runs:
+            p, lo, hi = run[0], run[1], run[2]
+            alo = lo & ~(_PF_ALIGN - 1)
+            ahi = (hi + _PF_ALIGN - 1) & ~(_PF_ALIGN - 1)
+            buf = mmap.mmap(-1, ahi - alo)
+            mv = memoryview(buf)
+            fd = os.open(p, os.O_RDONLY | os.O_DIRECT)
+            try:
+                pos = 0
+                while pos < ahi - alo:
+                    n = os.preadv(fd, [mv[pos:pos + _PF_CHUNK]], alo + pos)
+                    if n <= 0:
+                        break
+                    pos += n
+            finally:
+                os.close(fd)
+            run[3], run[4] = alo, buf
+        self.secs = time.time() - self.t0
+
+    def slice(self, p, off, n):
+        for path, lo, hi, alo, buf in self.runs:
+            if path == p and lo <= off and off + n <= hi:
+                return np.frombuffer(buf, dtype=np.uint8, count=n, offset=off - alo)
+        return None
+
+
+def prefetch_start(idx, li, nlayers):
+    """发第 li 层的后台预读(层号越界或已发过就不动)。"""
+    if 0 <= li < nlayers and li not in _PF:
+        _PF[li] = _Prefetch(idx, li)
+
+
+def prefetch_ready(li):
+    """等第 li 层的字节到内存; 返回 (等了几秒, 段字节数, 读了几秒)。没发过预读返回 None —— 这层照旧走 mmap。"""
+    pf = _PF.get(li)
+    if pf is None:
+        return None
+    t = time.time()
+    pf.th.join()
+    pf.ready = True
+    return time.time() - t, pf.nbytes, pf.secs
+
+
+def prefetch_drop(li):
+    _PF.pop(li, None)        # 匿名映射随对象释放解除; 切出去的 numpy 视图都已拷到设备上, 没人再引用
+
+
+def _pf_slice(p, off, n):
+    for pf in _PF.values():
+        if pf.ready:
+            r = pf.slice(p, off, n)
+            if r is not None:
+                return r
+    return None
+
+
+def load_raw(idx, name, device):
+    """按索引把一个张量读上来(不解量化)。E8M0/I8/U8 一律当 uint8 收 —— 解释权在用它的地方。
+    Q4_K 按块字节读成一维 uint8(shape 是逻辑形状, 塞不进去), 解释权在 load_q4k。
+    字节来源: 这层预读到内存了就从内存切(_pf_slice), 否则 memmap —— 两条路给的是同一段文件字节。"""
+    p, off, dt, shp = idx[name]
+    nbytes = tensor_nbytes(dt, shp)
+    raw = _pf_slice(p, off, nbytes)
+    if raw is None:
+        raw = _mm(p)[off:off + nbytes]
+    if dt == "Q4_K":
+        return torch.from_numpy(raw).to(device, non_blocking=True)
+    t = torch.from_numpy(raw)
     if dt in _VIEW:
         t = t.view(_VIEW[dt])
     return t.view(*shp).to(device, non_blocking=True)

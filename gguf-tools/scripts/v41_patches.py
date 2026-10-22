@@ -43,7 +43,7 @@ def patch_sparse_attn(M):
         valid = idx >= 0
         safe = idx.clamp_min(0)
         out = torch.empty(b, m, h, d, dtype=torch.float32, device=q.device)
-        step = max(1, int(2e8 // (idx.shape[-1] * d * 4)))   # 控 gather 的峰值内存
+        step = max(1, int(2e8 // (b * idx.shape[-1] * d * 4)))   # 控 gather 的峰值内存(按 b 摊: 多序列档 b=64 时每位 ~270 MB, 不摊就是 ×64; b=1 与原式同)
         for s0 in range(0, m, step):
             s1 = min(m, s0 + step)
             si, sv = safe[:, s0:s1], valid[:, s0:s1]

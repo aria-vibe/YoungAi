@@ -6,7 +6,12 @@ import argparse
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("hf", help="模型目录: FP 的 HF 目录, 或 v41_quantize 产出的量化目录(学生从文件读回)")
-    ap.add_argument("--ids", required=True)
+    ap.add_argument("--ids", default="", help="一条序列(一行一个 id); 与 --seqs 二选一")
+    ap.add_argument("--seqs", default="",
+                    help="★多序列 top-K 档(2026-10-22, 后训练 ③ 的 FP 教师)★: 一行一条序列(空格隔开的 id, ds4 --ptrain dumpids= 的产物), "
+                         "按 batch 维一次前向(各条独立从 0 起, 右侧补齐), 每条每位只落 top-K + 余量 → --out(格式见 v41_teacher_seqs.py)。"
+                         "为什么不拼成一条: 教师看到的上下文必须与学生训练时一样(一题一条); 为什么不一条一趟: 流式装一遍原件 ≈ 25 分钟")
+    ap.add_argument("--topk", type=int, default=64, help="配 --seqs: 每位保留的 top-K(与 ds4 --ptrain 的 topk= 必须相同)")
     ap.add_argument("--ntok", type=int, default=32)
     ap.add_argument("--layers", type=int, default=0, help="只跑前 N 层(0=全部)")
     ap.add_argument("--out", default="")
@@ -75,4 +80,7 @@ def parse_args():
                     help="码本文件(v41_codebook 产出); 不给则拒绝量化 —— 码本必须匹配源分布")
     ap.add_argument("--qpow2", type=int, default=1,
                     help="1=scale 取 2 的幂(真格式 ue8m0); 0=精确 f32 σ(仅诊断, 不可落地)")
-    return ap.parse_args()
+    a = ap.parse_args()
+    if bool(a.ids) == bool(a.seqs):
+        ap.error("--ids 与 --seqs 必须给且只给一个")
+    return a
