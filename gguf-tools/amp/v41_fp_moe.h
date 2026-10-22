@@ -25,6 +25,10 @@ typedef struct { v41_fp_mat w1, w3, w2; } v41_fp_ffn;   /* w1/w3 [MID][D], w2 [D
 int v41_fp_moe_layer(const v41_fp_ffn *experts, int n_expert, const v41_fp_ffn *shared,
                      const float *dX, const int *hsel, const float *hrw, int n, int D, int MID, int n_used, float clamp,
                      float *dY);
+/* 把上面那趟留在设备上的工作缓冲(15360 行约 4 GB: 逐 pick 的 x/y 副本、路由表、shared 段中间量)全放掉; 下一趟按需再长。
+ * 为什么要放: 解算器解完一层接着要跑整条引擎前向, 统一内存上这 4 GB 就是页缓存少的 4 GB —— 权重缓存封顶后流式读的那 9 层
+ * 装不进页缓存就每块重读盘。 */
+void v41_fp_moe_release(void);
 
 #ifdef __cplusplus
 }

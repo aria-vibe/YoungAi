@@ -182,11 +182,32 @@ static const uint8_t *v41_st_data(v41_st *S, const v41_st_ent *E) {
     return sh->map + sh->data0 + E->off;
 }
 
+/* 卸掉一个分片, 并把它的页缓存也丢掉(2026-10-21 实撞, 10-22 补回 HEAD): munmap 之后那些干净的文件页仍留在页缓存里,
+ * 一层的专家分片十几 GB; 反修解算器同一进程里引擎的权重缓存封顶 88 GB, 装不下的后 9 层每块从页缓存读 —— 分片页把它们挤出去,
+ * 每块重新读盘(code 拟合料末遍: 不丢 300~319 s, 丢了 53~56 s)。
+ * posix_fadvise 只在本编译单元看得见它时才调: 严格 -std=c99 又没开 POSIX 特性宏的 TU(量化器 v41_quantize 等)里它不声明,
+ * 那里只 munmap, 与改前一样; 硬写会让那几个程序编不过。 */
+static void v41_st_release_shard(v41_st_shard *sh) {
+    munmap(sh->map, sh->msz); sh->map = NULL;
+#if defined(__linux__) && defined(POSIX_FADV_DONTNEED)
+    const int fd = open(sh->path, O_RDONLY);
+    if (fd >= 0) { (void)posix_fadvise(fd, 0, 0, POSIX_FADV_DONTNEED); close(fd); }
+#endif
+}
 /* 卸掉本轮没碰过的分片, 并把"碰过"标记清零供下一轮。 */
 static void v41_st_release_idle(v41_st *S) {
     for (int i = 0; i < S->nsh; i++) {
         v41_st_shard *sh = &S->sh[i];
-        if (sh->map && !sh->touched) { munmap(sh->map, sh->msz); sh->map = NULL; }
+        if (sh->map && !sh->touched) v41_st_release_shard(sh);
+        sh->touched = 0;
+    }
+}
+/* 全部卸掉(连本轮碰过的): 解算器解完一层、接着要跑整条引擎前向时, 本层那十几 GB 的分片页一个都不需要;
+ * 下一层按需再 mmap(索引表还在, mmap 是惰性的)。inline: 只有反修解算器用它, 别的包含方不该因此吃 -Wunused-function。 */
+static inline void v41_st_release_all(v41_st *S) {
+    for (int i = 0; i < S->nsh; i++) {
+        v41_st_shard *sh = &S->sh[i];
+        if (sh->map) v41_st_release_shard(sh);
         sh->touched = 0;
     }
 }

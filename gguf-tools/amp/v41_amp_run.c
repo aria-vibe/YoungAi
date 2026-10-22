@@ -212,7 +212,7 @@ static int hook(void *ud, int il, int pos0, int n, int D, int n_used, float clam
 }
 
 static int solve_layer(ctx_t *c, int il);                            /* v41_amp_lowrank.inc.c(低秩放大器路) */
-static int solve_layer_gr(ctx_t *c, int il, double t0, double t1);   /* v41_gr_run.inc.c(权重侧逐专家增益) */
+static int solve_layer_gr(ctx_t *c, int il, double t0, double t1), gr_work_reopen(ctx_t *c);   /* v41_gr_run.inc.c(权重侧逐专家增益; 工作区按层重开) */
 static int rb_fit(ctx_t *c, ds4_engine *e, const int *ids, int ntok, const char *lp, int no_engram,
                   const char *dump, const char *base_amp, int nl);   /* v41_rb_run.inc.c(路由偏置侧车, 一趟模式) */
 static int rb_seq_init(ctx_t *c, int ntok, int nl);                  /* 同上, 合并序贯: 统计表分配 / 本层解 Δb / 双职钩子 */
@@ -444,7 +444,7 @@ int main(int argc, char **argv) {
          * 挂自己的输出目录(第 k 遍挂 L0..L(k−1))。目录里一个插件都没有时引擎会拒开状态, 所以没解出过就不挂。
          * 合并序贯时第二趟(pass=1)只在本层 Δb 刚落盘后才跑: 路由变了, 增益必须解在挂着 Δb 的取料上, 上一趟的 ye 是旧路由的。 */
         for (int pass = 0; pass < 2 && rc == 0; pass++) {
-            c.layer = il; c.got = 0;
+            c.layer = il; c.got = 0; if (gr_work_reopen(&c)) { rc = 1; break; }   /* 上一层解完放了工作区(gr_layer_done), 取料前重开 */
             ds4_engine_v41_set_amp_dir((c.ok_layers || nrb) ? out : NULL);
             ds4_engine_v41_set_moe_hook((merged && pass == 0) ? rbgr_hook : hook, &c);
             ds4_engine_v41_set_moe_hook_layer(il);   /* 只要这一层, 省掉另外 39 层的白拷贝 */

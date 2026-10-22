@@ -33,6 +33,11 @@ static int grow(dbuf *b, size_t n) {
 static cublasHandle_t g_bl = NULL;
 static dbuf g_raw, g_wgu, g_wd, g_xs, g_ys, g_gu, g_h, g_perm, g_inv, g_rw, g_routed;
 static dbuf g_w1, g_w3, g_w2, g_x16, g_sg, g_su, g_sh, g_h16, g_so;
+extern "C" void v41_fp_moe_release(void) {   /* 见 v41_fp_moe.h */
+    dbuf *all[] = { &g_raw, &g_wgu, &g_wd, &g_xs, &g_ys, &g_gu, &g_h, &g_perm, &g_inv, &g_rw, &g_routed,
+                    &g_w1, &g_w3, &g_w2, &g_x16, &g_sg, &g_su, &g_sh, &g_h16, &g_so };
+    for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) { if (all[i]->p) cudaFree(all[i]->p); all[i]->p = NULL; all[i]->cap = 0; }
+}
 
 __device__ __forceinline__ static float bf16r(float x) {   /* = 引擎 v41_bf16r: RNE 舍到 bf16 再回 f32 */
     uint32_t u; memcpy(&u, &x, 4);

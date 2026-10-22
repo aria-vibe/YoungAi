@@ -123,6 +123,44 @@ static int gr_write_bin_roundtrip(float *hs, int ne, int D, const char *dir, int
     return rc;
 }
 
+/* ★取料/解算工作区按层开、每层解完就放★(2026-10-21 端到端择优那一版先这么做, 10-22 单独补回 HEAD):
+ * rx/ry/hx/hy(各 n×D f32)、rye/hye(各 n×6×D f32, 1.9 GB)、rysh/hysh、val 副本 hvf/hvt、设备 dye/dysh/drw/dsel/dX/dYq/dYfp/dYtmp
+ * —— 15360 行合计 ~12 GB; 再加 FP 教师的设备缓冲(~4 GB)和本层 HF 分片的页缓存(十几 GB), 解完一层后一个都用不上。
+ * 统一内存机器上它们占着就是页缓存少这么多: 权重缓存封顶 88 GB 之外的 9 层(21 GiB)靠页缓存才不每块重读盘。
+ * 实测(code 拟合料 15360 末遍前向): 一直占着 300~319 s(每块流式 9 层 26~30 s), 放掉之后 53~56 s(2.4 s)。
+ * 只在逐层序贯的增益路(--capture-ye, 不是后训练)放; 下一遍取料前 gr_work_reopen 按同样尺寸重开。
+ * 出错会怎样: 放了不重开 = 取料钩子见 rx 为空就不写(第七版的约定), 解出来全是空料 —— 所以重开挂在每遍取料的开头。 */
+static int gr_seq_mode(const ctx_t *c) { return c->want_ye && !c->sft_list && !c->adv_list; }
+static void gr_work_free(ctx_t *c) {
+    free(c->rx); free(c->ry); free(c->hx); free(c->hy); free(c->hrw); free(c->hsel); free(c->halpha); free(c->hvf); free(c->hvt);
+    free(c->rye); free(c->rysh); free(c->hye); free(c->hysh);
+    c->rx = c->ry = c->hx = c->hy = c->hrw = c->halpha = c->hvf = c->hvt = c->rye = c->rysh = c->hye = c->hysh = NULL; c->hsel = NULL;
+    cudaFree(c->dye); cudaFree(c->dysh); cudaFree(c->drw); cudaFree(c->dsel); cudaFree(c->dX); cudaFree(c->dYq); cudaFree(c->dYfp); cudaFree(c->dYtmp);
+    c->dye = c->dysh = c->drw = c->dX = c->dYq = c->dYfp = c->dYtmp = NULL; c->dsel = NULL;
+    v41_fp_moe_release();
+}
+static int gr_work_alloc(ctx_t *c) {   /* 尺寸与 v41_amp_run.c 开头那次分配逐项相同 */
+    const int ntok = c->n;
+    const size_t nD = (size_t)ntok * c->D, nU = (size_t)ntok * MAXU, nyD = nU * (size_t)c->D;
+    c->rx = malloc(nD * 4); c->ry = malloc(nD * 4); c->hx = malloc(nD * 4); c->hy = malloc(nD * 4);
+    c->hrw = malloc(nU * 4); c->hsel = malloc(nU * 4); c->halpha = malloc((size_t)ntok * 4);
+    c->hvf = malloc((size_t)(ntok - c->nfit + 1) * c->D * 4); c->hvt = malloc((size_t)(ntok - c->nfit + 1) * c->D * 4);
+    c->rye = malloc(nyD * 4); c->rysh = malloc(nD * 4); c->hye = malloc(nyD * 4); c->hysh = malloc(nD * 4);
+    if (!c->rx || !c->ry || !c->hx || !c->hy || !c->hrw || !c->hsel || !c->halpha || !c->hvf || !c->hvt || !c->rye || !c->rysh || !c->hye || !c->hysh) {
+        fprintf(stderr, "★取料工作区(主机 %.1f GB)重开失败★\n", (double)(nD * 16 + nyD * 8) / 1e9); return -1; }
+    if (cudaMalloc((void **)&c->dye, nyD * 4) || cudaMalloc((void **)&c->dysh, nD * 4) || cudaMalloc((void **)&c->drw, nU * 4) || cudaMalloc((void **)&c->dsel, nU * 4) ||
+        cudaMalloc((void **)&c->dX, nD * 4) || cudaMalloc((void **)&c->dYq, nD * 4) || cudaMalloc((void **)&c->dYfp, nD * 4) || cudaMalloc((void **)&c->dYtmp, nD * 4)) {
+        fprintf(stderr, "★取料工作区(设备 %.1f GB)重开失败★\n", (double)(nyD * 4 + nD * 20) / 1e9); return -1; }
+    return 0;
+}
+static int gr_work_reopen(ctx_t *c) { return (gr_seq_mode(c) && !c->rx) ? gr_work_alloc(c) : 0; }
+/* 一层解完(挂上或闸掉)之后: 序贯增益路全放; 别的路照旧只卸本轮没碰过的分片 */
+static void gr_layer_done(ctx_t *c) {
+    if (!gr_seq_mode(c)) { v41_st_release_idle(&c->S); return; }
+    v41_st_release_all(&c->S);
+    gr_work_free(c);
+}
+
 /* 解一层的增益: 扫 λ → 只认 val → 落盘。返回 <0 失败, 0 跳过, 1 挂上。
  * ★这里报的 train/val 就是落地态★(2026-09-14 改格点直解之后): 解算器在 fp4 格点上解, 最终残差
  * 是拿格点值算的。以前是"按解算态 val 选 λ, 再把赢家压成 fp4", 两件事口径不一样 —— 大 λ 的解
@@ -156,7 +194,7 @@ static int solve_layer_gr(ctx_t *c, int il, double t0, double t1) {
         c->skip_layers++;
         fprintf(c->mf, "L%02d skip gr - - %+.2f %+.2f -\n", il, best_tr, best_va); fflush(c->mf);
         printf("  [L%02d] val 最优 %+.2f%% ≤ 闸 %.1f%%, 不挂  (fp %.1fs 解 %.1fs)\n", il, best_va, GR_GATE, t1 - t0, t2 - t1);
-        v41_st_release_idle(&c->S);
+        gr_layer_done(c);
         return 0;
     }
     /* 缩放因子的分布也报出来 —— 全是 1 说明岭把解压死了(那时 val 也该接近 0, 两者对不上就是 bug) */
@@ -177,6 +215,6 @@ static int solve_layer_gr(ctx_t *c, int il, double t0, double t1) {
     fflush(c->mf);
     printf("  [L%02d] ★挂上★ λ=%.3g train %+.2f%% val %+.2f%% | 缩放 |s−1| 均 %.4f 范围 [%.4f, %.4f] | fp4 %.2f MB  (fp %.1fs 解 %.1fs)\n",
            il, best_lam, best_tr, best_va, sabs / (double)nsD, smin, smax, (double)nsD / 32.0 * 17.0 / 1e6, t1 - t0, t2 - t1);
-    v41_st_release_idle(&c->S);
+    gr_layer_done(c);
     return 1;
 }
