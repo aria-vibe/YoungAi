@@ -191,8 +191,10 @@ bool pt_pack_step(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *co
     /* 各题答案位的 KL: 教师表逐题上传, 核读第 row 行起 m 行 logits、梯度就地写回那几行(与 pt_step_sample 同一个核同一个缩放) */
     ds4_gpu_tensor *glog[PT_PACK_MAX];
     memset(glog, 0, sizeof glog);
-    for (uint32_t i = 0; ok && i < nb; i++)
+    for (uint32_t i = 0; ok && i < nb; i++) {
         ok = pt_loss_rows(c, r, B->logits, pk->r0[i] + ss[i]->sa0 - 1u, ss[i], &loss_each[i], &ntok_each[i], &glog[i]);
+        r->dec_slot[i] = r->dec_last;
+    }
     const double q2 = pt_tick(c);
     double q3 = q2, q4 = q2;
     if (ok && grad) {   /* 出口: 各题答案行的 g_xn = glog·W_head(其余行 0) → RMSNorm → hc_pre, 整批 R 行; 再逐层往下(按题分段的在层里) */
@@ -221,14 +223,16 @@ bool pt_pack_step(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *co
 }
 
 bool pt_run_list(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *const *ss, uint32_t n, int grad,
-                 double *loss_sum, uint32_t *ntok, double *loss_each, uint32_t *ntok_each) {
+                 double *loss_sum, uint32_t *ntok, double *loss_each, uint32_t *ntok_each, double *dec_each) {
     if (loss_each) for (uint32_t k = 0; k < n; k++) { loss_each[k] = 0.0; ntok_each[k] = 0; }
+    if (dec_each) for (uint32_t k = 0; k < n; k++) dec_each[k] = -1.0;   /* -1 = 这题没有决策位(或没进评估) */
     if (!r->pk.ready || c->nopack) {   /* 不合批: 一题一题过(10-02 之前的路, 只作对照) */
         for (uint32_t k = 0; k < n; k++) {
             double l = 0; uint32_t t = 0;
             if (!pt_step_sample(e, c, r, ss[k], grad, &l, &t)) return false;
             *loss_sum += l; *ntok += t;
             if (loss_each) { loss_each[k] = l; ntok_each[k] = t; }
+            if (dec_each) dec_each[k] = r->dec_slot[0];
         }
         return true;
     }
@@ -253,6 +257,7 @@ bool pt_run_list(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *con
         for (uint32_t q = 0; ok && q < np; q++) {
             *loss_sum += le[q]; *ntok += nt[q];
             if (loss_each) { loss_each[who[q]] = le[q]; ntok_each[who[q]] = nt[q]; }
+            if (dec_each) dec_each[who[q]] = r->dec_slot[q];
         }
     }
     free(ix); free(bin); free(brow); free(bcnt);

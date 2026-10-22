@@ -132,7 +132,7 @@ bool pt_onpolicy(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_data *d, co
         const uint32_t b1 = b0 + c->batch < np ? b0 + c->batch : np;
         for (uint32_t b = b0; b < b1; b++) bs[b - b0] = pool[b];
         double ls = 0, gn = 0; uint32_t nt = 0; int clipped = 0;
-        ok = pt_run_list(e, c, r, bs, b1 - b0, 1, &ls, &nt, le, ne);
+        ok = pt_run_list(e, c, r, bs, b1 - b0, 1, &ls, &nt, le, ne, NULL);
         if (ok) { (*step)++; ok = pt_opt_step(c, r, *step, &gn, &clipped); }
         if (!ok) break;
         for (uint32_t b = b0; b < b1; b++) { const pt_sample *q = bs[b - b0];

@@ -27,6 +27,8 @@ bool pt_run_alloc(ds4_engine *e, const pt_cfg *c, pt_run *r) {
     const uint32_t cap = c->maxlen, K = c->rank, E = DS4_N_EMBD, HC = DS4_N_HC;
     const bool multi = c->layer_lo < DS4_N_LAYER - 1u;   /* 末层以外也训 ⇒ 逐层反传(core_ptrain_layer.c) */
     if (!v41_state_alloc(&r->st, cap, cap + 8u, 0)) return false;   /* logits 每个位置都要(答案位那几行算 KL) */
+    /* 训练态的 A/B 下面自己开, 不占插件缓存的引用: 占着, 轮末探针挂 (②, ckpt_eNN) 时缓存换不了组, 探针批态装不上插件 → 停车(10-22 实撞) */
+    if (!v41_amp_disown(&r->st)) { fprintf(stderr, "ds4: [ptrain] ② 带低秩放大器, 本版不接按秩拼接训练\n"); v41_state_free(&r->st); return false; }
     r->K = K;
     bool ok = true;
     const uint64_t nel = (uint64_t)K * E;
@@ -116,6 +118,14 @@ bool pt_loss_rows(const pt_cfg *c, pt_run *r, ds4_gpu_tensor *logits, uint32_t r
               ds4_gpu_bwd_kl_topk_tensor(*glog, r->loss, logits, row, m, V, r->tid, r->tp, r->trest, NULL, TK, scale) &&
               ds4_gpu_tensor_read(r->loss, 0, r->loss_h, (uint64_t)m * 4);
     if (ok) { double l = 0; for (uint32_t k = 0; k < m; k++) l += r->loss_h[k]; *loss += l; *ntok += m; }
+    r->dec_last = -1.0;
+    if (ok && r->dec_on) for (uint32_t k = 0; k < m; k++) {   /* 决策位读数(见 pt_run.dec_*): 第 k 行预测的目标 = 答案第 k 位 */
+        const int32_t y = s->sids[s->sa0 + k];
+        if (y != r->dec_ids[0] && y != r->dec_ids[1]) continue;
+        r->dec_kl += r->loss_h[k]; r->dec_n++;
+        r->dec_last = (r->dec_last < 0 ? 0.0 : r->dec_last) + r->loss_h[k];
+        for (uint32_t q = 0; q < TK; q++) if (s->top_id[(size_t)k * TK + q] == y) { r->dec_tp += s->top_p[(size_t)k * TK + q]; break; }
+    }
     return ok;
 }
 
@@ -131,6 +141,7 @@ bool pt_step_sample(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *
     const double q1 = pt_tick(c);
     ds4_gpu_tensor *glog = NULL;
     bool ok = pt_loss_rows(c, r, st->logits, r0, s, loss_sum, ntok, &glog);
+    r->dec_slot[0] = r->dec_last;
     const double q2 = pt_tick(c);
     double q3 = q2, q4 = q2;
     if (ok && grad && c->layer_lo < DS4_N_LAYER - 1u) {

@@ -30,6 +30,9 @@ typedef struct {
     char hold[1024];               /* 保持料 jsonl(可空, 空就打一行警告): 题不带 context, 答案 = 部署态自己答的, 教师 = 部署态自己 */
     char init[1024];               /* 非空 = 放大器 A/B 从这个 ③ 目录的 amp_Lnn.bin 读起(续训 / 在非零点做梯度检查); 空 = A=0、B 随机 */
     char evalf[1024];              /* eval=: 泛化留出 jsonl(料格式同 data), 整份不进训练; 空 = 没有泛化指标, 选轮退回同形式留出 */
+    char teacher_fp[1024];         /* teacher=fp:<表>: 教师 = 出厂原件的参考前向(v41_teacher.py --seqs --topk 出的 top-K 表, core_ptrain_fp.c), 每道题按整条教师序列
+                                    * 逐 id 对上才填, 对不上就停(不回退到部署态教师); 这时 one-hot 行也全改成向 FP 蒸馏。空 = 教师是部署态自己(老路逐位同) */
+    char dumpids[1024];            /* dumpids=<文件>: 装料后把每道题的教师序列(去重, 一行一串 id)写出去就退出 —— 拿去给 FP 参考前向打分 */
     uint32_t sample_n;             /* 步 2 每题采几份(0 = 不走步 2, 整趟与 10-10 版逐位同) */
     uint32_t expand;               /* expand=N(缺省 4): 装料时让部署态把每道训练题改写成 N 组同格式 jsonl 新问答一起训, 缓存 <data>.expandN.jsonl(0 = 关, 老路逐位同), core_ptrain_expand.c */
     uint32_t layer_lo, layer_hi;   /* 训练哪几层的放大器(含两端); 只训末层时出口反传是闭式的, 不用穿注意力 */
@@ -96,6 +99,9 @@ void pt_data_lcp(pt_data *d);   /* 每块的教师公共前缀(装料末尾算�
 uint32_t pt_chunk_of(pt_data *d, const char *ctx, int hold, int raw);
 bool pt_teacher(ds4_engine *e, const pt_cfg *c, pt_data *d);   /* 教师 top-K(块前缀快照; 结果缓存到 <料文件>.teacher.bin), core_ptrain_teacher.c */
 bool pt_teacher_fresh(ds4_engine *e, const pt_cfg *c, pt_data *d);   /* 同一趟教师前向, 不读不写缓存(步 2 的采样答案每轮都是新串) */
+/* core_ptrain_fp.c: FP 教师。dump = 每道题的教师序列去重写成一行一串 id(dumpids=); fp = 读 v41_teacher_seqs.py 的 top-K 表填全部样本(teacher=fp:) */
+bool pt_dump_ids(const pt_cfg *c, const pt_data *d);
+bool pt_teacher_fp(const pt_cfg *c, pt_data *d);
 void pt_state_reset(ds4_v41_state *st);   /* 状态回到"位置 0、空缓存"(缓冲不动): 一条新序列从头算 */
 
 /* 第二阶段逐层反传的缓冲(core_ptrain_layer.c): 一次只活一层的重算中间量 + 梯度。按 maxlen 行分一次, 每层复用。 */
@@ -148,6 +154,12 @@ typedef struct {
     ds4_gpu_tensor *tid, *tp, *trest, *loss;   /* 一个样本的教师表 / 逐行损失(设备) */
     ds4_gpu_tensor *gxn, *gx, *ghc, *gpre, *gy, *T, *gT;   /* 反传暂存(按 maxlen 行); ghc/gpre 在多层模式下 = 逐层往下传的 g_hc / g_pre_mix */
     float *loss_h;
+    /* 决策位读数(10-22, docs/think_close.md §4): dec_on 期间 pt_loss_rows 把目标是 dec_ids(EOS / </think>)的位单独累计 —— 这几位的 KL 与教师给它的 p。
+     * 为什么: 留出 KL 是逐位平权, 一道题几百位里决策位只有一位, 量化把它压 4~22 倍在总 KL 里看不见(10-17 的 ③ 留出 −46% 而生成纹丝不动) */
+    int dec_on; int32_t dec_ids[2]; double dec_kl, dec_tp; uint32_t dec_n;
+    /* 逐题决策位 KL(10-22 下午): dec_last = pt_loss_rows 刚算的那道题决策位 KL 和(没有决策位 = -1), dec_slot[i] = 包里第 i 题的(单题路放 [0]);
+     * pt_run_list 按题抄进 dec_each → heldout_eNN.tsv 第 5 列。为什么: 24 位的均值两趟差 0.433/0.329 而整体留出几乎同, 不看逐题分不清是尺的噪声还是真变化 */
+    double dec_last, dec_slot[PT_PACK_MAX];
     pt_layer_buf lb;                /* 多层模式(训练层不止末层)才分配 */
     double tm[11]; uint32_t tm_n, tm_steps;   /* prof 累计秒数(下标 PT_TM_*), 训练题数, 优化步数 */
     ds4_gpu_tensor *hcap; int32_t hcap_layer; int hcap_mid;   /* hc 边界检查: 反传经过第 hcap_layer 层时把该层入口(mid=1: 中段)梯度抄进 hcap */
@@ -185,7 +197,7 @@ bool pt_pack_alloc(const pt_cfg *c, pt_run *r);
 void pt_pack_free(pt_run *r);
 bool pt_pack_step(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *const *ss, uint32_t nb, int grad, double *loss_each, uint32_t *ntok_each);
 bool pt_run_list(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *const *ss, uint32_t n, int grad,
-                 double *loss_sum, uint32_t *ntok, double *loss_each, uint32_t *ntok_each);
+                 double *loss_sum, uint32_t *ntok, double *loss_each, uint32_t *ntok_each, double *dec_each);
 bool pt_pack_warm(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_data *d, uint32_t *rows);
 bool pt_pack_check(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_data *d);
 

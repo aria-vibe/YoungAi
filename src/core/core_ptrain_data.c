@@ -45,6 +45,11 @@ bool pt_cfg_load(pt_cfg *c, const char *path) {
         else if (!strcmp(k, "hold")) snprintf(c->hold, sizeof c->hold, "%s", v);
         else if (!strcmp(k, "init")) snprintf(c->init, sizeof c->init, "%s", v);
         else if (!strcmp(k, "eval")) snprintf(c->evalf, sizeof c->evalf, "%s", v);
+        else if (!strcmp(k, "teacher")) {   /* 只认 fp:<表>(core_ptrain_fp.c); 别的教师来源不存在, 写错直接停 */
+            if (strncmp(v, "fp:", 3) || !v[3]) { fprintf(stderr, "ds4: --ptrain teacher= 只认 fp:<top-K 表>, 给的是 %s\n", v); free(b); return false; }
+            snprintf(c->teacher_fp, sizeof c->teacher_fp, "%s", v + 3);
+        }
+        else if (!strcmp(k, "dumpids")) snprintf(c->dumpids, sizeof c->dumpids, "%s", v);
         else if (!strcmp(k, "sample_n")) c->sample_n = (uint32_t)atoi(v);
         else if (!strcmp(k, "expand")) c->expand = (uint32_t)atoi(v);
         else if (!strcmp(k, "layers")) { unsigned a = 0, z = 0; if (sscanf(v, "%u-%u", &a, &z) == 2) { c->layer_lo = a; c->layer_hi = z; } else c->layer_lo = c->layer_hi = (uint32_t)atoi(v); }
@@ -96,6 +101,7 @@ bool pt_cfg_load(pt_cfg *c, const char *path) {
     if (c->layer_hi != DS4_N_LAYER - 1u) { fprintf(stderr, "ds4: --ptrain layers 必须到末层 L%u(给的是 %u-%u)\n", DS4_N_LAYER - 1u, c->layer_lo, c->layer_hi); return false; }
     if (c->evalf[0] && !strcmp(c->evalf, c->data)) { fprintf(stderr, "ds4: --ptrain eval= 与 data= 是同一份料: 泛化留出必须是没进训练的另一份\n"); return false; }
     if (!c->rank || c->topk < 1 || c->topk > 128 || !c->batch || c->maxlen < 16) { fprintf(stderr, "ds4: --ptrain rank/topk(1..128)/batch/maxlen 不合法\n"); return false; }
+    if (c->teacher_fp[0] && c->sample_n) { fprintf(stderr, "ds4: --ptrain teacher=fp: 与 sample_n 不能同开: 步 2 的教师是部署态自己当场打分, 两种教师不能混一趟\n"); return false; }
     return true;
 }
 
@@ -136,6 +142,7 @@ static int pt_is_eval(const char *q) {
 /* one-hot 的表(目标 = 序列里答案位的 token 自己, 余量 0): 同一个 KL 核算出来就是 −log p(目标), 梯度 = 交叉熵的; 不进教师缓存 */
 static void pt_fill_onehot(const pt_cfg *c, pt_sample *s) {
     const uint32_t K = c->topk, m = s->m;
+    if (c->teacher_fp[0]) return;   /* FP 教师在: 表留空等 pt_teacher_fp 填, 这题不是 one-hot(sft 保持 0) */
     s->sft = 1;
     s->top_id = xmalloc((size_t)m * K * 4); s->top_p = xmalloc((size_t)m * K * 4); s->top_rest = xmalloc((size_t)m * 4);
     for (uint32_t i = 0; i < m; i++) {
@@ -150,7 +157,9 @@ static bool pt_add_text(ds4_engine *e, const pt_cfg *c, pt_data *d, int src, con
     const uint32_t ci = pt_chunk_of(d, "", 0, 1);
     const int eval = src == 2 ? 2 : (src == 0 && c->evalf[0]) ? 0 : pt_is_eval(txt);   /* 给了 eval= 时料不留出(同 pt_add_sample) */
     ds4_tokens at = {0};
-    ds4_tokenize_text(e, txt, &at);
+    /* 认特殊 token 的切分(10-22): 原文段里的 <think> / </think> / <｜end▁of▁sentence｜> 要成为它们的 id, 思考轨迹尾段才能把 </think> 这个决策位放进 KL;
+     * 纯 BPE 会把 "</think>" 切成几个普通片。不含这些字串的原文两条路逐 token 同(只有一个 span, 同一个 BPE) */
+    ds4_tokenize_rendered_chat(e, txt, &at);
     ds4_tokens_push(&at, ds4_token_eos(e));
     const uint32_t W = c->maxlen - 1u;
     for (uint32_t off = 0; off < (uint32_t)at.len; off += W) {
