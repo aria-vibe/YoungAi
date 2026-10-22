@@ -72,12 +72,27 @@ const char *g_ds4_v41_amp_dir = NULL;
 #ifndef DS4_NO_GPU
 const ds4_model *g_ds4_v41_model = NULL;
 #endif
-void ds4_engine_v41_set_amp_dir(const char *dir) { g_ds4_v41_amp_dir = (dir && dir[0]) ? dir : NULL; }
+/* ★设目录 = 丢插件缓存★(2026-10-21 实撞, 10-22 回退后单独补回): 10-17 的进程级缓存按【目录名】复用, 而序贯解算器每遍都把
+ * 同一个目录再设一次 —— 目录名没变, 内容多了一层。缓存命中 ⇒ 新解的层一次都没挂回去, 10-17 之后解的五个 1017 侧车每层都是在
+ * "裸底座 + 第 0 层路由偏置"上独立解的(解算日志里只有一行"1 层挂上路由偏置", 09-26 的老日志是 68 行逐层递增), 部署时却 40 层一起挂。
+ * 缓存只该在两次设目录之间复用(服务里每条请求都不设目录, 热切换走 switch_plugins 也丢), 所以丢在这里是对的: 引擎打开时这里只调一次。
+ * 有状态还活着时 v41_amp_cache_drop 会拒绝并喊话, 不会把正在用的张量抽走。 */
+void ds4_engine_v41_set_amp_dir(const char *dir) {
+    g_ds4_v41_amp_dir = (dir && dir[0]) ? dir : NULL;
+#ifndef DS4_NO_GPU
+    v41_amp_cache_drop();
+#endif
+}
 const char *g_ds4_v41_pt_dir = NULL;
 /* 三文件部署第三件: 单独挂 ③ 也允许(用户要求"独立使用量化文件也可以"的对称面)。"单挂"的提示不在这里打:
  * 命令行解析时 ② 还没设(--zchain 要到打开引擎才转进 g_ds4_v41_amp_dir), 在这里查永远报"没挂反修件"(10-02 实撞,
  * ②③ 都挂上了还报)。改在插件真正装载时查, 见 core_v41_state.c v41_state_plugins。 */
-void ds4_engine_v41_set_posttrain_dir(const char *dir) { g_ds4_v41_pt_dir = (dir && dir[0]) ? dir : NULL; }
+void ds4_engine_v41_set_posttrain_dir(const char *dir) {
+    g_ds4_v41_pt_dir = (dir && dir[0]) ? dir : NULL;
+#ifndef DS4_NO_GPU
+    v41_amp_cache_drop();   /* 同上: 目录换了内容必须重读 */
+#endif
+}
 const char *ds4_engine_v41_amp_dir(void) { return g_ds4_v41_amp_dir; }
 const char *ds4_engine_v41_posttrain_dir(void) { return g_ds4_v41_pt_dir; }
 float g_ds4_v41_amp_scale = 1.0f;
