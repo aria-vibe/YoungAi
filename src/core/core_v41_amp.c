@@ -153,6 +153,18 @@ static bool pc_attach(ds4_v41_state *st) {
     return st->ampT != NULL;
 }
 
+/* 训练态(core_ptrain_bwd.c pt_run_alloc)的 A/B/ampT 是它自己开的, 不该占插件缓存的引用。占着会怎样(10-22 实撞, 10-17 缓存上线后第一次训 ③):
+ * 轮末探针要挂 (②, ckpt_eNN), 探针批态装插件时缓存换不了组(refs=1 拒丢) → "插件挂不上, 停车", 训练在轮 1 末退出; 退出时 v41_amp_free 又把
+ * 训练态自己的张量当共享的漏放。只在状态没拿缓存张量时允许(② 没有低秩件 —— 训练器本来就不接按秩拼接), 拿着就返回 false 让调用方停车:
+ * 认领了缓存的张量, 释放时会把别的状态还在用的显存 free 掉。 */
+bool v41_amp_disown(ds4_v41_state *st) {
+    if (!st->amp_shared) return true;
+    for (uint32_t il = 0; il < DS4_MAX_LAYER; il++) if (st->ampA[il] || st->ampB[il]) return false;
+    st->amp_shared = 0;
+    if (g_pc.refs > 0) g_pc.refs--;
+    return true;
+}
+
 /* 裸底座: 两张进程级表全卸 + 缓存丢掉。★gr 也要卸★: 以前只卸 rb, 从"挂 ②③"切到"不挂"时上一套的增益覆盖还留在设备上, 裸底座不裸 */
 void v41_plugins_clear_all(void) {
     (void)v41_rb_load(NULL);

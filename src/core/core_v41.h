@@ -298,6 +298,7 @@ bool v41_amp_load(ds4_v41_state *st, const char *dir, const char *pt_dir);   /* 
 void v41_plugins_clear_all(void);   /* 全卸路由偏置 + 增益覆盖(设备表是进程级的)并丢插件缓存; 裸底座状态开张前调 */
 void v41_amp_cache_drop(void);      /* 丢进程级插件缓存(没有状态在用时才真丢): 切换插件前调, 下一个状态从盘重读 */
 void v41_amp_free(ds4_v41_state *st);
+bool v41_amp_disown(ds4_v41_state *st);   /* 状态自己拥有 A/B(训练态): 退掉插件缓存的引用; ② 带低秩件时拒(false), 调用方停车 */
 int v41_amp_hook(ds4_v41_state *st, uint32_t il);        /* 钩子回调(挂了才动): 同步 → x/y/sel/rw 下主机 → 回调; 0 继续 / 1 提前结束(置 stop_early) / <0 失败 */
 bool v41_amp_apply(ds4_v41_state *st, uint32_t il);      /* y += x·(B·A) → bf16(挂了该层才动) */
 ds4_gpu_tensor *v41_alloc(uint64_t bytes, bool *ok);   /* 小工具: 分配失败只置 ok=false, 调用方一路攒到最后再判 */
