@@ -339,7 +339,7 @@ activations don't look like the fitting rows never fires. Every published method
 weights (knowledge modules, prompt distillation, cartridges, self-distillation) trains by gradient with the
 teacher's distribution as the target; that is what this version does.
 
-**Evidence.** All post-training numbers in this section were measured on the previous base (before the
+**Evidence (training on your own data).** These numbers were measured on the previous base (before the
 1017 release) and have not been rerun on the current one. One DGX Spark, a real file of 1,326 questions
 generated from 20 trading-review documents (plus the 63 hold questions), 3 epochs, layers 0–39, learning
 rate 2e-4, 72 minutes end to end:
@@ -396,6 +396,64 @@ The chat page sends no temperature and samples with the model card's recipe; the
 "在呢主人" about 60% of the time, and close variants like "在呢，主人～" otherwise. Asked as "小泱你好", the
 picked epoch still gives the old greeting. Epoch 2 did answer it correctly, but the pick looks at the summed loss
 of both held-out questions, the longer story question dominates that sum, and epoch 3 won.
+
+**The one published with the base: distilled from the original weights.** Everything above is about training ③ on your
+own data. `posttrain-code-20261022/` in the Hugging Face repository, published with the 1017 base, is a different use:
+the teacher is not the deployed model but the 510 GB original itself, and the goal is to reproduce the original
+position by position, not to teach anything new.
+
+- **How it is trained.** Same structure as above: a rank-64 `x·B·A` on the output of every MoE layer, layers 0–39,
+  learning rate 2e-4, 2 epochs, stacked on the code sidecar. The teacher's distribution comes from one forward pass of
+  the official reference implementation over the original weights (streamed from disk layer by layer, keeping the top
+  64 and the remaining mass at each position). The loss is the KL from the original's distribution to the student's at
+  every position; there are no hard labels.
+- **Data.** 612 lines. 330 whole public documents (120 code, 90 law, 90 medicine, 30 science, 300–1,000 tokens each,
+  all with their real ending so that EOS, the "stop" decision, is in training); 192 reasoning passages the original
+  wrote on the official API, taking the tail of the reasoning, the close and the answer (100 coding questions, 98
+  general and decision questions); 90 opening stretches of the same reasoning with no close, as "not time to stop
+  yet" samples; plus the 63 hold questions. The 120 code windows used for scoring were checked against all training
+  data 24 tokens at a time: zero overlap. The same check run against the sidecar's fitting half does find a whole
+  window, so the check itself works.
+- **Time.** One DGX Spark. The teacher's distribution is computed 96 sequences at a time, each batch streaming the
+  476 GB original from disk once: about 24 minutes per batch with whole-layer read-ahead (37–42 before), 8 batches for
+  675 sequences. Training takes 67 minutes.
+
+Code scoring slice (15,360 tokens); the three rows are the same ruler, measured in the same period:
+
+| | Same top-1 | Σmin | Mean KL | PPL ratio |
+|---|---:|---:|---:|---:|
+| ① base only | 78.40% | not measured | 0.446 | 1.394 |
+| ① + code sidecar | 81.96% | 0.790 | 0.318 | 1.243 |
+| **① + code sidecar + ③** | **84.77%** | **0.836** | **0.230** | **1.106** |
+
+WikiText-2 (512 tokens):
+
+| | Same top-1 | Σmin | Mean KL | PPL ratio |
+|---|---:|---:|---:|---:|
+| ① base only | 76.76% | 0.725 | 0.803 | 1.685 |
+| ① + code sidecar | 79.69% | 0.760 | 0.673 | 1.473 |
+| **① + code sidecar + ③** | **82.42%** | **0.789** | **0.574** | **1.227** |
+
+Quantization's bias on "decision" tokens, read on three real sequences that are not in training (original = the
+reference forward over the original weights):
+
+| Reading | Original | ① + code sidecar | ① + code sidecar + ③ |
+|---|---:|---:|---:|
+| In two real reasoning runs, mean probability of `?` where the original did not pick `?` | 2.84e-3 / 1.16e-3 | 5.89e-3 / 2.37e-3 | 3.30e-3 / 1.50e-3 |
+| Probability of EOS at the real end of 25 whole documents (geometric mean) | 0.063 | 0.038 | 0.094 |
+| Summed probability of `</think>` over an 11k-token reasoning run (the original closes it) | 0.82 | 0.28 | 1.30 |
+| The same over a 32k-token run (the original itself does not close it) | 0.049 | 0.034 | 0.100 |
+
+How to read it: the extra question marks are essentially back at the original's level; "stop" goes from mostly
+suppressed to somewhat more than the original, which means long reasoning closes earlier than the original's.
+
+**What is not settled yet.** The chance of closing long reasoning jumps between training epochs: four checkpoints
+trained the same way read 0.84–2.05× the original on the run that does close. Training and held-out data stop at
+1,000 tokens while these runs generate 10k–30k tokens, so behaviour there is extrapolated; and two runs cannot show
+"matches the original". Next: train on longer data and judge on more real long runs.
+
+**Why there is more room.** 612 lines, each under 1,000 tokens, rank 64; held-out loss kept falling over both epochs
+(0.333 → 0.206 → 0.196) without reaching a plateau.
 
 ### 4.4 The engine
 
@@ -585,6 +643,9 @@ does not cost general capability. The bare-base row reads identically in every r
 
 At 512 positions one position is 0.2 pp: these rows read as "no regression", not as a gain.
 
+Adding the post-training file published with the base: code 84.77%, WikiText-2 82.42%. The three-row comparison with
+the same ruler, measured in the same period, is at the end of §4.3.
+
 **Against the previous base.** The same recipe on the previous release of the weights gave per-domain
 gains of +2.84 (finance), +3.65 (code), +3.46 (law), +3.74 (medicine) and +3.28 pp (science); this base
 gives +2.58, +3.67, +3.25, +3.75 and +3.37. The bare base reads lower on WikiText-2 (76.8% vs 78.5%), but
@@ -665,6 +726,7 @@ what the installer does, for doing it yourself, plus the details of the server a
 | `DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-law_fit_n15360-engine/` | ② law sidecar: gains on 40 layers, router bias on 25 layers |
 | `DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-med_fit_n15360-engine/` | ② medicine sidecar: gains on 40 layers, router bias on 31 layers |
 | `DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-sci_fit_n15360-engine/` | ② science sidecar: gains on 40 layers, router bias on 30 layers |
+| `posttrain-code-20261022/` | ③ post-training file, 101 MB: `amp_L00.bin` … `amp_L39.bin` (rank 64 per layer, f32) + `base.fnv` (the code sidecar's fingerprint); pairs with the code sidecar only |
 | `bin/ds4`, `bin/ds4-server` | engine binaries, built on the Spark with `make cuda-spark` from the source at [github.com/fodelf/YoungAi](https://github.com/fodelf/YoungAi) (engine, CUDA kernels, quantization and sidecar toolchain) |
 | `LICENSE`, `LICENSE-DeepSeek` | MIT notices for the engine (incl. GGML) and for the model weights |
 
@@ -713,9 +775,10 @@ card's evaluation recipe: `temperature` 1.0, `top_p` 0.95, no `min_p` — sample
 For byte-reproducible output send
 `"temperature": 0` explicitly.
 Requests default to **non-thinking** mode. Turn thinking on per request with `"reasoning_effort": "high"` (or
-`"max"`), `"thinking": {"type": "enabled"}`, `"think": true`, or `"model": "deepseek-reasoner"`. The quantized
-weights under-weight the "stop" decisions (`</think>`, EOS) relative to the FP model, so a long thinking
-segment can fail to close; non-thinking is the safe default until that is restored on the weight side.
+`"max"`), `"thinking": {"type": "enabled"}`, `"think": true`, or `"model": "deepseek-reasoner"`. With a sidecar
+alone, the quantized weights under-weight the "stop" decisions (`</think>`, EOS) relative to the original, so a long
+thinking segment can fail to close; with the post-training file it is the other way round and closes a little early
+(§4.3). Non-thinking stays the default.
 Don't make greedy the chat default: on questions with very few valid answers it can loop verbatim inside
 the thinking section and never stop (e.g. "list 5 Chinese idioms ending in 五").
 
@@ -745,19 +808,20 @@ Started from the source tree they are there; an install made by `install.sh` has
 # plus --no-dspark for plain greedy (speed baselines); drop --zchain to run the bare base
 ```
 
-**No post-training file is published for the 1017 base.** A ③ you train yourself (*Train* tab, or
-`./ds4 --ptrain`) loads like this:
+**The post-training file.** The one published with the base (§4.3) pairs with the code sidecar:
 
 ```sh
-./bin/ds4-server … --zchain <the sidecar it was trained on> --posttrain <your ③ directory>
+./bin/ds4-server … --zchain DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine \
+    --posttrain posttrain-code-20261022
 ```
 
-`base.fnv` inside a ③ is the fingerprint of the sidecar it was trained against, and the engine refuses any
-other pairing. That is why the old experiment `posttrain-experimental-20260924/` (last-layer gains from the
-earlier closed-form solve, §4.3, on one market-outlook request) stays in the previous repository,
-[wenzhouwu/YoungAi-DeepSeek-V4.1-Flash](https://huggingface.co/wenzhouwu/YoungAi-DeepSeek-V4.1-Flash): it was
-trained against the previous base's finance sidecar and does not stack on any 1017 sidecar — the server stops
-at load with a fingerprint mismatch. `install.sh --posttrain` stops with an error for the same reason.
+For a ③ you train yourself (*Train* tab, or `./ds4 --ptrain`), use your directory and the sidecar it was trained on.
+`base.fnv` inside a ③ is the fingerprint of the sidecar it was trained against, and the engine refuses any other
+pairing, so `install.sh --posttrain` only accepts the code sidecar and stops early on any other `--domain`. The old
+experiment `posttrain-experimental-20260924/` (last-layer gains from the earlier closed-form solve, §4.3, on one
+market-outlook request) stays in the previous repository,
+[wenzhouwu/YoungAi-DeepSeek-V4.1-Flash](https://huggingface.co/wenzhouwu/YoungAi-DeepSeek-V4.1-Flash): it was trained
+against the previous base's finance sidecar and does not stack on any 1017 sidecar.
 
 ### Building and running on a Mac
 
@@ -806,6 +870,10 @@ binary copied elsewhere cannot find them.
   how that price gets paid); many near-identical facts interfere, which expansion and keeping every line in
   training contain but do not cure. One real business file so far (§4.3); not yet scored on end-to-end
   business outcomes.
+- **The post-training file published with the base** has been judged on held-out text and two long reasoning runs
+  only. Two runs cannot show "matches the original", and the chance of closing jumps 2× between checkpoints (§4.3).
+  The Studio's *Post-train* switch only lists ③ files trained on this machine; the one from Hugging Face is loaded
+  with `--posttrain`.
 - **Five domains.** Finance, code, law, medicine and science (§5.1), all five sidecars in the Hugging Face repository.
   All are judged teacher-forced on held-out text; none has been evaluated on end-to-end tasks (agentic coding, legal or clinical question answering).
 - **We test end to end on one machine type.** Every number on this page is from a DGX Spark, except the Mac

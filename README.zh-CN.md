@@ -25,14 +25,34 @@ DGX Spark 或 Apple Silicon 的 Mac，1M 上下文。开源，MIT 协议；纯 C
 
 ## 模型
 
-| | 数 |
-|---|---|
-| 体积 | 官方 510 GB → 基座 113.6 GB（每 8 个权重一起向量量化，约 1.6 bit/权重，不用训练数据） |
-| 上下文 | 1M token，满载 KV 缓存 0.89 GB |
-| 领域侧车 | 金融 / 编程 / 法律 / 医疗 / 科研，各约 40 MB，聊天框下拉切换，不到 1 秒 |
+113.6 GB 的基座，加一个 41 MB 的侧车、一个 101 MB 的后训练文件，下一个字和 510 GB 官方原件一致的比例
+（Same top）到了 **84.8%**：
 
-挂侧车后，下一个字和原版全精度模型一致的比例提高 2.6–3.8 个百分点（例：编程 78.3% → 82.0%），
-通用英文也跟着涨（76.8% → 77.9–79.7%）。测法和完整结果表见[技术细节第五章](docs/TECHNICAL.zh-CN.md#五实测结果)。
+| | 体积 | 编程 | 通用英文 |
+|---|---:|---:|---:|
+| ① 基座 | 113.6 GB | 78.4% | 76.8% |
+| ① + ② 编程侧车 | + 41 MB | 82.0% | 79.7% |
+| **① + ② + ③ 后训练** | **+ 101 MB** | **84.8%** | **82.4%** |
+
+"一致"指同一段文字上，我们的模型和原件挑出的最可能的下一个 token 相同。编程用的是 30 种语言、15,360 个 token 的
+留出代码，通用英文是 WikiText-2。平均 KL 同步降下来：编程 0.446 → 0.318 → 0.230，通用英文 0.803 → 0.673 → 0.574。
+
+**113.6 GB 能做到这个数，靠三件事：**
+
+1. **多模态按需加载：用时装，用完卸。** 视觉塔 0.97 GB（原件 BF16）是单独一个文件，启动时只记下它在盘上的位置。
+   来图时才读进显存，跑完就释放，文本请求一个字节不碰它。128 GB 内存因此几乎全给了文本主干：113.6 GB 的基座，
+   每 8 个权重一起向量量化，约 1.6 bit/权重，不用训练数据。
+2. **侧车 41 MB。** 给每个路由专家的每一行权重乘一个增益、给路由器加一点偏置，对着出厂原件解出来。
+   金融 / 编程 / 法律 / 医疗 / 科研各一份，聊天框下拉切换，不到 1 秒。
+3. **后训练 101 MB。** 每层 MoE 的输出加一个秩 64 的修正，老师就是 510 GB 的出厂原件，学它逐位的下一个 token 分布。
+   料是 330 篇公开文档整篇（代码、法律、医疗、科研）和 282 段官方 API 采的思考过程，一台 Spark 训练 67 分钟；
+   判决用的代码和训练料一个 24 token 的片段都不重合。通用英文跟着涨 2.7 个点，说明它修的是量化本身的误差，不是背题。
+   量化带来的两个毛病也一起动了：决策题里多出来的问号从原件的 2 倍降到 1.2–1.3 倍；思考该收口时不收口，现在修过了一点头（见[局限](#局限)）。
+
+后训练还有空间。这一份只用了约 600 条、每条不到 1,000 token 的料，料的量、长度和秩都还没往上加。
+
+上下文 1M token，满载 KV 缓存 0.89 GB。测法和完整结果表见[技术细节第五章](docs/TECHNICAL.zh-CN.md#五实测结果)，
+后训练怎么做见[技术细节 4.3](docs/TECHNICAL.zh-CN.md#43-后训练文件)。
 
 ### 速度
 
@@ -137,8 +157,11 @@ make                                                            # Metal 版
 bash gguf-tools/scripts/hf_install.sh download --dir ~/youngai   # 约 317 GB，断点续传
 M=~/youngai/model/DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative
 ./ds4-server --metal -m $M.gguf --zchain $M-grrb-code_fit_n15360-engine \
+    --posttrain ~/youngai/model/posttrain-code-20261022 \
     --engram-dir ~/youngai/deepseek-engram --mem-budget-mb 110000 --port 8000   # :8000 上是 OpenAI / Anthropic 兼容 API
 ```
+
+`--posttrain` 那一行是后训练文件，它配的是编程侧车，删掉这一行就是只挂侧车。
 
 服务端报某段模型区间 *not covered by mapped model views*，说明代码是支持 Mac 之前的版本：拉最新代码重新 `make`。
 
@@ -161,6 +184,7 @@ M=~/youngai/model/DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative
 ```sh
 curl -fsSLO https://huggingface.co/wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017/resolve/main/install.sh
 bash install.sh                      # 默认编程侧车，--domain law 换领域；--endpoint https://hf-mirror.com 走镜像
+bash install.sh --posttrain          # 再挂后训练文件（配编程侧车）
 ```
 
 ## 局限
@@ -168,7 +192,10 @@ bash install.sh                      # 默认编程侧车，--domain law 换领�
 - 我们在 DGX Spark 上做端到端验证。Mac 整模型的数来自贡献者的 M5 Max；我们手上的 Mac 只有 16 GB，只跑 GPU 核测试。
 - 一台机器一份模型：后台任务和你聊天是排队跑，不是并行。
 - 要登录或有验证码的网站，助理打不开；它会说哪些没打开，不会去猜。
-- 侧车只在留出文本上评过分，没在端到端任务上评过。
+- 侧车和后训练文件只在留出文本上评过分，没在端到端任务上评过。
+- 后训练文件让长思考收口得比原件早：在两条 1 万–3 万 token 的真实长思考上，收口的概率是原件的 1.6–2 倍，难题可能少想几步。
+  不想要就别挂（`install.sh` 不带 `--posttrain`，或去掉 `ds4-server` 的 `--posttrain`）。
+- 工作台的"后训练"开关只列本机训出来的后训练文件，从 Hugging Face 下的那一份要用 `install.sh --posttrain` 或 `ds4-server --posttrain` 挂。
 
 ## 危险模式（实验性）· 免责声明
 
