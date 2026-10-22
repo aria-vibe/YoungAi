@@ -313,9 +313,9 @@ bool accelerator_cache_model_tensors(ds4_backend backend, const ds4_model *m) {
                 (double)in_dev / 1073741824.0, (double)mapped / 1073741824.0);
         if (mapped > 0)
             fprintf(stderr,
-                    "ds4: ★%.2f GiB 权重没进设备副本, 走 cudaHostRegister 映射 —— 若解码路会读它, 每步要被页回收\n"
-                    "     拖出几毫秒到几十毫秒的长尾(single.md §2.1)。被挤出的是最后装的那批(装载优先级:\n"
-                    "     主干骨架 > 主干专家 blob > DSpark 三塔), 所以三塔被挤出时解码不受影响(它一次都不读)。★\n",
+                    "ds4: ★%.2f GiB 权重没进设备副本。缓存封顶模式(--weight-cache-mb)下这些专家 blob 换层时由 CPU 拷进锁页暂存;\n"
+                    "     否则走 cudaHostRegister 映射 —— 若解码路会读它, 每步要被页回收, 拖出几毫秒到几十毫秒的长尾(single.md §2.1)。\n"
+                    "     被挤出的是最后装的那批(装载优先级: 主干骨架 > 主干专家 blob > DSpark 三塔), 三塔被挤出时解码不受影响(它一次都不读)。★\n",
                     (double)mapped / 1073741824.0);
     }
     return true;

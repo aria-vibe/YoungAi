@@ -156,12 +156,58 @@ int ds4_gpu_v41_engram_gate_tensor(ds4_gpu_tensor *hc, const ds4_gpu_tensor *kv,
 }
 
 /* routed MoE: 走现役 VQ prefill GEMM 路(按专家排序、逐专家 dequant f16、cuBLAS、定序 reduce)。
- * ★blob 的设备指针自己注册、用完即注销★(2026-09-12): 40 层 blob 共 98 GiB, 走 cuda_model_range_ptr 的
- * 懒注册会一层一层把整个文件钉死在内存(pinned 不可回收) —— 单机 121 GB 装不下 103 GiB 模型 + 运行时。
- * 这里每层: cudaHostRegister(该层 2.6 GB) → 算 → 同步 → 注销 → madvise(DONTNEED) 让页缓存可回收。
- * 代价是每趟前向从盘重读专家(对拍期可接受; 常驻/流式策略是 P4 的事)。
- * down 槽在 DQVL v2 里必在(which=2), 冷 w2 回退不触发。 */
-static struct { uintptr_t reg; uint64_t bytes; void *dev; int valid; } g_v41_stream_reg;   /* 流式路当前钉住的那一层 */
+ * down 槽在 DQVL v2 里必在(which=2), 冷 w2 回退不触发。
+ *
+ * ★缓存封顶模式下装不下的层: 换层时 CPU 把整层 blob 拷进锁页暂存, GPU 只读暂存★(2026-10-22, 替换 09-12 的"逐层 cudaHostRegister 文件映射")。
+ * 为什么: GB10 上对文件映射 cudaHostRegister 并不钉页 —— GPU 读它走 nvidia_uvm 缺页 → filemap_fault → 现读 NVMe(10-22 sysrq-w 栈实证)。
+ * 换页压力下这条缺页路同时报 NVRM NV_ERR_NO_MEMORY(_memdescAllocInternal), GPU 拿到垃圾: 解算/判决(--weight-cache-mb 88000,
+ * 21.42 GiB 走这条路)的慢趟读数漂 1e-5~1e-4, 一趟端到端前向整块尾部 logits 成了 NaN; 快趟(页都在缓存里)逐位同。09-12 尾页脏读同根。
+ * 怎么做: 暂存 = cudaHostAlloc(Mapped) 锁页内存, GPU 读法与旧路一样(主机映射内存), 只是这块内存不可换出、不经缺页;
+ * CPU 从 mmap 多线程 memcpy 进去 —— CPU 缺页是内核的普通读页路, 慢了也不会出错。块内偏移保持与旧路相同(暂存基址 + 页内偏移),
+ * 核看到的地址对齐与旧路一致(对齐只影响速度, 见 cuda_vq_align.inc.cu)。
+ * 代价: 每块 2048 token 都要穿过全部层 ⇒ 每趟前向每个流式层拷 n块 次; 多占一层大小的锁页内存(~2.6 GB, 只在封顶模式下分配, 服务端整模型常驻不走这里)。
+ * 出错会怎样: 覆盖暂存前不同步 = 侧流 lane 还在读上一层就被改写, 出假权重不报错; 分配失败直接返回 0(前向失败), 不退回旧的映射路。 */
+static struct { uintptr_t reg; uint64_t bytes; uint8_t *host; void *dev; uint64_t cap; int valid; } g_v41_stage;   /* 流式暂存当前装着的那一层 */
+typedef struct { uint8_t *dst; const uint8_t *src; size_t n; } v41_stage_job;
+static void *v41_stage_copy(void *a) { v41_stage_job *j = (v41_stage_job *)a; memcpy(j->dst, j->src, j->n); return NULL; }
+/* [reg, reg+bytes) 页对齐的整层范围拷进暂存; 成功返回 1。线程数取在线核数的一半(内存带宽先饱和, 另一半留给引擎自己的线程)。 */
+static int v41_stage_fill(uintptr_t reg, uint64_t bytes, uint32_t layer) {
+    (void)cudaDeviceSynchronize();   /* 侧流 lane 可能还在读暂存里的上一层; 覆盖前必须全部落地 */
+    g_v41_stage.valid = 0;
+    if (g_v41_stage.cap < bytes) {
+        if (g_v41_stage.host) (void)cudaFreeHost(g_v41_stage.host);
+        g_v41_stage.host = NULL; g_v41_stage.dev = NULL; g_v41_stage.cap = 0;
+        void *h = NULL, *d = NULL;
+        if (cudaHostAlloc(&h, (size_t)bytes, cudaHostAllocMapped) != cudaSuccess) {
+            (void)cudaGetLastError();
+            fprintf(stderr, "ds4: [v41] L%u 流式暂存 cudaHostAlloc %.2f GB 失败\n", layer, (double)bytes / 1e9);
+            return 0;
+        }
+        if (cudaHostGetDevicePointer(&d, h, 0) != cudaSuccess || !d) {
+            (void)cudaGetLastError(); (void)cudaFreeHost(h);
+            fprintf(stderr, "ds4: [v41] L%u 流式暂存设备指针失败\n", layer);
+            return 0;
+        }
+        g_v41_stage.host = (uint8_t *)h; g_v41_stage.dev = d; g_v41_stage.cap = bytes;
+        fprintf(stderr, "ds4: [v41] 流式层改走锁页暂存 %.2f GB: 换层时 CPU 拷整层 blob, GPU 不再读文件页\n", (double)bytes / 1e9);
+    }
+    (void)madvise((void *)reg, (size_t)bytes, MADV_WILLNEED);   /* 先发整层预读, 下面的 memcpy 少等盘 */
+    const long np = sysconf(_SC_NPROCESSORS_ONLN);
+    int nt = np > 1 ? (int)(np / 2) : 1;
+    if (nt > 64) nt = 64;
+    v41_stage_job jobs[64]; pthread_t th[64]; int started[64];
+    const uint64_t per = ((bytes / (uint64_t)nt) + 4095u) & ~(uint64_t)4095u;
+    for (int t = 0; t < nt; t++) {
+        const uint64_t a = (uint64_t)t * per, b = a + per < bytes ? a + per : bytes;
+        jobs[t].dst = g_v41_stage.host + (a < bytes ? a : bytes); jobs[t].src = (const uint8_t *)reg + (a < bytes ? a : bytes);
+        jobs[t].n = a < bytes ? (size_t)(b - a) : 0;
+        started[t] = jobs[t].n && pthread_create(&th[t], NULL, v41_stage_copy, &jobs[t]) == 0;
+        if (jobs[t].n && !started[t]) v41_stage_copy(&jobs[t]);
+    }
+    for (int t = 0; t < nt; t++) if (started[t]) pthread_join(th[t], NULL);
+    g_v41_stage.reg = reg; g_v41_stage.bytes = bytes; g_v41_stage.valid = 1;
+    return 1;
+}
 int ds4_gpu_v41_routed_moe_tensor(ds4_gpu_tensor *out, const void *model_map, uint64_t model_size,
                                   uint64_t blob_offset, uint64_t blob_bytes,
                                   uint32_t in_dim, uint32_t mid_dim, uint32_t out_dim,
@@ -210,29 +256,12 @@ int ds4_gpu_v41_routed_moe_tensor(ds4_gpu_tensor *out, const void *model_map, ui
     const uintptr_t reg = host & ~(uintptr_t)(page - 1u);
     const uint64_t delta = (uint64_t)(host - reg);
     const uint64_t reg_bytes = (delta + blob_bytes + page - 1u) & ~(page - 1u);
-    /* 登记只在换层时做(2026-09-20 封顶模式): 8192 token 按 512 分块 ⇒ 同一层一趟被叫 16 次, 每次注册/注销 2.6 GB
-     * 光页表就是秒级; 只钉住"当前这一层", 换层才注销上一层。注销后不再 madvise(DONTNEED): 那些页只是普通页缓存,
-     * 内核按压力回收, 留着 = 下一趟不必从 NVMe 重读(可用内存账里它们本来就算 available)。 */
-    if (!g_v41_stream_reg.valid || g_v41_stream_reg.reg != reg || g_v41_stream_reg.bytes != reg_bytes) {
-        if (g_v41_stream_reg.valid) {
-            (void)cudaDeviceSynchronize();      /* 侧流 lane 可能还在读上一层 blob; 注销前必须全部落地 */
-            (void)cudaHostUnregister((void *)g_v41_stream_reg.reg);
-            g_v41_stream_reg.valid = 0;
-        }
-        void *dev = NULL;
-        if (cudaHostRegister((void *)reg, (size_t)reg_bytes, cudaHostRegisterMapped) != cudaSuccess) {
-            (void)cudaGetLastError();
-            fprintf(stderr, "ds4: [v41] L%u blob cudaHostRegister 失败 (%.2f GB)\n", layer, (double)reg_bytes / 1e9);
-            return 0;
-        }
-        if (cudaHostGetDevicePointer(&dev, (void *)reg, 0) != cudaSuccess || !dev) {
-            (void)cudaGetLastError(); (void)cudaHostUnregister((void *)reg);
-            fprintf(stderr, "ds4: [v41] L%u blob 设备指针失败\n", layer);
-            return 0;
-        }
-        g_v41_stream_reg.reg = reg; g_v41_stream_reg.bytes = reg_bytes; g_v41_stream_reg.dev = dev; g_v41_stream_reg.valid = 1;
+    /* 只在换层时拷(同一层一趟被叫多次: 一块 2048 token 的 MoE 按小批连调); 拷进暂存后 mmap 那份只是普通页缓存,
+     * 内核按压力回收, 留着 = 下一块不必从 NVMe 重读(可用内存账里它们本来就算 available)。 */
+    if (!g_v41_stage.valid || g_v41_stage.reg != reg || g_v41_stage.bytes != reg_bytes) {
+        if (!v41_stage_fill(reg, reg_bytes, layer)) return 0;
     }
-    blob = (const uint8_t *)g_v41_stream_reg.dev + delta;
+    blob = (const uint8_t *)g_v41_stage.dev + delta;
     const int ok = n_tok <= V41_GEMV_MAX_TOK
         ? v41_vq_fused_moe(out ? (float *)out->ptr : NULL, blob, in_dim, mid_dim, out_dim, (const int32_t *)selected->ptr,
                        (const float *)weights->ptr, n_expert_used, clamp, (const float *)x->ptr, n_tok, nc,
