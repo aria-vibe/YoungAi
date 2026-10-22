@@ -36,8 +36,8 @@
 #   --port N           listen port (default 8000)
 #   --endpoint URL     Hugging Face endpoint for the downloads, e.g. https://hf-mirror.com
 #   --pip-index URL    package index, used only if the `hf` CLI has to be installed first
-#   --posttrain        also load the post-training file published with this base (docs/TECHNICAL.md §7). None is
-#                      published for the 1017 base yet, so this option currently stops with an error
+#   --posttrain        also load the post-training file published with this base (~101 MB, docs/TECHNICAL.md §4.3). It was
+#                      trained on top of the code sidecar, so it implies --domain code and refuses any other domain
 #   --no-xet           download over the plain LFS channel instead of Xet (use it if downloads keep failing with
 #                      "peer closed connection": some proxies cut Xet transfers)
 #
@@ -75,10 +75,9 @@ sidecar_of() {
 DOMAINS="finance | code | law | medicine | science | none"
 # ③ published in this repository and the domain whose sidecar it was solved on (its base.fnv is that sidecar's
 # fingerprint); the engine refuses any other pairing, but only after a 2-minute load — so the script refuses first.
-# Empty = none for this base: the 2026-09-24 experiment was solved on the previous base's finance sidecar, matches no
-# 1017 sidecar, and is not published here. One assignment per line: hf_publish_spark.sh reads POSTTRAIN= from this file.
-POSTTRAIN=""
-POSTTRAIN_DOMAIN=""
+# Empty = none for this base. One assignment per line: hf_publish_spark.sh reads POSTTRAIN= / POSTTRAIN_DOMAIN= from this file.
+POSTTRAIN="posttrain-code-20261022"
+POSTTRAIN_DOMAIN="code"
 # The image tool's segmenter is fetched from its authors' repository, not re-published in ours (it is their file under their
 # license). The workbench looks for <dir>/model/seg/mobile_sam.pt (src/assistant/tools/tool_image.c); without it edit_image still
 # works, but falls back to picking regions by colour, which bleeds into backgrounds of a similar shade.

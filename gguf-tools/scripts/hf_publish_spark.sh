@@ -11,14 +11,18 @@
 #   install.sh                           一键下载/合并/启动(源在 gguf-tools/scripts/hf_install.sh)
 #   DeepSeek-V4.1-Flash-vq8sh14-q4k-mtpnative-grrb-...-engine/   ② 领域侧车, 每个 ~40 MB(金融 vqfin41 / 编程 code / 法律 law / 医疗 med / 科研 sci);
 #                                        清单只认 install.sh 的 sidecar_of 表(用户按 --domain 选), 这里不另抄一份
-#   posttrain-experimental-20260924/     ③ 09-24 大盘研判那一条请求上解的候选(只放 gr_L39.bin + base.fnv;
-#                                        predict.txt 带请求的行号与 token id, 不发)。只在 install.sh 的 POSTTRAIN= 非空时发:
-#                                        它是对着旧底座金融侧车解的, 1017 那版 install.sh 置空, 新仓库不带
+#   <install.sh 的 POSTTRAIN=>/          ③ 后训练文件(amp_L00..L39.bin + base.fnv, ~101 MB), 源目录 PT_SRC 写在下面; 只在 POSTTRAIN= 非空时发。
+#                                        它的 base.fnv 是训练时挂的那份 ②(PT_ZD)的指纹 —— 仓库里 POSTTRAIN_DOMAIN 那个侧车必须和 PT_ZD 逐字节同,
+#                                        否则用户下载后挂不上(加载两分钟后指纹不符停车)。posttrain 子命令发之前先比远端。
 #   <底座>.vision.gguf                   视觉塔侧车 0.97 GB(v41_to_gguf vision 出, 原件 BF16; 名从 install.sh 的 VISION= 读)。单独一个文件而不进主 GGUF:
 #                                        塞进主文件头部会变长, 40 个分块每块字节都变 = 重传 115 GB
 #   bin/ds4, bin/ds4-server              spark(aarch64, CUDA 13)上 make cuda-spark 的产物
 #
-# 用法: hf_publish_spark.sh split|stage-base|stage|base|sidecars|small|vision|tts|big|verify <用户名/仓库名> [--keep-bin]
+# 用法: hf_publish_spark.sh split|stage-base|stage|base|sidecars|small|vision|tts|big|verify|posttrain|docs <用户名/仓库名> [--keep-bin]
+#   posttrain  只发 ③(10-22): 核 PT_SRC 齐 40 层 + base.fnv → 核远端 POSTTRAIN_DOMAIN 侧车与 PT_ZD 逐字节同 → 传 <POSTTRAIN>/ 一个目录。
+#           不走 stage/small: 那两条会顺手从 $V41 摆全部侧车, 而本机的侧车目录可能已经重解过、和线上不是同一份(10-22 实撞: spark 的
+#           编程侧车目录与线上 0/70 同, 线上那份 = .1018 = ③ 训练时挂的那份), 一传就把线上的换掉, ③ 从此配不上
+#   docs    只发文档(10-22): README.md / README.zh-CN.md / README_ASSETS / install.sh 一个提交; 不碰侧车、二进制、③。Mac 上就能跑(~/hfenv)
 #   split   备份原件(真复制+哈希核对+只读) → 切 40 份 → SHA256SUMS → 拼回核对与原件逐字节同; 切过(SHA256SUMS 在)就跳过
 #   stage   在 gguf/hf_upload/<仓库名>/ 摆好发布目录。大文件用硬链接(同一文件系统, 不多占一个字节);
 #           放在 gguf/ 下是因为 sync_spark.sh 的 --delete 排除了 gguf/, 同步不会把它删掉
@@ -40,7 +44,12 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"; cd "$ROOT" || exit 1   # 脚本在 
 HF="$HOME/v41env/bin/hf"          # 非交互 ssh 的 PATH 里没有 hf, 只认 venv 里这一份
 [ -x "$HF" ] || HF="$HOME/hfenv/bin/hf"   # Mac 上是 ~/hfenv(10-11 起文档类小文件与 tts 语音从 Mac 直传, spark 出网只有 5 MB/s 且常掉登录)
 fsize(){ stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }   # GNU 与 BSD/macOS 的 stat 旗不同
-CMD="${1:?用法: $0 split|stage-base|stage|base|sidecars|small|vision|tts|big|verify <用户名/仓库名>}"
+# posttrain / docs 两条也关 Xet 走 LFS(Xet 上传被机场掐, 09-25 定位, 见 big 段; 两台机器同一个订阅)。
+# 几十 MB 以上的目录(③)在 spark 上跑, 网络走 Mac 的 17897 反向隧道: 10-22 实测 101 MB 的 ③ 这样 90 s 传完。
+# 同一天在 Mac 上直接传两次都没上去: LFS 300 s 一行输出没有、被卡死检测杀掉, 远端零文件; Xet 11 分钟走到 61 MB 后连接全断不再动。
+# 文档那几个文本文件小, Mac 上直接传没问题(10-11 起一直这么传)。
+NOXET=(env HF_HUB_DISABLE_XET=1)
+CMD="${1:?用法: $0 split|stage-base|stage|base|sidecars|small|vision|tts|big|verify|posttrain|docs <用户名/仓库名>}"
 REPO="${2:?缺仓库名, 例: wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017}"
 V41="$ROOT/gguf/v41"
 LOG(){ echo "[hfpub $(date '+%m-%d %H:%M:%S')] $*"; }
@@ -53,9 +62,13 @@ ins_var(){ sed -n "s/^$1=\"\{0,1\}\([^\"]*\)\"\{0,1\}\$/\1/p" "$INSTALL"; }   # 
 GGUF_NAME=$(ins_var GGUF); VISION_NAME=$(ins_var VISION)
 [ -n "$GGUF_NAME" ] && [ -n "$VISION_NAME" ] || die "install.sh 缺 GGUF= 或 VISION="
 AMP_NAMES=$(sed -n 's/^ *[a-z]*) *echo "\(DeepSeek-[^"]*-engine\)";;$/\1/p' "$INSTALL")
-PT_SRC="$V41/night/review_iter_20260924_0729/r1_pt/cand_g1_t6_r10_l1_k1e+09_n0"
-PT_NAME="posttrain-experimental-20260924"
-PT_WANT=$(ins_var POSTTRAIN)   # 空 = 这一版底座不发 ③
+# ③: 仓库里的目录名与配哪个领域只从 install.sh 读; 本机源目录(选中的那一轮 ckpt)和它训练时挂的 ② 写在这里 —— 换 ③ 只改这两行 + install.sh 两行。
+# Mac 上发: 把这两个目录按同样的相对路径拷到 Mac 仓库的 gguf/v41/ 下(gguf/ 不进 git)。
+PT_WANT=$(ins_var POSTTRAIN)          # 空 = 这一版底座不发 ③
+PT_DOMAIN=$(ins_var POSTTRAIN_DOMAIN)
+PT_SRC="$V41/posttrain/fp-formal2-A-B-M-L0-39-lr2e-4-e2-1022/ckpt_e02"
+PT_ZD="$V41/DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine.1018"
+pt_sidecar(){ sed -n "s/^ *$PT_DOMAIN) *echo \"\(DeepSeek-[^\"]*-engine\)\";;\$/\1/p" "$INSTALL"; }   # POSTTRAIN_DOMAIN 在仓库里的侧车目录名
 BASE_HF="$ROOT/hf/$(ins_var BASE_REPO | sed 's#.*/##')"   # 出厂权重目录 = BASE_REPO 斜杠后半截(LICENSE-DeepSeek 从这里拷)
 STAGE="$ROOT/gguf/hf_upload/${REPO#*/}"
 README_ASSETS="web/logo.jpg docs/img/arch.png docs/img/arch-en.png docs/img/studio-agent.png docs/img/studio-agent-en.png docs/TECHNICAL.md docs/TECHNICAL.zh-CN.md docs/pwa.md"
@@ -96,16 +109,48 @@ stage_sidecars() {
         ls "$V41/$a"/gr_L*.bin >/dev/null 2>&1 && [ -s "$V41/$a/manifest.txt" ] || die "侧车 $a 缺 gr_L*.bin 或 manifest.txt"
         grep -q '^# 完成' "$V41/$a/manifest.txt" || die "侧车 $a 的 manifest 没有 '# 完成' 行, 反修没解完"
         ! grep -nE '/home/|/Users/' "$V41/$a/manifest.txt" || die "侧车 $a 的 manifest 写死了本机用户目录, 改掉再发"
+        # 发了 ③ 时, 它配的那个侧车必须是 ③ 训练时挂的那份: 本机目录重解过就和 PT_ZD 不同, 传上去会把线上配得上的那份换掉
+        if [ -n "$PT_WANT" ] && [ "$a" = "$(pt_sidecar)" ]; then
+            diff -rq "$V41/$a" "$PT_ZD" >/dev/null || die "侧车 $a 与 ③ 训练时挂的 $PT_ZD 不是同一份(本机重解过?), 发出去 ③ 就配不上; 先把 $PT_ZD 的内容放回 $V41/$a 再发"
+        fi
         mkdir -p "$STAGE/$a" && ln -f "$V41/$a"/* "$STAGE/$a/"
     done
 }
 
-stage() {
-    stage_base
-    stage_sidecars
-    for f in README.md README.zh-CN.md LICENSE ds4 ds4-server $README_ASSETS; do [ -s "$ROOT/$f" ] || die "缺 $ROOT/$f"; done
+# ③ 齐不齐: 40 层 amp_Lnn.bin + base.fnv(训练器 pt_save_amp 落的就是这些), 训练时挂的 ② 目录也在(配对核对用)
+check_pt() {
+    local n; n=$(ls "$PT_SRC"/amp_L[0-9][0-9].bin 2>/dev/null | wc -l | tr -d ' ')
+    [ "$n" = 40 ] && [ -s "$PT_SRC/base.fnv" ] || die "③ 源 $PT_SRC 不齐(amp_Lnn.bin $n/40, base.fnv $( [ -s "$PT_SRC/base.fnv" ] && echo 有 || echo 缺))"
+    [ -n "$PT_DOMAIN" ] && [ -n "$(pt_sidecar)" ] || die "install.sh 的 POSTTRAIN_DOMAIN=$PT_DOMAIN 在 sidecar_of 表里查不到侧车目录"
+    [ -d "$PT_ZD" ] || die "缺 ③ 训练时挂的侧车 $PT_ZD(配对核对要比它)"
+}
+
+# 远端 POSTTRAIN_DOMAIN 侧车与 PT_ZD 逐字节同吗(只读元数据: 小文件比 git blob sha1, LFS 比 sha256; 不参与数值)
+pt_pair_remote() {
+    "$(dirname "$HF")/python" - "$REPO" "$(pt_sidecar)" "$PT_ZD" <<'PYEOF'
+import hashlib, os, sys
+from huggingface_hub import HfApi
+repo, sub, loc = sys.argv[1:4]
+rem = [f for f in HfApi().list_repo_tree(repo, path_in_repo=sub, recursive=True, expand=True) if getattr(f, "size", None) is not None]
+names = {f.path.split("/", 1)[1] for f in rem}
+same = 0
+for f in rem:
+    p = os.path.join(loc, f.path.split("/", 1)[1])
+    if not os.path.exists(p): continue
+    b = open(p, "rb").read()
+    ok = hashlib.sha256(b).hexdigest() == f.lfs.sha256 if f.lfs else hashlib.sha1(b"blob %d\0" % len(b) + b).hexdigest() == f.blob_id
+    same += ok
+extra = sorted(set(os.listdir(loc)) - names)
+print(f"远端 {sub}: {len(rem)} 个文件, 与 {os.path.basename(loc)} 逐字节同 {same}; 本地多 {extra[:3]}")
+sys.exit(0 if rem and same == len(rem) and not extra else 1)
+PYEOF
+}
+
+# README 这一组发布前的检查(stage 与 docs 共用)
+check_docs() {
+    for f in README.md README.zh-CN.md $README_ASSETS; do [ -s "$ROOT/$f" ] || die "缺 $ROOT/$f"; done
     # ★README 必须是新版★: spark 这份工作树不走 git, 没 scp 过来的话这里是上游 V4 的旧 README
-    grep -q '<h1 align="center">YoungAi</h1>' "$ROOT/README.md" || die "spark 上的 README.md 不是新版, 先从 Mac scp 过来"
+    grep -q '<h1 align="center">YoungAi</h1>' "$ROOT/README.md" || die "README.md 不是新版, 先从 Mac scp 过来"
     # 下载命令里的仓库名要登录拿到用户名后才填得上; 占位符还在 = 读者照抄就 404
     ! grep -q '__HF_REPO__' "$ROOT/README.md" "$ROOT/README.zh-CN.md" || die "README 里还有 __HF_REPO__ 占位符, 先换成 $REPO"
     # 比整条下载地址, 不比裸仓库名: 新仓库名是老仓库名加 -1017 后缀, 裸名匹配下往老仓库发也会放行
@@ -115,6 +160,15 @@ stage() {
     # (侧车 manifest 的同一项检查在 stage_sidecars 里)
     ! grep -nE '/home/|/Users/' "$INSTALL" "$ROOT/README.md" "$ROOT/README.zh-CN.md" "$ROOT/docs/TECHNICAL.md" "$ROOT/docs/TECHNICAL.zh-CN.md" \
         || die "上面几行写死了本机用户目录, 下载用户的机器上没有, 改掉再发"
+    # install.sh 带 --posttrain 时要去下 <POSTTRAIN>/; 指向的目录名必须就是本脚本要发的那个
+    [ -z "$PT_WANT" ] || grep -q "^POSTTRAIN=\"$PT_WANT\"\$" "$INSTALL" || die "install.sh 的 POSTTRAIN= 读不对"
+}
+
+stage() {
+    stage_base
+    stage_sidecars
+    for f in LICENSE ds4 ds4-server; do [ -s "$ROOT/$f" ] || die "缺 $ROOT/$f"; done
+    check_docs
     # install.sh 启动服务时传 --engram-dir; 二进制不认它 = 用户那边服务起到一半退出
     local b h
     for b in ds4 ds4-server; do
@@ -127,10 +181,9 @@ stage() {
     case "$h" in *--vision-gguf*) ;; *) die "$ROOT/ds4-server 不认 --vision-gguf, 先 make cuda-spark";; esac
     # ③ 跟 install.sh 走: 那边 POSTTRAIN 空就不摆。发了用户也挂不上(指纹对不上, 加载两分钟后才停), 文件表里还多一行误导
     if [ -n "$PT_WANT" ]; then
-        [ "$PT_WANT" = "$PT_NAME" ] || die "install.sh 的 POSTTRAIN=$PT_WANT, 这里只会摆 $PT_NAME"
-        [ -s "$PT_SRC/gr_L39.bin" ] && [ -s "$PT_SRC/base.fnv" ] || die "后训练候选缺 gr_L39.bin/base.fnv: $PT_SRC"
+        check_pt
     else
-        [ -e "$STAGE/$PT_NAME" ] && die "发布目录里有上次摆的 $STAGE/$PT_NAME, 而 install.sh 不发它: 看一眼再删(里面是硬链接, 删了原件不动)"
+        ls -d "$STAGE"/posttrain-* >/dev/null 2>&1 && die "发布目录里有上次摆的 ③($(ls -d "$STAGE"/posttrain-*)), 而 install.sh 不发它: 看一眼再删(里面是硬链接, 删了原件不动)"
     fi
     [ -s "$BASE_HF/LICENSE" ] || die "缺 $BASE_HF/LICENSE(出厂权重目录 = install.sh 的 BASE_REPO)"
     mkdir -p "$STAGE/bin"
@@ -139,7 +192,7 @@ stage() {
     cp -f "$BASE_HF/LICENSE" "$STAGE/LICENSE-DeepSeek"
     cp -f "$INSTALL" "$STAGE/install.sh"
     cp -f "$ROOT/ds4" "$ROOT/ds4-server" "$STAGE/bin/"
-    [ -n "$PT_WANT" ] && mkdir -p "$STAGE/$PT_NAME" && ln -f "$PT_SRC/gr_L39.bin" "$PT_SRC/base.fnv" "$STAGE/$PT_NAME/"
+    [ -n "$PT_WANT" ] && mkdir -p "$STAGE/$PT_WANT" && ln -f "$PT_SRC"/amp_L[0-9][0-9].bin "$PT_SRC/base.fnv" "$STAGE/$PT_WANT/"
     LOG "发布目录 $STAGE:"
     (cd "$STAGE" && find . -type f -not -path './.cache/*' | sort | xargs ls -l | awk '{printf "  %14d  %s\n", $5, $9}')
 }
@@ -264,7 +317,7 @@ case "$CMD" in
   small)
     need_login; [ -d "$STAGE" ] || die "先跑 stage"
     KEEP=(); BINMSG=", aarch64 CUDA binaries"; [ "${3:-}" = "--keep-bin" ] && { KEEP=(--exclude "bin/*"); BINMSG=""; LOG "--keep-bin: bin/ 不上传, 线上二进制不动"; }
-    PTMSG=""; [ -n "$PT_WANT" ] && PTMSG=", experimental post-training file"
+    PTMSG=""; [ -n "$PT_WANT" ] && PTMSG=", post-training file"
     LOG "上传小文件(不含 GGUF 分块) → $REPO (公开)"
     # 与 big 同一条线路、同一个病(见 big 段的 ★走 LFS★): 侧车 + 二进制几十 MB, 走 Xet 正好撞上 10~20 s 掐断; 卡死同样不超时
     if ! run_with_stall_guard "$STALL_S" "$PLOG" env HF_HUB_DISABLE_XET=1 "$HF" upload "$REPO" "$STAGE" . --repo-type model --no-private \
@@ -333,6 +386,33 @@ case "$CMD" in
         done
     done
     LOG "BIG_DONE $NPART 份";;
+  posttrain)
+    need_login; [ -n "$PT_WANT" ] || die "install.sh 的 POSTTRAIN= 是空的, 这一版不发 ③"
+    check_pt
+    pt_pair_remote || die "远端 $(pt_sidecar) 与 ③ 训练时挂的 $PT_ZD 不是同一份: 这样发出去用户挂不上(先发对的侧车, 或换 ③)"
+    mkdir -p "$STAGE/$PT_WANT" && ln -f "$PT_SRC"/amp_L[0-9][0-9].bin "$PT_SRC/base.fnv" "$STAGE/$PT_WANT/"
+    remote=$(remote_sizes) || die "取远端清单失败"
+    n=0; same=0
+    for f in "$STAGE/$PT_WANT"/*; do
+        n=$((n+1)); [ "$(printf '%s\n' "$remote" | awk -v x="$PT_WANT/${f##*/}" '$1==x {print $2}')" = "$(fsize "$f")" ] && same=$((same+1))
+    done
+    if [ "$same" = "$n" ]; then LOG "远端已有 $PT_WANT($n 个文件同大小), 跳过"; exit 0; fi
+    t0=$(date +%s); LOG "$PT_WANT ($n 个文件, 远端已同 $same 个) ← $PT_SRC"
+    run_with_stall_guard "$STALL_S" "$PLOG" ${NOXET[@]+"${NOXET[@]}"} "$HF" upload "$REPO" "$STAGE/$PT_WANT" "$PT_WANT" --repo-type model \
+        --commit-message "Post-training file (rank-64 correction on every MoE layer, distilled from the original weights); pairs with the $PT_DOMAIN sidecar, load with ds4-server --posttrain" \
+        || { tail -c 600 "$PLOG" | tr '\r' '\n' | grep -v '^\s*$' | tail -5; die "$PT_WANT 上传失败(完整输出 $PLOG; 重跑同一条就是续传)"; }
+    LOG "POSTTRAIN_DONE $PT_WANT $(( $(date +%s) - t0 ))s https://huggingface.co/$REPO/tree/main/$PT_WANT";;
+  docs)
+    need_login; check_docs
+    D="$STAGE-docs"; rm -rf "$D"; mkdir -p "$D"   # 只放这一组; 每次重摆, 免得上次留下的东西混进提交
+    cp -f "$ROOT/README.md" "$ROOT/README.zh-CN.md" "$D/"
+    for f in $README_ASSETS; do mkdir -p "$D/$(dirname "$f")" && cp -f "$ROOT/$f" "$D/$f"; done
+    cp -f "$INSTALL" "$D/install.sh"
+    LOG "上传文档 → $REPO: $(cd "$D" && find . -type f | sort | tr '\n' ' ')"
+    run_with_stall_guard "$STALL_S" "$PLOG" ${NOXET[@]+"${NOXET[@]}"} "$HF" upload "$REPO" "$D" . --repo-type model \
+        --commit-message "README: base + code sidecar + post-training file; install.sh --posttrain" \
+        || { tail -c 600 "$PLOG" | tr '\r' '\n' | grep -v '^\s*$' | tail -5; die "文档上传失败(完整输出 $PLOG)"; }
+    LOG "DOCS_DONE https://huggingface.co/$REPO";;
   verify)
     need_login; [ -d "$STAGE" ] || die "先跑 stage"
     remote=$(remote_sizes) || die "取远端清单失败"
