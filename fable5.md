@@ -13022,3 +13022,69 @@ PPL 2.8852 对 2.8827(比值 **1.001**), Σmin **0.9695**(中位 0.981), Mean KL
 - **HF 配对核对**: 线上编程侧车目录与 ③ 训练时挂的 `.1018` 逐字节同(70/70, 小文件比 git blob sha1); spark 上同名的 `…-code_fit_n15360-engine`(无后缀)是后来重解的, 与线上 0/70 同 —— 发布脚本 `stage`/`small` 会从这个目录摆编程侧车, 照原路跑就会把线上换掉、③ 从此配不上。改: `stage_sidecars` 对 ③ 配的那个领域加 `diff -rq` 闸(与 PT_ZD 不同就拒发); 新子命令 `posttrain`(只传 ③: 齐 40 层 + base.fnv → 远端侧车与 PT_ZD 逐字节比 → 传)与 `docs`(只传 README×2 + README_ASSETS + install.sh 一个提交), README 那组检查抽成 `check_docs` 共用; ③ 源目录/配对侧车写成 PT_SRC / PT_ZD 两行常量, 目录名与领域从 install.sh 读(`POSTTRAIN="posttrain-code-20261022"`, `POSTTRAIN_DOMAIN="code"`)。
 - **上传**: ③ 从 Mac 直传两次都没上去 —— LFS(HF_HUB_DISABLE_XET=1)300 s 一行输出没有、卡死检测杀掉、远端零文件; Xet 11 分钟到 61.2 MB 后连接全断不动(杀) —— 改在 spark 上跑 `posttrain`, 网络走 Mac 的 17897 反向隧道(spark 直连 HF 15 s 超时), **LFS 90 s 传完**; 远端 41 个文件 104,858,100 B 与本地逐字节同。文档从 Mac `docs` 23 s 传完, 5 个文本件逐字节同, README resolve 200, 线上 install.sh 的 POSTTRAIN= 对。HF 提交两条: "Post-training file …"、"README: base + code sidecar + post-training file; install.sh --posttrain"。线上 bin 没换(10-19 那版; 挂 ③ 的推理代码 10-19 后没改过)。
 - install.sh `--posttrain` 参数判定实测: 配 `--domain law` 直接拒("solved on the code sidecar"), 不给领域自动走编程侧车。没在别的机器上跑 `install.sh --posttrain start` 端到端(spark 上工作台在跑, 不起第二份服务); `--posttrain <dir>` 这条加载路径今天的门(v41_judge engine::<③>)和工作台开关都走过。
+
+## 10-23 00:24 · 正式趟 3 发车(用户: "后训练还有矿: 编程侧车的 ③ 该用编程语料 + 加轮数, 推 Same top 到 90 以上")
+- 事实更正在先: 正式趟 2 的料不是零代码(120 篇代码文档 + 100 道 HumanEval 思考), 但只占 612 行的 1/3, 且没覆盖判决份的 30 种语言。这趟编程料成主体。
+- **新料 `gguf-tools/data/posttrain/code_tr.jsonl`**: `docend_corpus_build.sh` 加 SUBSET=code(30 种语言全收) + JUDGE_IDS(候选篇与判决份有任何一个 24-gram 相同就不入候选) 两个参数 →
+  `docend_corpus_build.sh 30 96 1000 0 code_tr <jsonl> <docend/docend_tr/docend_tr2 三份 manifest> code gguf/go-onebit/code/judge.ids`:
+  30 语言 × 30 篇 = **900 篇整文件**(96~1000 token, 共 348,627 token, 均值 387), 与判决份重合而剔掉 29 篇; 再用入库的 `posttrain_leak_check.py`(10-22 临时目录那份)反查: **判决份 120 窗命中 0**。
+  语料池体量(census): 30 语言整篇 ≤1000 token 的文件 5460 篇 / 178 万 token(≤512: 4220, 513~1000: 1240) —— 够再 ×3。
+- **料 = code_tr 900 + formal2 612(思考尾段 192 / 中段 90 / 文档 330)= 1512 行**, 编程 1020 行(67%); 保持料 63 不变。formal2 的 8 份教师表(675 条)拷进新目录复用, 续跑式切份只打 900 条新料(≈10 份)。
+- **轮数 2 → 3**(正式趟 2 e01→e02 留出 −3.2 SE 还在降, 没到平台; 料多 2.5 倍过拟合风险更低); 秩 64 / lr 2e-4 / maxlen 1024 不动(先把料和轮数两个便宜杠杆用足, 再看秩, 否则分不清功劳)。
+- cfg `gguf/v41/posttrain/fp-formal3-C-A-B-M-L0-39-lr2e-4-e3-1023/ptrain.cfg`; 链 `posttrain_fp_chain_spark.sh … 96 formal3_1023`, 日志 /tmp/bugmd/chain_formal3_1023.log / pt_formal3_1023.log / decision_formal3_1023_*.log / gate_formal3_1023_{code,wt2}.log。
+- 判: 主裁 = 编程判决份 Same top 对现役 ③(e02 84.77)的增量; wt2 不退(82.42); 决策位尺 r316/pelican 不比正式趟 2 e02 更冲。中途看: 每份 ptfstat(编程整文件 EOS 末位该在 0.06~0.1 量级, 同 docend 文档), 每轮末留出 / 决策位 KL。
+- **★07:37 正式趟 3 作废: 发车命令里 FP 教师目录写错★** —— 我传的是 `hf/DeepSeek-V4.1-Flash`(09-10 的旧底座), 不是 `hf/DeepSeek-V4.1-Flash-1017`(正式趟 1/2 都是 1017, pt 日志 "HF …" 行可对)。
+  后果: 900 篇编程料的 10 份教师表(part.008~017, 3 h 18 min)全是旧底座的分布, ③ 在编程料上向旧底座蒸馏; 复用的 8 份(675 条)是 1017 的 ⇒ 训练靶两代混着, 留出读数、决策位尺、两把门全不算数。
+  为什么读数上看不出来: 两代分词器 tokenizer.json 逐字节同, 教师 argmax 命中 79~87% 照常, EOS 末位也在正常区间; 两代 GGUF general.name 都是 "DeepSeek V4.1 Flash", 元数据里没有来源名。是 07:23 决策位尺报"教师锚不在"(锚名按 HF 目录名带后缀)才露出来。
+  处理: 杀链内层(按 pid), 包装器 07:38 装回模型(底座 + .1018), 子进程在跑。两把门没跑。
+  修: `posttrain_fp_spark.sh` 加闸 —— 底座文件名必须以 `<HF 目录名>-` 开头, 且 hf/ 下没有更长的目录名也配得上(否则拒发); spark 上实测 hf/DeepSeek-V4.1-Flash 被拒("配的是 DeepSeek-V4.1-Flash-1017"), 1017 放行。
+  这趟唯一还能用的读数: 第 3 轮在留出上回升(+2.8 SE, 保持料 KL 0.281 → 0.336), 两块料都在第 2 轮平 —— 与教师是谁无关的训练动力学, 下趟改 2 轮。
+  残留: 本趟决策位尺留下 8 个学生锚 ~139 GB(读完即删那步在"教师锚不在"时被 continue 跳过了), 盘余 227 GB; 删前问用户。
+- 08:0x 用户批删: 作废那趟 9 个学生锚(stu_*fp-formal3…ckpt_e0{1,2,3}.bin, 共 139 GB)已删, 盘余 227 → 356 GB。`decision_probe_spark.sh` 修: 教师锚不在那条 continue 之前也按 keep=drop 删学生锚。正式趟 4 cfg 已备(`fp-formal4-C-A-B-M-L0-39-lr2e-4-e2-1023/`, 8 份 1017 教师表已拷), 等发车批准。
+- **07:46 正式趟 4 发车**(用户: "先 64, 重新发车, 再检查一遍"): 起跑前查七项 —— cfg(epochs=2, rank 64, 无 teacher=/dumpids=)/ 料 formal3_1023 = code_tr + formal2 逐字节 / 复用 8 份表的来源 pt 日志都是 HF 1017 且与 formal2 逐字节同 / serve_pick 底座 + .1018、两代分词器同 / 侧车 manifest 完成 / 1017 教师锚齐(编程判决份、wt2、docend、pelican、r316)/ 盘 356 GB、GPU 2405 MHz、无残留进程。
+  发车后再核: pt 日志 "HF hf/DeepSeek-V4.1-Flash-1017", 跑着的 v41_teacher.py 参数同。链 `posttrain_fp_chain_spark.sh … 96 formal4_1023`, 日志 /tmp/bugmd/chain_formal4_1023.log / pt_formal4_1023.log; 训练轮末读数在 out/train.out(不在 pt 日志)。
+  容量问题的判据(本趟答): 同 133 道旧题对正式趟 2 e02 逐题配对; 旧题退 >3 SE 且编程判决份涨 ⇒ 被挤, 下一趟秩 128(复用本趟 18 份教师表, 只训练 + 门 ≈3 h)。
+
+## 10-23 08:55 · 用户: "为什么有欧盟水果, 我要的是全部编程语料, 不要跑任务了, 重新对齐一下语料" —— 正式趟 4 停车, 料改成纯编程
+- 欧盟水果从哪来: 正式趟 2 的 612 行里 docend_tr / docend_tr2(330 篇)是 13 子域整篇文档(为了修 EOS), 只有 code 4 子域 120 篇是编程, 其余 210 篇是法律/医疗/科研 —— law_statute_en 里就是欧盟每天发的"水果蔬菜进口标准价"法规; 思考料 192+90 行里通用题 92+49 行。正式趟 3/4 只是在这上面加了 900 篇编程, 没把非编程的拿掉。
+- 停车: 08:55 按 pid 杀链内层, 包装器装回模型(底座 + .1018); 1017 教师已打完 part.008~010(283 篇编程), 表留着复用。
+- **新料 `code5_1023.jsonl` 1151 行, 全是编程**(新 `posttrain_corpus_compose.py`, 按规则从已有料挑行 + 去近重复 + 剔撞判决): code_tr 891(撞判决 3 / 近重复 6 剔掉)+ docend 料里的 code 子域 119(撞判决 1)+ HumanEval 思考尾段 100 / 中段 41(收口 `</think>` 的料只留编程题)。保持料 hold 63(通用问答)照旧 —— 它是防带偏的锚, 不算领域料, 单独报给用户。
+- 体检(`posttrain_dup_check.py`, 新; 留出按训练器同一 FNV 规则现算, 对 formal3 的 heldout_e00 逐条复现 320/320): 完全重复 0; 编程判决份 / wt2 / docend 0 位; pelican / r316 26 位 = 只有渲染头那句; 留出与训练重合过半 0 条(原来 17 条)。
+- **训练器改一处**(`core_ptrain_data.c` pt_add_text): 带 `<think>` 的原文段按 `<think>` 之前(渲染好的题目)分留出 —— 同题的思考中段与尾段内容大半重合, 按整段哈希会一行进训练一行进留出(原料 320 条留出里 13 条)。Mac make test rc=0, spark 重编 ds4。
+- 下一趟 cfg 已备 `gguf/v41/posttrain/fp-code5-L0-39-lr2e-4-e2-1023/`(2 轮, 秩 64, 教师 1017; 表复用 formal2 8 份 + formal4 3 份), 要新打 608 篇编程 ≈ 7 份; 等用户批。
+
+## 10-23 10:07 · 用户: "先改速度, 结束任务" —— code5 链停(新 7 份打完 011/012, 剩 013~017 共 416 条), FP 教师提速
+- 尺: 新 `v41_teacher_ab_spark.sh <HF> <seqs> <层数> <出目录> <标签=脚本目录>... [prof=标签] [cold]`(自己停模型/装回; 每份比耗时 + .ptf md5; cold = 每份前 posix_fadvise DONTNEED 踢掉 HF 分片页缓存)。
+  v41_teacher.py 加分段计时 [embed]/[E1]/[E14]/[norm]/[head](engram 在层 hook 外调用, 原来算在"层外"糊涂账里)与 `--prof`(torch.profiler 逐算子表)。旧版快照 gguf/v41/teacher_ab/base_scripts(Mac git HEAD 导出; spark 的 git HEAD 没有这些文件)。
+- **逐段表(part.011 前 3 层, 96 条 42k 位)**: 旧版冷 302.8 s / 热 127.8 s(热的吃了上一份留下的页缓存) —— 冷下 **[E1] 192.5 s**、热下 29 s; 每份两层 engram(L1/L14) ⇒ 生产里层外那 417 s 几乎全是 engram 冷读(98 GB 表单线程 memmap 逐页缺页随机取上百万行), 不是输出头(head 7 s)。
+  profiler(热): GPU 71 s 里 fp32 SIMT sgemm(aten::mm)39%、copy_ 17%、bmm 14% —— 层内 fp32 矩阵乘是教师精度的刻意选择, 换 TF32/bf16 字节就变, 不动。
+- **改**(`v41_patches.py` StreamEngramEmbed.prefetch + v41_teacher.py 在 engram_hash 出口挂 hook): 哈希在 forward 开头一次算出全部 engram 层的行号 → 后台线程 ① 要的页按连续段 posix_fadvise(WILLNEED) 交内核异步读 ② 4 线程把行拷进内存; forward 按原顺序从内存取。字节与 memmap 直读相同。
+  第一版(32 线程直接拷, 无 fadvise): 3 层冷 104 s、**40 层整份 part.012 966 s 对原 1275 s, md5 与盘上 part.012.ptf 逐字节同(36aba364…)**; 但 64 个线程抢 GIL, 同时跑的 L0 22 → 103.5 s。
+  第二版(fadvise + 4 线程): 3 层冷 **84.2 s**(L0 32.5 / E1 3.9 / L1 17.1), md5 同(ddac05e0…); 40 层整份对拍在跑。
+- **第二版 40 层整份 part.012: 841 s(原 1275 s, −34%), md5 36aba364… 与盘上原表逐字节同**; L0 21.1 / E1 4.1 / L1 16.6(原 39.0)/ E14 0.9 / L14 22.8(原 36.4)/ head 7.4, 40 层合计 812.8(原 871.7)。剩 5 份(416 条)按此 ≈ 62 分钟(原 ≈ 92)。
+- **11:09 code5 链重发**(用户"跑流程吧"; 标签 code5b_1023, cfg / 出目录同前): 已有 13 份表保留, 剩 416 条切成 part.013~017(96×4 + 32), 教师用提速版(engram 预取); 训练 2 轮 → 决策位尺 → 两把门 → 装回。日志 /tmp/bugmd/chain_code5b_1023.log / pt_code5b_1023.log, 轮末读数在 out/train.out。
+- **code5 教师 12:15 完成**(这趟 7 份: 011/012 先打, 013~017 用提速版 810~842 s/份; EOS 末位几何均值 0.08~0.45, 命中 78.8~85.4%)。第 0 步: 留出 0.1964(236 题)/ 决策位 264 位 KL 0.2062 / 保持料 KL 0.4251; 留出名单与 posttrain_dup_check.py fnv 现算逐条一致(236/236; 差的 3 条在保持料 —— 训练器只哈希问题, 脚本哈希问答合文, 待改)。
+- **轮 1(13:05)**: 留出 0.1357(−30.9%)/ 决策位 0.1071(−48.1%)/ 保持料 0.3148; 配对 e00→e01 每 token −0.060 ± 0.004(−16.7 SE)、决策位 −0.110 ± 0.027(−4.0 SE); 按来源 整文件 0.1889 → 0.1448、docend 编程 0.2262 → 0.1777、HumanEval 思考 0.2925 → 0.1169。
+- **轮 2(13:51)**: 留出 0.1395 / 决策位 0.1224 / 保持料 0.3360 / 训练前 64 题 0.1022; 配对 e01→e02 每 token **+0.0031 ± 0.0010(+3.1 SE)**、决策位 **+0.0177 ± 0.0059(+3.0 SE)** —— 第 2 轮在留出上真退(三块都略回升, 训练题还在降), 选轮规则会挑 e01。与正式趟 3 同一个形状: 这类料 1 轮到顶。
+- **14:17 code5 链收口(模型已装回 底座 + .1018, ③ 未挂)。两把门(同二进制同尺, 逐位配对对现役 ③ = formal2 e02)**:
+  | | 编程判决份 Same top / Σmin / KLD | wt2 Same top / Σmin / KLD |
+  | 现役 ③ formal2 e02 | 84.77 / 0.8361 / 0.23015 | 82.42 / 0.7894 / 0.57442 |
+  | code5 e01 | **84.77** / 0.8388 / 0.22715 | **82.42** / 0.7943 / 0.54627 |
+  | code5 e02 | 84.31 / 0.8308 / 0.24390 | 81.45 / 0.7901 / 0.56525 |
+  逐位配对 e01 对现役: 编程 KLD −0.0030 ± 0.0014(−2.1 SE)、Same top +0.00 ± 0.19 pp(位数逐个有翻有回, 净数恰好相同); wt2 KLD −0.028 ± 0.016(−1.8 SE)、Same top +0.00 ± 0.96 pp。
+  决策位尺(FP / 现役 / code5 e01 / e02): r316 `</think>` Σp 0.82 / 1.30 / **1.08** / 1.07(收口更接近原件); pelican 0.049 / 0.100 / **0.178** / 0.130(更冲, 通用思考题拿掉的代价); '?' 几何均值 pelican 0.107 / 0.179 / 0.192 / 0.171、r316 0.233 / 0.346 / 0.333 / 0.293; docend EOS 0.063 / 0.094 / 0.086 / 0.114。
+  **判: 料换成全编程、编程料从 ~340 篇翻到 1010 篇 + 141 条编程思考, Same top 一个位都没多拿(84.77 平), KLD 小降 2 SE —— 秩 64 / maxlen 1024 这套 ③ 在编程判决份上到顶 ≈ 84.8。不换现役(Same top 平、pelican 收口更冲)。**
+  对 90 的账: 加轮数(正式趟 3/code5 都是 1 轮到顶)、换料/加料(本趟)两条都没动 Same top。剩下的杠杆: 秩 128(复用本趟 18 份表, 只训练 + 门 ≈ 2.5 h, 单变量); 料改成判决份同分布(长文件中段 128 位窗, 现在是 ≤1000 token 短整文件, 判决窗来自长文件中段); 10-21 账本: 低秩出口修正的上限是结构性的(r64 只吃有用误差 28%, 近满秩), 90 要动专家本身(热门专家换原件 90% ≈ 11~45 GB)。
+- **14:25 秩 128 发车**(用户选 1): `gguf/v41/posttrain/fp-code5r128-L0-39-lr2e-4-e2-1023/`, 与 code5 只差 rank 64 → 128; 18 份教师表原样拷来逐字节核过, 链 ② 段 0 条要打直接进训练; 2 轮, 两个 ckpt 都过决策位尺与两把门。日志 /tmp/bugmd/chain_code5r128_1023.log。判: 编程判决份 Same top / KLD 对 code5 e01(84.77 / 0.22715)逐位配对。
+- **16:30 秩 128 判负**(模型已装回, ③ 未挂)。两把门(秩 128 e01 / e02; 对照秩 64 e01 = 84.77 / 0.22715, wt2 82.42 / 0.54627):
+  编程判决份 Same top 84.19 / **84.62**, KLD 0.24733 / 0.23996; wt2 Same top 80.27 / 79.49, KLD 0.63189 / 0.64003。
+  逐位配对对秩 64 e01: 编程 KLD e01 +0.0202 ± 0.0015(+13.3 SE)、e02 +0.0128 ± 0.0016(+7.9 SE); Same top e01 −0.59 ± 0.19 pp(−3.1 SE)、e02 −0.16 ± 0.20 pp; wt2 KLD +0.086 / +0.094(+5 SE), Same top −2.2 / −2.9 pp。
+  留出: 轮 1 0.1432(秩 64 0.1357, 逐题 +9.2 SE)、轮 2 0.1446; 训练前 64 题 0.1177 / 0.0950(与秩 64 同量级)。决策位尺: r316 Σp e01 0.85(FP 0.82, 最近一次)、e02 **2.17**(冲 2.6 倍); pelican 0.153 / 0.145。
+  **判: 秩翻倍在两把门上全面变差(编程 KLD 8~13 SE, wt2 Same top −2~3 pp), 容量不是瓶颈 —— 多出的秩拿去拟合训练料; 同 lr 2e-4 下秩 128 关掉。** 秩 64 这套 ③ 在编程判决份 ≈ 84.8 封顶的结论不变: 加轮数 / 换料加料 / 加秩三条杠杆今天都试了, Same top 没有一条往上动。
+
+## 10-23 16:40 · 用户: "fable5 里的结论都留下, 代码改动回滚, 因为没有提升"
+- 回滚今天的 12 处代码改动: 8 个改过的文件回到 HEAD(docend_corpus_build.sh SUBSET/JUDGE_IDS、posttrain_fp_spark.sh HF/底座闸、v41_cli.py --prof、v41_patches.py engram 预取、v41_teacher.py 分段计时 + 预取 hook、v41_teacher_seqs.py profiler、decision_probe_spark.sh 教师锚缺时删学生锚、core_ptrain_data.c 思考行按题目分留出), 4 个新脚本(posttrain_corpus_compose.py / posttrain_dup_check.py / posttrain_leak_check.py / v41_teacher_ab_spark.sh)移出仓库。
+- 恢复路径(都在 git 忽略的 gguf/ 下): Mac `gguf/rollback_1023/code_1023.patch`(276 行, `git apply` 可逆核过)+ `new/` 4 个新脚本; spark `gguf/rollback_1023/old/`(8 个文件回滚前的版本)+ `new/`(4 个新脚本, 是 mv 不是删)。
+- spark 8 个文件与 Mac HEAD sha1 逐字节同; 两边重编 ds4(spark 16:41), Mac make test rc=0。
+- 要记住的(代码不在了, 坑还在): ① FP 教师 HF 目录传旧底座不会报错(两代分词器同、命中率照常), 发车前手核 pt 日志 "HF hf/DeepSeek-V4.1-Flash-1017"; ② 决策位尺教师锚缺时学生锚不删(10-23 留了 139 GB); ③ 教师每份层外 ~400 s 是两层 engram 冷读, 预取版 1275 → 841 s 逐字节同, 补丁在上面; ④ 思考中段 / 尾段按整段哈希分留出会一行训练一行留出。
+- 数据产物不动: code_tr.jsonl / code5_1023.jsonl / formal3_1023.jsonl、各趟 ③ 目录与教师表都留在 spark。
