@@ -8,8 +8,11 @@
  * 落盘; 末遍全挂跑完整前向打拟合料 PPL。与"一次前向逐层解+挂"数学等价。不整批一次前向的原因: 8192 整批的引擎缓冲把
  * spark avail 压到 6 GB(看门狗线以下)且 L02 前向失败; 多遍用判决同一套 512 分块, 内存账已验证。
  *
- * 【择优规则】held-out 按 <ids>.layout 窗分层(每域窗号 k%4==3 作 val), K∈{64,128,256,512} × λ∈{1,3,10,30,100} 只认 val;
- * val ≥ 0.9×最优 的格里取最小 K、同 K 最大 λ; 层最优 val < 0.5% 不挂。产物 amp_Lnn.bin + manifest.txt。
+ * 【择优规则】held-out 按 <ids>.layout 窗分层(每域窗号 k%4==3 作 val)。低秩路(amp_Lnn): K∈{64,128,256,512} × λ∈{1,3,10,30,100} 只认 val,
+ * val ≥ 0.9×最优 的格里取最小 K、同 K 最大 λ; 层最优 val < 0.5% 不挂。★权重侧增益路(gr/grrb, 现役)的赢家由【端到端】定★(2026-10-21,
+ * v41_e2e_select.inc.c): 候选挂上跑全前向, val 行上 Same top / KLD / RMS Δp 对教师锚(--e2e-ref)三项全优者赢, 否则 Same top 比基线退超 2√不一致行数 的否决、剩下 KLD 最低者赢,
+ * KLD 差在趟间噪声内比 RMS Δp(基线=不挂增益也参赛)。三把尺就是判决器五指标里的三把(10-24 用户令"过程指标换成 Same top / KLD / RMS"; NLL 退出过程尺)。
+ * 路由偏置 Δb 只由层内闸定(过了就留, 端到端不撤): 逐层裁会错杀"一串层合起来才赚"的 Δb, 账在 v41_gr_run.inc.c gr_e2e_select。
  *
  * 用法(三条路, 见 main 的 usage): 反修逐层 / 反修-蒸馏靶(--target kl:) / 后训练第三件(--sft-list, 见 v41_sft_run.inc.c)。
  * 编译: make -C gguf-tools v41_amp_run(Linux+CUDA; 要先在仓库根 make cuda-spark 出引擎对象) */
@@ -45,7 +48,7 @@ int v41_gr_solve_layer_gpu(const float *dye, const float *drw, const int *dsel, 
 #define USAGE "用法: v41_amp_run <model.gguf> <hf-dir> <ids> <ntok上限> <出目录> [--layers N] [--whiten 0|1|2]\n" \
               "      [--mem-budget-mb M] [--weight-cache-mb M] [--no-engram]\n" \
               "  路由侧车: --rb <教师 --dump-moe 目录> [--base-amp <现役侧车>](一趟统计全部层的 Δb, 落 rb_Lnn.bin; 见 v41_rb_run.inc.c)\n" \
-              "  合并序贯: --rb <dump> --capture-ye  (每层先解 Δb 挂上, 再取料解增益; rb_Lnn + gr_Lnn 同目录)\n" \
+              "  合并序贯: --rb <dump> --capture-ye --e2e-ref <拟合料教师锚.bin>  (每层先解 Δb 挂上, 再取料解增益; 候选端到端择优; rb_Lnn + gr_Lnn 同目录)\n" \
               "  蒸馏靶:   --only-layer N --target kl:<教师锚> --eta-rel r\n" \
               "  后训练:   --sft-list <清单> --only-layer 39 --capture-ye --base-amp <②> [--share]\n" \
               "            [--reuse-tables] [--tau-list 1] [--rho-list 0.1,1,10] [--lam-list 0.3,1,3,10]\n" \
@@ -64,6 +67,12 @@ static const float SEL_LAMS[NL] = {1.f, 3.f, 10.f, 30.f, 100.f};
 #define KEEP 0.9f            /* 择优: val ≥ KEEP×最优 的格里挑最便宜的 */
 #define MAXK 512
 #define MAXU 16              /* n_used 上限(V4.1 = 6) */
+#define GR_MAXL 8            /* 增益路 λ 网格上限(v41_gr_run.inc.c 的 GR_NL ≤ 它): 每个 λ 的解都留主机副本, 端到端择优要在它们里挑 */
+
+typedef struct { double kld, rms, same; uint8_t *hit; } e2e_m;   /* 端到端尺的一组读数(val 行均值: KLD / RMS Δp(top-32 联合窗, 百分数) / Same top(百分数); hit[val 行] = 该行 Same top 中没中, 两组读数比 Same top 时算配对噪声用), v41_e2e_select.inc.c */
+struct e2e_s;
+/* 一个分支(挂/不挂本层路由偏置)上 λ 网格的全部解(v41_gr_run.inc.c): 层内 train/val 与每个解的主机副本(f32 + fp4 码字); 每层只解一支(Δb 层内闸过了是 1, 否则 0), 端到端在那一支里挑 */
+typedef struct { float tr[GR_MAXL], va[GR_MAXL]; float *hgr[GR_MAXL]; uint8_t *pk[GR_MAXL]; int n; } gr_sols;
 
 typedef struct {
     v41_st S;                              /* HF 出厂权重索引 */
@@ -106,113 +115,28 @@ typedef struct {
                                                     * gates = 当前这一档 R; dgate[n][R] = 每行每门的 σ 标量 */
     int nsel;                              /* 解算真正用的行数(fit+val); 取料仍是全部 n 行 */
     const char *rb_dump; ds4_gguf gq;      /* 路由偏置侧车(v41_rb_run.inc.c): 教师 dump 目录 / GGUF(取路由张量) */
-    int ok_layers, skip_layers, kcount[NK]; double val_sum, dz_sum, t_fp, t_scan, t_solve, t_fwd;
+    /* 端到端择优(v41_e2e_select.inc.c): 教师锚句柄 / 当前基线(= 已挂层的读数) / 每个 λ 的解的主机副本 / 本层刚落了 rb / 已落盘的 rb 层数 */
+    struct e2e_s *e2e; e2e_m e2e_base; gr_sols sol[2]; int nrb;   /* sol[0] = 不挂本层 Δb 的分支, sol[1] = 挂着 Δb 的分支 */
+    ds4_engine *eng; const int *ids_all; int ntok_all, no_engram_all;   /* 全前向要的句柄与料(解算在层循环深处, 带不进参数) */
+    int ok_layers, skip_layers, kcount[NK]; double val_sum, dz_sum, t_fp, t_scan, t_solve, t_fwd, t_e2e;
 } ctx_t;
-
-/* RNE 舍到 bf16 再回 f32 —— 与引擎 v41_bf16r(cuda_v41_1.inc.cu)逐位同式。取料自检要重建引擎的
- * y = round_bf16(routed + shared), 舍入口径差一位就对不上。 */
-static float bf16r(float x) {
-    uint32_t u; memcpy(&u, &x, 4);
-    if ((u & 0x7F800000u) == 0x7F800000u) return x;
-    u += 0x7FFFu + ((u >> 16) & 1u); u &= 0xFFFF0000u;
-    float y; memcpy(&y, &u, 4); return y;
-}
 
 static double now_s(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec * 1e-9; }
 #define CK(x) do { cudaError_t e_ = (x); if (e_ != cudaSuccess) { fprintf(stderr, "★CUDA %s @%d: %s★\n", #x, __LINE__, cudaGetErrorString(e_)); return -1; } } while (0)
 
-/* <ids>.layout 的窗分层 held-out(= v41_amp_split.layout_split): 每域内窗号 k%4==3 的窗作 val, 其余拟合; 不满一窗的尾巴归拟合。
- * 为什么不前缀切: idshalf 把各域连续铺进 8192 行, 前缀切的 val 全是最后一个域而拟合段没见过它 —— 量的是跨域泛化, 假账。 */
-static int layout_split(const char *ids_path, int ntok, ctx_t *c) {
-    char p[4300]; snprintf(p, sizeof p, "%s.layout", ids_path);
-    FILE *f = fopen(p, "r");
-    if (!f) { fprintf(stderr, "★%s 缺: 择优路要 layout 分层 held-out★\n", p); return -1; }
-    int win = 128, nf = 0, nv = 0;
-    int *fit = malloc(sizeof(int) * (size_t)ntok), *val = malloc(sizeof(int) * (size_t)ntok);
-    char line[512], desc[2048] = "";
-    while (fgets(line, sizeof line, f)) {
-        char dom[128]; int off, cnt;
-        if (line[0] == '#' || line[0] == '\n') continue;
-        if (sscanf(line, "win %d", &win) == 1) continue;
-        if (sscanf(line, "%127s %d %d", dom, &off, &cnt) != 3) continue;
-        const int nw = cnt / win; int dv = 0;
-        for (int k = 0; k < nw; k++) {
-            const int isval = (k % 4 == 3); if (isval) dv++;
-            for (int r = off + k * win; r < off + (k + 1) * win; r++) { if (r >= ntok) continue; if (isval) val[nv++] = r; else fit[nf++] = r; }
-        }
-        for (int r = off + nw * win; r < off + cnt; r++) if (r < ntok) fit[nf++] = r;
-        char d1[192]; snprintf(d1, sizeof d1, "%s%s %d+%d窗", desc[0] ? ", " : "", dom, nw - dv, dv); strncat(desc, d1, sizeof desc - strlen(desc) - 1);
-    }
-    fclose(f);
-    if (nf + nv != ntok) { fprintf(stderr, "★layout 覆盖 %d 行 ≠ ntok %d★\n", nf + nv, ntok); return -1; }
-    c->perm = malloc(sizeof(int) * (size_t)ntok);
-    memcpy(c->perm, fit, sizeof(int) * (size_t)nf); memcpy(c->perm + nf, val, sizeof(int) * (size_t)nv);
-    c->nfit = nf; c->n = ntok;
-    free(fit); free(val);
-    printf("[held-out·分层] 窗宽 %d: 拟合 %d / val %d 行 (%s)\n", win, nf, nv, desc);
-    return 0;
-}
-
 static int resolve_layer(ctx_t *c, int il);   /* v41_fp_bind.inc.c: HF 出厂权重索引(反修 FP 靶用) */
-
-/* 择优(= v41_amp_hooks._choose): 百分比表 pct[NL][NK], val ≥ KEEP×最优 的格里取最小 K, 同 K 取最大 λ。返回 0 = 没有可选格 */
-static int choose(const float pct[NL][NK], float *best, int *ki, int *lj) {
-    *best = pct[0][0];
-    for (int l = 0; l < NL; l++) for (int k = 0; k < NK; k++) if (pct[l][k] > *best) *best = pct[l][k];
-    if (*best <= 0.f) return 0;
-    *ki = -1; *lj = -1;
-    for (int k = 0; k < NK && *ki < 0; k++) for (int l = 0; l < NL; l++) if (pct[l][k] >= KEEP * *best) { *ki = k; break; }
-    for (int l = NL - 1; l >= 0; l--) if (pct[l][*ki] >= KEEP * *best) { *lj = l; break; }
-    return 1;
-}
-
-/* 取料钩子: 只认本遍的层, 原序收进 rx/ry/rsel/rrw, 收完本块即让引擎停下(返回 1) */
-static int hook(void *ud, int il, int pos0, int n, int D, int n_used, float clamp, const float *x, const float *y, const int *sel, const float *rw, const float *alpha, const float *ye, const float *ysh) {
-    ctx_t *c = ud;
-    if (il != c->layer) return 0;
-    if (D != c->D || n_used > MAXU || pos0 < 0 || pos0 + n > c->n) { fprintf(stderr, "★钩子 pos0=%d n=%d D=%d n_used=%d 与拟合 %d/%d 不符★\n", pos0, n, D, n_used, c->n, c->D); return -1; }
-    c->n_used = n_used; c->clamp = clamp;
-    /* rx/ry 为空 = 这条路不要它们(第七版只用 ye/rw/sel/alpha, 两份 [n][D] f32 在 35k 行上是 1.4 GB 白占) */
-    if (c->rx) memcpy(c->rx + (size_t)pos0 * D, x, (size_t)n * D * 4);
-    if (c->ry) memcpy(c->ry + (size_t)pos0 * D, y, (size_t)n * D * 4);
-    memcpy(c->rsel + (size_t)pos0 * n_used, sel, (size_t)n * n_used * 4); memcpy(c->rrw + (size_t)pos0 * n_used, rw, (size_t)n * n_used * 4);
-    memcpy(c->ralpha + (size_t)pos0, alpha, (size_t)n * 4);
-    if (c->want_ye && !(c->lowrank_k && !ye)) {   /* 低秩形态只要 x(上面已存), 解码 GEMV 路没有逐专家输出也放行(10-01: 按行拆的事实料一行 7 token) */
-        /* 取不到就硬停: 逐专家输出只有 prefill GEMM 路物化, 拿不到说明走了解码路或形状对不上 ——
-         * 这时候继续跑会解出一个没有料支撑的东西, 比报错难查得多。 */
-        if (!ye || !ysh) { fprintf(stderr, "★L%02d 拿不到逐专家 down 输出/shared(ye=%p ysh=%p): 块 n=%d 可能走了解码 gemv 路★\n", il, (const void *)ye, (const void *)ysh, n); return -1; }
-        if (c->rye_map) {
-            /* 第七版取料槽: 只搬 rye_map 里有槽号的行(第一遍榜单表定的行集), f32 原值。 */
-            if (!c->rye) {
-                c->rye_nu = n_used;
-                c->rye = malloc((size_t)c->rye_slots * n_used * D * 4);
-                if (!c->rye) { fprintf(stderr, "★取料槽 %d × %d × %d f32(%.2f GB)分配失败★\n", c->rye_slots, n_used, D, (double)c->rye_slots * n_used * D * 4 / 1e9); return -1; }
-            }
-            if (c->rye_nu != n_used) { fprintf(stderr, "★取料槽 n_used 变了: %d → %d★\n", c->rye_nu, n_used); return -1; }
-            for (int i = 0; i < n; i++) {
-                const int s = c->rye_map[pos0 + i];
-                if (s < 0) continue;
-                if (s >= c->rye_slots) { fprintf(stderr, "★取料槽号 %d ≥ 槽数 %d★\n", s, c->rye_slots); return -1; }
-                memcpy(c->rye + (size_t)s * n_used * D, ye + (size_t)i * n_used * D, (size_t)n_used * D * 4);
-            }
-        } else {
-            memcpy(c->rye + (size_t)pos0 * n_used * D, ye, (size_t)n * n_used * D * 4);
-            memcpy(c->rysh + (size_t)pos0 * D, ysh, (size_t)n * D * 4);
-        }
-    }
-    c->got += n;
-    /* ★取完本层要不要继续跑到出口★
-     * 蒸馏靶要同一趟的学生 logits, 必须跑完。后训练也要(榜单 top-K 与 rms 就在出口那一步算),
-     * ★两样本来就在同一趟里★ —— 第一版让它半路停车、另跑一趟专门打分, 于是同一批 token 前向了
-     * 两遍, 8 条样本白烧 22 分钟, 外加 8 次独立进程各加载一遍模型(107s×8 ≈ 14 分钟)。
-     * 当时停车的理由是"跑到出口会写一份全词表 logits"(517 KB/位置, 统一内存上写它=掏 GPU 内存),
-     * 但现在有 --score-no-logits + --score-topk/--score-nll/--score-rms 三个小出口, 出口那一段
-     * 只落几十 MB。所以只在【表已经在盘上】(c->reuse_tab)时才提前停车。 */
-    return (c->klt && !c->reuse_tab) ? 0 : 1;
-}
-
+static float bf16r(float x);                   /* v41_amp_hook.inc.c: 引擎同式的 bf16 舍入(取料自检) */
+static int layout_split(const char *ids_path, int ntok, ctx_t *c);   /* 同上: <ids>.layout 窗分层 held-out */
+static int hook(void *ud, int il, int pos0, int n, int D, int n_used, float clamp, const float *x, const float *y, const int *sel,
+                const float *rw, const float *alpha, const float *ye, const float *ysh);   /* 同上: 取料钩子 */
+static int e2e_open(ctx_t *c, const char *ref, const int *ids, int ntok);   /* v41_e2e_select.inc.c: 教师锚 + val 行 */
+static int e2e_run(ctx_t *c, const char *label, e2e_m *out);               /* 同上: 挂目录现状跑全前向出三指标 */
+static int dir_has_plugins(const ctx_t *c);                                /* 同上: 盘上有没有插件文件(下一趟挂不挂) */
+static int e2e_noise_check(ctx_t *c);                                      /* 同上: 起点再跑一趟量趟间噪声 */
 static int solve_layer(ctx_t *c, int il);                            /* v41_amp_lowrank.inc.c(低秩放大器路) */
-static int solve_layer_gr(ctx_t *c, int il, double t0, double t1), gr_work_reopen(ctx_t *c);   /* v41_gr_run.inc.c(权重侧逐专家增益; 工作区按层重开) */
+static int gr_work_alloc(ctx_t *c);                                  /* 同上: 取料/解算工作区按层重开(端到端前向之前被放掉) */
+static int gr_solve_branch(ctx_t *c, int il, int b);                 /* 同上: 在当前取料上解 λ 网格 → sol[b] */
+static int gr_e2e_select(ctx_t *c, int il, int has_rb);              /* 同上: 本层增益候选端到端择优, 盘上只留赢家(Δb 不在这里裁) */
 static int rb_fit(ctx_t *c, ds4_engine *e, const int *ids, int ntok, const char *lp, int no_engram,
                   const char *dump, const char *base_amp, int nl);   /* v41_rb_run.inc.c(路由偏置侧车, 一趟模式) */
 static int rb_seq_init(ctx_t *c, int ntok, int nl);                  /* 同上, 合并序贯: 统计表分配 / 本层解 Δb / 双职钩子 */
@@ -227,6 +151,21 @@ static int calib_dump(ds4_engine *e, const int *ids, int ntok, const char *dir, 
                       const char *gguf, const char *ids_path);   /* v41_calib_dump.inc.c(量化校准取料, --dump-calib) */
 
 
+/* 一趟取料前向: 挂目录现状, 钩子只认第 il 层, 收齐 ntok 行即停。 */
+static int capture_pass(ctx_t *c, ds4_engine *e, const int *ids, int ntok, const char *lp, int no_engram, int il, ds4_v41_moe_hook_fn fn) {
+    c->layer = il; c->got = 0;
+    ds4_engine_v41_set_amp_dir(dir_has_plugins(c) ? c->out_dir : NULL);
+    ds4_engine_v41_set_moe_hook(fn, c);
+    ds4_engine_v41_set_moe_hook_layer(il);   /* 只要这一层, 省掉另外 39 层的白拷贝 */
+    const double tf = now_s();
+    const int rc = ds4_engine_v41_score_ids(e, ids, ntok, lp, no_engram, 0);
+    ds4_engine_v41_set_moe_hook(NULL, NULL);
+    c->t_fwd += now_s() - tf;
+    if (rc != 0) { fprintf(stderr, "★第 %d 遍前向失败 rc=%d★\n", il, rc); return rc; }
+    if (c->got != ntok) { fprintf(stderr, "★第 %d 遍只收到 %d/%d 行★\n", il, c->got, ntok); return 1; }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc < 6) { fprintf(stderr, "%s", USAGE); return 2; }
     const char *gguf = argv[1], *hf = argv[2], *ids_path = argv[3], *out = argv[5];
@@ -234,7 +173,7 @@ int main(int argc, char **argv) {
     ctx_t c; memset(&c, 0, sizeof c);
     c.out_dir = out;
     int mem_mb = 0, cache_mb = 0, no_engram = 0, nlayers = 40, only_layer = -1, dump_calib = 0;
-    const char *fit_spec = NULL, *val_spec = NULL;
+    const char *fit_spec = NULL, *val_spec = NULL, *e2e_ref = NULL;
     c.eta_rel = 0.10f;
     /* 网格默认值: τ=1 nat(p_对/p_错 ≥ e, 给 bf16/rms 的二阶误差留余量), ρ 三档看"别处别动"多贵,
      * λ 四档同反修量纲。12 个候选, 秒级一个 —— 贵的是取料那 21 分钟, 不是解算。 */
@@ -274,6 +213,7 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--base-pt") && i + 1 < argc) c.base_pt = argv[++i];
         else if (!strcmp(argv[i], "--fit-rows") && i + 1 < argc) fit_spec = argv[++i];
         else if (!strcmp(argv[i], "--val-rows") && i + 1 < argc) val_spec = argv[++i];
+        else if (!strcmp(argv[i], "--e2e-ref") && i + 1 < argc) e2e_ref = argv[++i];
         else if (!strcmp(argv[i], "--target") && i + 1 < argc) {   /* --target kl:<教师锚> */
             const char *t = argv[++i];
             if (strncmp(t, "kl:", 3)) { fprintf(stderr, "★--target 只认 kl:<教师锚.bin>★\n"); return 2; }
@@ -300,6 +240,9 @@ int main(int argc, char **argv) {
     if (c.eta_rel <= 0.f || c.eta_rel > 2.f) { fprintf(stderr, "★--eta-rel %g 不合理★\n", c.eta_rel); return 2; }
     if (c.rb_dump && (c.sft_list || c.kl_ref)) { fprintf(stderr, "★--rb 不与 --sft-list/--target 同给(配 --capture-ye = 路由+增益合并序贯)★\n"); return 2; }
     const int merged = c.rb_dump && c.want_ye;   /* 合并序贯: 每层 Δb → 挂上 → 增益 */
+    /* 权重侧增益的序贯路(gr / grrb)赢家由端到端尺定, 锚不在就不解 —— 不退回层内择优(那把尺 10-20 已判不能当裁判) */
+    const int gr_seq = c.want_ye && !c.sft_list && !dump_calib;
+    if (gr_seq && !e2e_ref) { fprintf(stderr, "★权重侧增益反修的择优尺是端到端尺, 必须给 --e2e-ref <拟合料教师锚.bin>(v41_judge.sh 落的 teacher_<料>_n<N>.bin)★\n"); return 2; }
     setvbuf(stdout, NULL, _IOLBF, 0);
     if (ntok < 2 || nlayers < 1 || nlayers > 64) { fprintf(stderr, "★ntok %d / layers %d★\n", ntok, nlayers); return 2; }
     /* 清单模式(后训练)自己按条读 ids, 这里的 <ids> 只是个占位; 行分层也由清单的 fit/val 列给,
@@ -367,6 +310,10 @@ int main(int argc, char **argv) {
         c.hgrpk = (uint8_t *)malloc(nsD / 32u * 17u);
         if (!c.rye || !c.rysh || !c.hye || !c.hysh || !c.hgr || !c.hgrpk) {
             fprintf(stderr, "★逐专家输出缓冲(2×%.1f GB)分配失败★\n", (double)nyD * 4 / 1e9); return 1; }
+        for (int b = 0; b < 2; b++) for (int l = 0; l < GR_MAXL; l++) {   /* 两个分支 × 每个 λ 的解各留一份(f32 7.9 MB + 码字 1.0 MB), 端到端择优在它们里挑 */
+            c.sol[b].hgr[l] = malloc(nsD * 4); c.sol[b].pk[l] = (uint8_t *)malloc(nsD / 32u * 17u);
+            if (!c.sol[b].hgr[l] || !c.sol[b].pk[l]) { fprintf(stderr, "★λ 候选缓冲分配失败★\n"); return 1; }
+        }
         if (cudaMalloc((void **)&c.dye, nyD * 4) || cudaMalloc((void **)&c.dysh, nD * 4) ||
             cudaMalloc((void **)&c.drw, nU * 4) || cudaMalloc((void **)&c.dsel, nU * 4) ||
             cudaMalloc((void **)&c.dgr, nsD * 4) ||
@@ -383,6 +330,7 @@ int main(int argc, char **argv) {
                   "# 候选 K=[64, 128, 256, 512] λ=[1, 3, 10, 30, 100] gate=%.1f%% keep=%.1f whiten=%d%s\n"
                   "# 解算前向 = ds4 引擎(部署同路, v41_amp_run 多遍序贯) gguf=%s 拟合=%s n=%d\n",
             GATE_PCT, KEEP, c.whiten, c.whiten ? "(择优看白化 val)" : "", gguf, ids_path, ntok);
+    if (gr_seq) fprintf(c.mf, "# 增益路择优 = 端到端(e2e 行): 候选挂上跑全前向, 拟合料 val 行对教师锚 %s 算 Same top / KLD / RMS Δp; 基线(不挂增益; 本层 Δb 层内闸过了就是只挂 Δb)也参赛, 三项全优者赢, 没有全优者先否决 Same top 比基线退超 2√不一致行数 的候选, 剩下 KLD 最低者赢(差在趟间噪声内比 RMS Δp 再比 Same top);基线赢本层不挂增益; Δb 只由层内闸定, 端到端不撤\n", e2e_ref);
     fflush(c.mf);
     /* 引擎: 与 CLI 同款打开(CUDA 后端) */
     if (mem_mb > 0) ds4_set_mem_budget_mb(mem_mb);
@@ -433,37 +381,42 @@ int main(int argc, char **argv) {
         return src == 0 ? 0 : 1;
     }
     const int il_lo = only_layer >= 0 ? only_layer : 0, il_hi = only_layer >= 0 ? only_layer + 1 : nlayers;
-    int nrb = 0;   /* 合并序贯落盘的 rb 层数: 目录里有它也算"有插件", 下一遍必须挂 */
+    c.eng = e; c.ids_all = ids; c.ntok_all = ntok; c.no_engram_all = no_engram;
+    if (gr_seq) {   /* 端到端尺: 开锚, 先量一趟"起点态"(目录里已有的插件都挂上; 全新目录 = 裸底座)当第一层的基线 */
+        if (e2e_open(&c, e2e_ref, ids, ntok)) return 1;
+        if (e2e_run(&c, "起点", &c.e2e_base)) return 1;
+        if (e2e_noise_check(&c)) return 1;   /* 起点再跑一趟: 趟间噪声落 manifest, 超过 Same top 的容差就停(尺不可信) */
+    }
     if (merged) {
         if (rb_seq_init(&c, ntok, nlayers)) { fprintf(stderr, "★路由侧车统计表分配失败★\n"); return 1; }
-        printf("[合并序贯] 每层: 路由统计+增益取料 同一遍 → 解 Δb(严格涨才落盘) → 落了盘就挂上重取一遍 → 解增益; FP 路由 ← %s\n", c.rb_dump);
+        printf("[合并序贯] 每层: 路由统计+增益取料 同一遍 → 解 Δb(层内严格涨才落盘, 落了就留) → 有 Δb 挂着重取再解增益, 没有就在第一趟料上解 → 层内前 2 个增益候选端到端裁(基线 = 只挂 Δb / 上一层赢家); FP 路由 ← %s\n", c.rb_dump);
     }
     for (int il = il_lo; il < il_hi && rc == 0; il++) {   /* 第 il 遍: 挂 L0..L(il−1) 已解的放大器, 到 L(il) 取料即停 */
         /* ★取料必须在"要部署的那个态"上★: 后训练解的是 ①+②(+③上一版)之上的增量, 所以取料遍挂的是
          * --base-amp/--base-pt, 不是本次的输出目录(输出目录里此刻还什么都没有)。反修序贯那条路仍
-         * 挂自己的输出目录(第 k 遍挂 L0..L(k−1))。目录里一个插件都没有时引擎会拒开状态, 所以没解出过就不挂。
-         * 合并序贯时第二趟(pass=1)只在本层 Δb 刚落盘后才跑: 路由变了, 增益必须解在挂着 Δb 的取料上, 上一趟的 ye 是旧路由的。 */
-        for (int pass = 0; pass < 2 && rc == 0; pass++) {
-            c.layer = il; c.got = 0; if (gr_work_reopen(&c)) { rc = 1; break; }   /* 上一层解完放了工作区(gr_layer_done), 取料前重开 */
-            ds4_engine_v41_set_amp_dir((c.ok_layers || nrb) ? out : NULL);
-            ds4_engine_v41_set_moe_hook((merged && pass == 0) ? rbgr_hook : hook, &c);
-            ds4_engine_v41_set_moe_hook_layer(il);   /* 只要这一层, 省掉另外 39 层的白拷贝 */
-            const double tf = now_s();
-            rc = ds4_engine_v41_score_ids(e, ids, ntok, lp, no_engram, 0);
-            ds4_engine_v41_set_moe_hook(NULL, NULL);
-            c.t_fwd += now_s() - tf;
-            if (rc != 0) { fprintf(stderr, "★第 %d 遍前向失败 rc=%d★\n", il, rc); break; }
-            if (c.got != ntok) { fprintf(stderr, "★第 %d 遍只收到 %d/%d 行★\n", il, c.got, ntok); rc = 1; break; }
-            if (!merged || pass == 1) break;
-            const int w = rb_seq_solve(&c, il, &nrb);
+         * 挂自己的输出目录(第 k 遍挂 L0..L(k−1))。目录里一个插件都没有时引擎会拒开状态, 所以按盘上有没有文件挂。
+         * ★合并序贯★(2026-10-21): 第一趟取料同时统计路由 → 解 Δb(层内严格涨才落盘, 落了就留) → 有 Δb 就挂着它重取一趟再解增益 →
+         * 增益候选过端到端闸(基线 = 只挂 Δb, 没 Δb 就是上一层赢家)。重取不能省: 挂着 Δb 的路由与第一趟取料时的不是一回事。 */
+        if (gr_seq && !c.rx && gr_work_alloc(&c)) { rc = 1; break; }   /* 上一层的端到端前向之前把工作区放了, 取料前重开 */
+        if ((rc = capture_pass(&c, e, ids, ntok, lp, no_engram, il, merged ? rbgr_hook : hook)) != 0) break;
+        int has_rb = 0;
+        if (merged) {
+            const int w = rb_seq_solve(&c, il, &c.nrb);
             if (w < 0) { rc = 1; break; }
-            if (w == 0) break;   /* 本层路由不动: 这一趟的取料就是部署态, 直接解增益 */
-            printf("  [L%02d] Δb 已落盘 → 挂上重取本层(增益解在新路由上)\n", il);
+            has_rb = (w == 1);
         }
-        if (rc == 0 && solve_layer(&c, il) < 0) rc = 1;
+        if (!gr_seq) { if (solve_layer(&c, il) < 0) rc = 1; continue; }
+        /* ★Δb 层内闸过了就留, 增益只在挂着它重取的料上解★(2026-10-21 第二趟后的诊断): 逐层端到端裁 Δb 去留会错杀 —— 单层看每层只亏
+         * 0.02~0.78%, 一串层一起挂却是赚(判决份 KLD −2.4%), 账在 v41_gr_run.inc.c gr_e2e_select 的头注释。闸没过的层只解无 Δb 一支。 */
+        if (!has_rb && gr_solve_branch(&c, il, 0) < 0) { rc = 1; break; }
+        if (has_rb) {
+            if ((rc = capture_pass(&c, e, ids, ntok, lp, no_engram, il, hook)) != 0) break;
+            if (gr_solve_branch(&c, il, 1) < 0) { rc = 1; break; }
+        }
+        if (gr_e2e_select(&c, il, has_rb) < 0) rc = 1;
     }
     if (rc == 0) {   /* 末遍: 全部放大器挂上跑完整前向, 拟合料 PPL(与 Python 解算趟末尾的 PPL 同口径) */
-        ds4_engine_v41_set_amp_dir((c.ok_layers || nrb) ? out : NULL);
+        ds4_engine_v41_set_amp_dir(dir_has_plugins(&c) ? out : NULL);
         const double tf = now_s();
         rc = ds4_engine_v41_score_ids(e, ids, ntok, lp, no_engram, 0);
         c.t_fwd += now_s() - tf;
@@ -476,11 +429,12 @@ int main(int argc, char **argv) {
     /* 体积 = 盘上真实字节: A、B 两块各 K×D 元素, fp4x32 是 17 B/32 元素 */
     for (int k = 0; k < NK; k++) { mb += 2.0 * ((double)c.D * SEL_KS[k] / 32.0 * 17.0) / 1e6 * c.kcount[k]; if (c.kcount[k]) { char b[32]; snprintf(b, sizeof b, "%s%d×%d", kd[0] ? " " : "", SEL_KS[k], c.kcount[k]); strncat(kd, b, sizeof kd - strlen(kd) - 1); } }
     if (c.ok_layers)
-        printf("[择优] 挂 %d 层 / 闸掉 %d 层; fp4 后 val 平均 %+.2f%%; ‖Δ‖/‖y_q‖ 平均 %.4f; K 分布 %s; fp4x32 落地 %.0f MB = %.2f%% 解码带宽; 用时 前向 %.0fs fp %.0fs 扫 %.0fs 解 %.0fs 总 %.0fs\n",
-               c.ok_layers, c.skip_layers, c.val_sum / c.ok_layers, c.dz_sum / c.ok_layers, kd, mb, mb / 10050 * 100, c.t_fwd, c.t_fp, c.t_scan, c.t_solve, now_s() - t0);
+        printf("[择优] 挂 %d 层 / 闸掉 %d 层; fp4 后 val 平均 %+.2f%%; ‖Δ‖/‖y_q‖ 平均 %.4f; K 分布 %s; fp4x32 落地 %.0f MB = %.2f%% 解码带宽; 用时 前向 %.0fs fp %.0fs 扫 %.0fs 解 %.0fs 端到端 %.0fs 总 %.0fs\n",
+               c.ok_layers, c.skip_layers, c.val_sum / c.ok_layers, c.dz_sum / c.ok_layers, kd, mb, mb / 10050 * 100, c.t_fwd, c.t_fp, c.t_scan, c.t_solve, c.t_e2e, now_s() - t0);
     else printf("[择优] 零层挂上(闸掉 %d) —— 检查靶/输入\n", c.skip_layers);
-    if (merged) { printf("[合并序贯] 路由偏置落盘 %d 层 rb_Lnn.bin(与 gr 同目录)\n", nrb); rb_seq_free(); ds4_gguf_close(&c.gq); }
-    if (merged) fprintf(c.mf, "# 完成 挂%d 闸%d 路由%d\n", c.ok_layers, c.skip_layers, nrb);
+    if (gr_seq) printf("[端到端择优] 终态 val 行: KLD %.5f RMS Δp %.4f%% Same top %.2f%%(每层候选与基线的读数在 manifest 的 e2e 行)\n", c.e2e_base.kld, c.e2e_base.rms, c.e2e_base.same);
+    if (merged) { printf("[合并序贯] 路由偏置落盘 %d 层 rb_Lnn.bin(与 gr 同目录)\n", c.nrb); rb_seq_free(); ds4_gguf_close(&c.gq); }
+    if (merged) fprintf(c.mf, "# 完成 挂%d 闸%d 路由%d\n", c.ok_layers, c.skip_layers, c.nrb);
     else fprintf(c.mf, "# 完成 挂%d 闸%d\n", c.ok_layers, c.skip_layers);
     fclose(c.mf);
     if (c.klt) v41_klt_close(c.klt);
@@ -490,6 +444,8 @@ int main(int argc, char **argv) {
 }
 
 #include "v41_fp_bind.inc.c"  /* HF 张量 → v41_fp_mat 的绑定(同上) */
+#include "v41_amp_hook.inc.c" /* 取料钩子 + layout 窗分层 + bf16 舍入(同上) */
+#include "v41_e2e_select.inc.c" /* 端到端择优: 教师锚、全前向三指标、入围与名次(同上) */
 #include "v41_amp_lowrank.inc.c" /* 低秩放大器那条路的逐层解算(同上) */
 #include "v41_gr_run.inc.c"   /* 权重侧逐专家增益的驱动编排(单 TU; 拆文件只为守 500 行) */
 #include "v41_rb_run.inc.c"   /* 路由偏置侧车的拟合驱动(同上) */

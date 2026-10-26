@@ -29,38 +29,14 @@
  * ★下一轮的检查点★: 跑完看 manifest 的 λ 分布, 若又有一批层撞新下界 0.01, 再往下扩(0.001)要用户点头。 */
 #define GR_NL 6
 static const float GR_LAMS[GR_NL] = {0.01f, 0.1f, 1.0f, 10.f, 100.f, 1000.f};
+#if GR_NL > GR_MAXL
+#error "GR_NL 超过 v41_amp_run.c 的 GR_MAXL: 每个 λ 的解都要留主机副本给端到端择优"
+#endif
 #define GR_ITER 3            /* Gauss-Seidel 轮数: 专家间耦合只来自同 token 的 6 个 pick, 很稀疏 */
-/* ★闸(百分点): 层最优 val 不高于它不挂。★这条曲线 2026-09-15 扫完了, 别再调这个旋钮★
- * 金融主尺三个点(Same top / KLD / PPL / 体积):
- *     0(全留 40 层) → 72.08% / 0.57718 / 9.2930 / 41.8 MB   ★四项全负, 唯一明确差的★
- *     0.5(37 层)    → 72.18% / 0.57474 / 9.2545 / 38.6 MB   ← 现役
- *     1.0(35 层)    → 72.08% / 0.57429 / 9.2512 / 36.6 MB
- * 读法: ★0.5 与 1.0 在这把尺上不可区分★ —— Same top 与 p5 说 0.5 赢, KLD 与 PPL 说 1.0 赢,
- * 差距 0.10pp / 0.08% / 0.0033 全在噪声带。曲线不是"0.5 处有峰", 是 0.5~1.0 平坦、0 处掉下去。
- * 也就是: val +0.27~0.47% 那批层有害(0 vs 0.5 的差集), +0.79~0.81% 那批无可测收益也无害。
- * ★为什么停在这里而不是继续找最优★: 同一把判决尺已经选了三次配置, 胜负全在 0.1pp 级 ——
- * 再调就是在选这把尺上的噪声(和"5 个 λ 挑最大"同一个毛病, 只是搬到了更高一层)。保持 0.5 不动。
- * 机理(为什么闸不是省体积而是显著性检验): 每层在 5 个 λ 里挑 val 最大的, "5 选 1 取最大"对无信号层
- * 也会交出一个正数(选择偏差) ⇒ 低于噪声水平的层, 它的 s 是在拟合料的随机涨落上解出来的, 到判决料上是负的。
- * 而序贯让这份伤害传播: 挂上的噪声层改掉下游每层看到的残差, 下游在被污染的基线上解(gate=0 实撞:
- * L31~L37 解全变, L39 层内虚高 5pp 却在链上没兑现)。
- * 【09-15 已用端到端尺验过这个数, 不要再凭直觉动它】用户问"被闸掉的是真没有价值吗", 于是把闸改成 0
- * (大于 0 都留)整趟重跑对照: 40 层全挂的金融主尺 Same top 72.08% / KLD 0.57718 / PPL 9.2930,
- * 而 37 层的是 72.18% / 0.57474 / 9.2545 —— **四项全负, 体积还多 3.1 MB** ⇒ 改回 0.5。
- * 被闸的那批(val +0.27~+0.46%)岭已经把它们压到 |s−1| 均 0.011(肥层是 0.2~0.3), 写进去近乎恒等,
- * 既没帮上忙也没帮倒忙。注意★这不是"三层有害"★: 序贯下被闸的层不落盘, 误差留给后面的层补偿,
- * 所以 gate=0 那趟后面 10 层的解全变了(L39 层内还高 5.0pp 却在链上没兑现), 判的是那个配置整体。
- * 下面这段是当时放开闸的理由, 留着当账: 
- * 原来是 0.5(百分点), 出身是"与低秩路同闸便于横比" —— 不是从端到端推出来的, 而且从没验过:
- * 09-13 那轮直接用了它, 没跑过 40 层 vs 37 层的对照。实撞: 本轮 L32 val +0.46% 被闸掉, 与 0.51%
- * 之间没有任何机理差别, 落在哪边纯粹由这个拍出来的数决定。
- * 为什么现在敢放开: ①体积不再是理由 —— fp4 之后 1.04 MB/层, 三层 +3.1 MB 折底座 +0.003%
- * (f32 时代一层 7.86 MB 还能谈体积); ②岭替我们兜底 —— 真没信号的层最优 λ 会往 1000 走, |s−1| 塌到
- * 0.01 量级, 写进去的修正本来就接近恒等。
- * ★仍然留着 >0 这个下限★: val ≤ 0 = 这一层在 held-out 上被改坏了, 那种层挂上去是负收益, 不是噪声。
- * ★口径提醒★: val 是 held-out 估计量, 每层在 5 个 λ 里挑最大的, 纯噪声层也会挑出一个略大于 0 的数
- * (选择偏差) —— 所以 +0.05% 不等于"确实有肉"。有没有价值由端到端主尺判, 对照产物见 fp4.md §4。 */
-#define GR_GATE 0.5f
+/* ★层内闸(0.5 百分点)与"λ 取 val 最大"都已退役★(2026-10-21): 赢家与挂不挂由端到端尺定(v41_e2e_select.inc.c) ——
+ * 层内 val 只用来排候选次序(val 最高的 E2E_NCAND 个进端到端), val ≤ 0 的解不进(本层 held-out 上已经变坏)。
+ * 为什么: "N 个 λ 挑 val 最大"对无信号层也会交出一个正数(选择偏差), 而层内 val 到出口要穿过后面所有层 ——
+ * 08-31 / 09-13 / 10-20 三次撞到"层内赢、端到端不赢"。09-15 用金融主尺扫的 0 / 0.5 / 1.0 三点闸曲线留在 fable5。 */
 
 /* 量化往返: hs(缩放因子, 锚 1) → fp4x32 码字, 并把 hs 原地换成【解回来的那一份】。
  * ★这是后训练(第三件)专用的路★ —— 它解的是"在上一版 ② 之上再乘多少", 落盘的是乘积, 所以只能
@@ -123,14 +99,10 @@ static int gr_write_bin_roundtrip(float *hs, int ne, int D, const char *dir, int
     return rc;
 }
 
-/* ★取料/解算工作区按层开、每层解完就放★(2026-10-21 端到端择优那一版先这么做, 10-22 单独补回 HEAD):
- * rx/ry/hx/hy(各 n×D f32)、rye/hye(各 n×6×D f32, 1.9 GB)、rysh/hysh、val 副本 hvf/hvt、设备 dye/dysh/drw/dsel/dX/dYq/dYfp/dYtmp
- * —— 15360 行合计 ~12 GB; 再加 FP 教师的设备缓冲(~4 GB)和本层 HF 分片的页缓存(十几 GB), 解完一层后一个都用不上。
- * 统一内存机器上它们占着就是页缓存少这么多: 权重缓存封顶 88 GB 之外的 9 层(21 GiB)靠页缓存才不每块重读盘。
- * 实测(code 拟合料 15360 末遍前向): 一直占着 300~319 s(每块流式 9 层 26~30 s), 放掉之后 53~56 s(2.4 s)。
- * 只在逐层序贯的增益路(--capture-ye, 不是后训练)放; 下一遍取料前 gr_work_reopen 按同样尺寸重开。
- * 出错会怎样: 放了不重开 = 取料钩子见 rx 为空就不写(第七版的约定), 解出来全是空料 —— 所以重开挂在每遍取料的开头。 */
-static int gr_seq_mode(const ctx_t *c) { return c->want_ye && !c->sft_list && !c->adv_list; }
+/* ★取料/解算工作区按层开、端到端前向之前放★(2026-10-21): rx/ry/hx/hy(各 n×D f32)、rye/hye(各 n×6×D f32, 1.9 GB)、rysh/hysh、
+ * 设备 dye/dysh/drw/dsel/dX/dYq/dYfp/dYtmp、val 副本 hvf/hvt —— 15360 行合计 ~12 GB, 全前向那几趟一个都不用。统一内存机器上它们
+ * 占着就是页缓存少这么多: 权重缓存封顶 88 GB 之外的 9 层(25 GB)靠页缓存才不每块重读盘(探针实测: 起点态 66 s, 解完一层后 179 s)。
+ * 放掉 + FP 教师的设备缓冲也放掉(v41_fp_moe_release), 下一层取料前再开。rrw/rsel/ralpha(几十 MB)与 λ 候选副本不动。 */
 static void gr_work_free(ctx_t *c) {
     free(c->rx); free(c->ry); free(c->hx); free(c->hy); free(c->hrw); free(c->hsel); free(c->halpha); free(c->hvf); free(c->hvt);
     free(c->rye); free(c->rysh); free(c->hye); free(c->hysh);
@@ -139,7 +111,7 @@ static void gr_work_free(ctx_t *c) {
     c->dye = c->dysh = c->drw = c->dX = c->dYq = c->dYfp = c->dYtmp = NULL; c->dsel = NULL;
     v41_fp_moe_release();
 }
-static int gr_work_alloc(ctx_t *c) {   /* 尺寸与 v41_amp_run.c 开头那次分配逐项相同 */
+static int gr_work_alloc(ctx_t *c) {
     const int ntok = c->n;
     const size_t nD = (size_t)ntok * c->D, nU = (size_t)ntok * MAXU, nyD = nU * (size_t)c->D;
     c->rx = malloc(nD * 4); c->ry = malloc(nD * 4); c->hx = malloc(nD * 4); c->hy = malloc(nD * 4);
@@ -147,74 +119,106 @@ static int gr_work_alloc(ctx_t *c) {   /* 尺寸与 v41_amp_run.c 开头那次�
     c->hvf = malloc((size_t)(ntok - c->nfit + 1) * c->D * 4); c->hvt = malloc((size_t)(ntok - c->nfit + 1) * c->D * 4);
     c->rye = malloc(nyD * 4); c->rysh = malloc(nD * 4); c->hye = malloc(nyD * 4); c->hysh = malloc(nD * 4);
     if (!c->rx || !c->ry || !c->hx || !c->hy || !c->hrw || !c->hsel || !c->halpha || !c->hvf || !c->hvt || !c->rye || !c->rysh || !c->hye || !c->hysh) {
-        fprintf(stderr, "★取料工作区(主机 %.1f GB)重开失败★\n", (double)(nD * 16 + nyD * 8) / 1e9); return -1; }
+        fprintf(stderr, "★取料工作区(主机 %.1f GB)分配失败★\n", (double)(nD * 16 + nyD * 8) / 1e9); return -1; }
     if (cudaMalloc((void **)&c->dye, nyD * 4) || cudaMalloc((void **)&c->dysh, nD * 4) || cudaMalloc((void **)&c->drw, nU * 4) || cudaMalloc((void **)&c->dsel, nU * 4) ||
         cudaMalloc((void **)&c->dX, nD * 4) || cudaMalloc((void **)&c->dYq, nD * 4) || cudaMalloc((void **)&c->dYfp, nD * 4) || cudaMalloc((void **)&c->dYtmp, nD * 4)) {
-        fprintf(stderr, "★取料工作区(设备 %.1f GB)重开失败★\n", (double)(nyD * 4 + nD * 20) / 1e9); return -1; }
+        fprintf(stderr, "★取料工作区(设备 %.1f GB)分配失败★\n", (double)(nyD * 4 + nD * 20) / 1e9); return -1; }
     return 0;
 }
-static int gr_work_reopen(ctx_t *c) { return (gr_seq_mode(c) && !c->rx) ? gr_work_alloc(c) : 0; }
-/* 一层解完(挂上或闸掉)之后: 序贯增益路全放; 别的路照旧只卸本轮没碰过的分片 */
-static void gr_layer_done(ctx_t *c) {
-    if (!gr_seq_mode(c)) { v41_st_release_idle(&c->S); return; }
-    v41_st_release_all(&c->S);
-    gr_work_free(c);
-}
 
-/* 解一层的增益: 扫 λ → 只认 val → 落盘。返回 <0 失败, 0 跳过, 1 挂上。
+/* 在当前取料上解 λ 网格, 全部解留进 sol[b](b=0 无本层 Δb 的态 / 1 挂着 Δb 的态)。返回 <0 失败。
  * ★这里报的 train/val 就是落地态★(2026-09-14 改格点直解之后): 解算器在 fp4 格点上解, 最终残差
  * 是拿格点值算的。以前是"按解算态 val 选 λ, 再把赢家压成 fp4", 两件事口径不一样 —— 大 λ 的解
  * 幅度小、相对量化误差更大, 两种口径可能选出不同的 λ, 而部署里跑的永远是压过之后的那一份。 */
-static int solve_layer_gr(ctx_t *c, int il, double t0, double t1) {
-    /* 行数用 nsel(--fit-rows/--val-rows 选的子集); 没选子集时就是全部取料行。 */
-    const int n = c->nsel > 0 ? c->nsel : c->n, D = c->D, nu = c->n_used, ne = c->n_expert;
+static int gr_solve_branch(ctx_t *c, int il, int b) {
+    const int n = c->nsel > 0 ? c->nsel : c->n, D = c->D, nu = c->n_used, ne = c->n_expert;   /* 行数用 nsel(--fit-rows/--val-rows 的子集) */
     const size_t nsD = (size_t)ne * D, nby = nsD / 32u * 17u;
-    float best_tr = 0.f, best_va = -1e9f, best_lam = 0.f;
+    gr_sols *S = &c->sol[b];
+    double t0, t1;
+    if (prep_layer(c, il, &t0, &t1)) return -1;   /* 取料自检 → 置换 → 上传 → FP 靶 */
     for (int l = 0; l < GR_NL; l++) {
-        float tr = 0.f, va = 0.f;
         if (v41_gr_solve_layer_gpu(c->dye, c->drw, c->dsel, c->dYfp, c->dysh,
-                                   n, c->nfit, nu, D, ne, GR_LAMS[l], GR_ITER, c->dgr, c->dgrpk, &tr, &va)) {
+                                   n, c->nfit, nu, D, ne, GR_LAMS[l], GR_ITER, c->dgr, c->dgrpk, &S->tr[l], &S->va[l])) {
             fprintf(stderr, "  [L%02d] ★增益解算失败(λ=%.3g), 停车★\n", il, GR_LAMS[l]);
             return -1;
         }
-        printf("  [L%02d] λ=%-5.3g train %+6.2f%%  val %+6.2f%% (fp4 格点上的落地读数)\n", il, GR_LAMS[l], tr, va);
+        printf("  [L%02d] %s λ=%-5.3g train %+6.2f%%  val %+6.2f%% (fp4 格点上的落地读数)\n", il, b ? "挂Δb" : "无Δb", GR_LAMS[l], S->tr[l], S->va[l]);
         fflush(stdout);
-        /* 赢家的 s 与【它那一份码字】一起留下来 —— 两者必须是同一次解算的产物, 否则落盘自证会炸 */
-        if (va > best_va) { best_va = va; best_tr = tr; best_lam = GR_LAMS[l];
-                            CK(cudaMemcpy(c->hgr, c->dgr, nsD * 4, cudaMemcpyDeviceToHost));
-                            CK(cudaMemcpy(c->hgrpk, c->dgrpk, nby, cudaMemcpyDeviceToHost)); }
+        /* 每个 λ 的 s 与【它那一份码字】一起留下来 —— 两者必须是同一次解算的产物, 否则落盘自证会炸 */
+        CK(cudaMemcpy(S->hgr[l], c->dgr, nsD * 4, cudaMemcpyDeviceToHost));
+        CK(cudaMemcpy(S->pk[l], c->dgrpk, nby, cudaMemcpyDeviceToHost));
     }
+    S->n = GR_NL;
     const double t2 = now_s(); c->t_solve += t2 - t1;
-    {   /* 不挂也要报缩放因子的范围 —— val 崩的时候第一件要看的就是解有没有跑飞 */
-        double mn = 1e30, mx = -1e30;
-        for (size_t t = 0; t < nsD; t++) { const double v = c->hgr[t]; if (v < mn) mn = v; if (v > mx) mx = v; }
-        printf("  [L%02d] 最优 λ=%.3g 的缩放因子范围 [%.4f, %.4f]\n", il, best_lam, mn, mx);
+    return 0;
+}
+
+/* 一个分支里层内 val 前 E2E_NCAND 个解的下标(val ≤ 0 不进), 返回个数 */
+static int gr_top(const gr_sols *S, int *ord) {
+    int o[GR_MAXL], no = 0;
+    for (int l = 0; l < S->n; l++) if (S->va[l] > 0.f) { int k = no++; while (k > 0 && S->va[o[k - 1]] < S->va[l]) { o[k] = o[k - 1]; k--; } o[k] = l; }
+    const int ng = no < E2E_NCAND ? no : E2E_NCAND;
+    for (int k = 0; k < ng; k++) ord[k] = o[k];
+    return ng;
+}
+
+/* 本层增益的候选端到端裁; 赢家定本层盘上留不留增益。Δb 的去留不在这里裁(见下), 返回 <0 失败, 0 本层不挂增益, 1 挂了增益。
+ * ★Δb 只由层内闸定, 端到端不撤它★(2026-10-21 第二趟 40 层后的两次诊断, 账在 fable5):
+ *   旧做法每层把"带 Δb"与"不带 Δb"两支候选放一起裁, 带 Δb 的那支每层只输 0.02~0.78% KLD, 18 层被撤 —— 按逐层读数全挂该亏 ~5%,
+ *   实测却是赚: ① 10-18 旧侧车拿掉它那 29 层 Δb, 判决份 KLD 0.31794 → 0.32500(落到第二趟的 0.32457); ② 第二趟补上旧侧车有它没有的
+ *   19 层 Δb(增益是在没 Δb 的料上解的, 还失配着), 判决份 KLD 0.32457 → 0.31666, 五项四项赢旧侧车。Δb 把路由推向 FP 的选专家集合,
+ *   单层推、下游还是量化路由时互相不搭; 一串层一起推才走到 FP 那条轨迹上 —— 逐层贪心看不见这种"合起来才赚"。
+ *   所以: 层内闸过了(rb_seq_solve 返回 1, 已落盘)就留着; 本层的比较基线换成"只挂 Δb、不挂增益"(多跑一趟前向), 只在挂着 Δb 重取的料上
+ *   解的增益里选; 层内闸没过的层与以前一样只有无 Δb 一支, 基线是上一层赢家的读数(不另跑)。 */
+static int gr_e2e_select(ctx_t *c, int il, int has_rb) {
+    const int D = c->D, ne = c->n_expert; const size_t nsD = (size_t)ne * D;
+    v41_st_release_all(&c->S);   /* 全前向之前把 FP 权重分片全卸掉(页缓存也丢): 让给流式层的权重页 */
+    gr_work_free(c);             /* 同理: 取料/解算工作区与 FP 教师设备缓冲 ~16 GB 也还回去, 下一层取料前再开 */
+    char gp[4300]; snprintf(gp, sizeof gp, "%s/gr_L%02d.bin", c->out_dir, il);
+    const int b = has_rb;        /* 只有一支: 有 Δb 就是挂着它重取的那支 */
+    const gr_sols *S = &c->sol[b];
+    e2e_cand cs[E2E_NCAND]; int nc = 0, cl[E2E_NCAND];   /* 候选 → λ 下标 */
+    memset(cs, 0, sizeof cs);   /* m.hit 从 NULL 起, e2e_run 才分配 */
+    const double t2 = now_s();
+    if (has_rb) {   /* 基线 = 只挂本层 Δb: 盘上此刻有 rb_Lnn 没有 gr_Lnn */
+        e2e_m m = {0};
+        if (e2e_run(c, "只挂Δb", &m)) return -1;
+        fprintf(c->mf, "L%02d e2e 上层赢家 KLD %.5f RMS %.4f Same %.2f → 只挂Δb KLD %.5f RMS %.4f Same %.2f(Δb 层内闸过, 留着; 下面的 base = 只挂Δb)\n",
+                il, c->e2e_base.kld, c->e2e_base.rms, c->e2e_base.same, m.kld, m.rms, m.same);
+        free(c->e2e_base.hit); c->e2e_base = m;
     }
-    if (best_va <= GR_GATE) {   /* ★<= 不是 <★: 正好等于闸的层没有留的理由 */
+    int ord[E2E_NCAND]; const int ng = gr_top(S, ord);
+    for (int k = 0; k < ng; k++) {
+        const int l = ord[k];
+        if (gr_write_bin(S->hgr[l], S->pk[l], ne, D, c->out_dir, il)) return -1;
+        snprintf(cs[nc].name, sizeof cs[nc].name, "%sλ=%g", b ? "rb+" : "", (double)GR_LAMS[l]);
+        if (e2e_run(c, cs[nc].name, &cs[nc].m)) return -1;
+        cl[nc] = l; nc++;
+    }
+    if (!nc) printf("  [L%02d] %s层内没有正 val 的增益解\n", il, b ? "挂Δb " : "无Δb ");
+    const int w = nc ? e2e_pick(c, il, cs, nc) : -1;
+    const double t3 = now_s();
+    for (int k = 0; k < nc; k++) if (k != w) free(cs[k].m.hit);   /* 输家的逐行命中表不要了; 赢家的随读数一起成为下一层的基线 */
+    if (w < 0) {   /* 没候选, 或基线赢: 本层不留增益(Δb 有就留着, 基线读数已是它的) */
+        remove(gp);
         c->skip_layers++;
-        fprintf(c->mf, "L%02d skip gr - - %+.2f %+.2f -\n", il, best_tr, best_va); fflush(c->mf);
-        printf("  [L%02d] val 最优 %+.2f%% ≤ 闸 %.1f%%, 不挂  (fp %.1fs 解 %.1fs)\n", il, best_va, GR_GATE, t1 - t0, t2 - t1);
-        gr_layer_done(c);
+        const float *va = S->va, *tr = S->tr; int lb = 0; for (int l = 1; l < S->n; l++) if (va[l] > va[lb]) lb = l;
+        fprintf(c->mf, "L%02d skip gr - - %+.2f %+.2f - (%s%s)\n", il, tr[lb], va[lb], nc ? "端到端基线赢" : "层内无正 val 候选", has_rb ? ", 只挂 Δb" : ""); fflush(c->mf);
+        printf("  [L%02d] 不挂增益: %s%s  (端到端 %.1fs)\n", il, nc ? "端到端基线赢" : "层内无正 val 候选", has_rb ? ", 只挂 Δb" : "", t3 - t2);
         return 0;
     }
+    free(c->e2e_base.hit); c->e2e_base = cs[w].m;   /* 赢家的读数(含逐行命中表) = 下一层的基线 */
+    const int l = cl[w];
+    const float *hs = S->hgr[l], lam = GR_LAMS[l], tr = S->tr[l], va = S->va[l];
+    /* 盘上此刻是最后一个候选的增益文件: 不是赢家的就重写(写的仍是解算器那份码字, 落盘前解码自证) */
+    if (w != nc - 1 && gr_write_bin(S->hgr[l], S->pk[l], ne, D, c->out_dir, il)) return -1;
     /* 缩放因子的分布也报出来 —— 全是 1 说明岭把解压死了(那时 val 也该接近 0, 两者对不上就是 bug) */
     double smin = 1e30, smax = -1e30, sabs = 0;
-    for (size_t t = 0; t < nsD; t++) {
-        const double v = c->hgr[t];
-        if (v < smin) smin = v;
-        if (v > smax) smax = v;
-        sabs += fabs(v - 1.0);
-    }
-    if (gr_write_bin(c->hgr, c->hgrpk, ne, D, c->out_dir, il)) return -1;
-
-    /* ★必须记进 ok_layers★: 多遍序贯靠它决定下一遍挂不挂本目录(v41_amp_run.c 的 set_amp_dir)。
-     * 漏了这一笔 = 每遍都在裸底座上解, 层与层之间的耦合完全没闭合 —— 而且不会报错, 只是解出来的
-     * 东西不是序贯的(09-13 实撞: 三层读数全是独立解的假序贯)。 */
-    c->ok_layers++; c->val_sum += best_va; c->dz_sum += sabs / (double)nsD;
-    fprintf(c->mf, "L%02d gr %.3g %.2f %+.2f %+.2f [%.4f,%.4f]\n", il, best_lam, sabs / (double)nsD, best_tr, best_va, smin, smax);
+    for (size_t t = 0; t < nsD; t++) { const double v = hs[t]; if (v < smin) smin = v; if (v > smax) smax = v; sabs += fabs(v - 1.0); }
+    c->ok_layers++; c->val_sum += va; c->dz_sum += sabs / (double)nsD;
+    fprintf(c->mf, "L%02d gr %.3g %.2f %+.2f %+.2f [%.4f,%.4f] %s\n", il, lam, sabs / (double)nsD, tr, va, smin, smax, b ? "带Δb" : "");
     fflush(c->mf);
-    printf("  [L%02d] ★挂上★ λ=%.3g train %+.2f%% val %+.2f%% | 缩放 |s−1| 均 %.4f 范围 [%.4f, %.4f] | fp4 %.2f MB  (fp %.1fs 解 %.1fs)\n",
-           il, best_lam, best_tr, best_va, sabs / (double)nsD, smin, smax, (double)nsD / 32.0 * 17.0 / 1e6, t1 - t0, t2 - t1);
-    gr_layer_done(c);
+    printf("  [L%02d] ★挂上★ %s λ=%.3g train %+.2f%% val %+.2f%% | 缩放 |s−1| 均 %.4f 范围 [%.4f, %.4f] | e2e KLD %.5f RMS %.4f%% Same %.2f%%  (端到端 %.1fs)\n",
+           il, b ? "带Δb" : "无Δb", lam, tr, va, sabs / (double)nsD, smin, smax, cs[w].m.kld, cs[w].m.rms, cs[w].m.same, t3 - t2);
     return 1;
 }

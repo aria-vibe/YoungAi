@@ -48,11 +48,13 @@ PROFILE=general
 GG_SET=""   # --gguf: sidecar 段的基座 GGUF(2026-10-17 新底座 1017 反修; 空 = 现役部署基座)
 HF_OVR=""   # --hf: 出厂权重目录覆盖(与 --gguf 成对给: 教师锚/链态夹具必须是这份基座自己的出厂权重, v41_judge.sh --hf 按目录名另存缓存)
 FIT_VARIANT=""   # --fit-variant think(2026-10-20 用户令"直接用现在的编程语料加 think 模板反修"): 拟合份逐窗套官方思考模板, 见 stage_fit_think
+LAYERS=40   # --layers N(2026-10-21/24): sidecar 段只解前 N 层 —— 机制探针用(端到端择优每层多几趟全前向, 先 2 层看通不通); 不满 40 的产物目录带 -probe, 不进对照不进部署
 while [ $# -gt 0 ]; do case "${1:-}" in
-  --profile) PROFILE="${2:?--profile 要值 general|fin|fin41|code|law|med|sci}"; shift 2;;
+  --profile) PROFILE="${2:?--profile 要值 general|fin|fin41|code|law|med|sci|graphics|restore}"; shift 2;;
   --gguf) GG_SET="${2:?--gguf 要文件}"; shift 2;;
   --hf) HF_OVR="${2:?--hf 要目录}"; shift 2;;
   --fit-variant) FIT_VARIANT="${2:?--fit-variant 要值 think}"; shift 2;;
+  --layers) LAYERS="${2:?--layers 要层数}"; shift 2;;
   *) break;;
 esac; done
 HF_SET=""
@@ -86,14 +88,25 @@ case "$PROFILE" in
   # law / med / sci(2026-09-27 用户令"再加入法律、医疗、科研这三个场景的侧车以及五指标"): 与 code 逐字同一套切法,
   # 语料 = sidecar_corpus_build.sh 产的 6 个子域(3 中 3 英)。15360 = 6 × 2560, 每子域 20 窗(15 拟合 + 5 held-out);
   # 与编程侧车同一个 token 数, 四个领域的五指标才是在同样长的尺子上量的。
-  code|law|med|sci)
+  # graphics(2026-10-24, docs/graphics_sidecar.md): 图形代码域 —— 语料 = 官方 API 原件生成的 60 份画图程序(think_trace_collect.py collect + code),
+  # 6 个子域 svg/canvas/p5/three/tikz/mpl 各 10 篇; 10-24 内容区判决: 画图页面 58% 的 KL 落在坐标值区, 编程侧车在那一区零收益 ⇒ 要一份坐标密集的拟合份。
+  # 切法与 law/med/sci 逐字同(15360 = 6 × 2560, 每子域 20 窗), 五指标在同样长的尺子上量; 主尺另有部署态的三份鹈鹕页面(html_region_judge_spark.sh)。
+  code|law|med|sci|graphics)
            NAME="$PROFILE"
            CORPUS="$ROOT/gguf-tools/data/corpus/$PROFILE"
            VQD="$ROOT/gguf/go-onebit/$PROFILE"
            SPLITS=("反修份:fit" "判决份:judge")
            SPLIT_N=15360
            HF_SET="$ROOT/hf/DeepSeek-V4.1-Flash";;
-  *) echo "未知 profile: $PROFILE(general|fin|fin41|code|law|med|sci)" >&2; exit 2;;
+  # restore(2026-10-24, docs/restore_sidecar.md): 还原侧车 —— 一份不按域, 拟合份是各域现成拟合份按配额混出来的(stage_idsmix, 零新分词):
+  # 编程 40% / 图形代码 10% / 数学 10% / 金法医科各 7.5% / 通用 10%, 共 120 窗 = 15360; 判决份不混(各域判决份各自当尺, stage_sidecar 的 restore 分支)。
+  restore) NAME="restore"
+           CORPUS=""
+           VQD="$ROOT/gguf/go-onebit/restore"
+           SPLITS=("反修份:fit")
+           SPLIT_N=15360
+           HF_SET="$ROOT/hf/DeepSeek-V4.1-Flash-1017";;
+  *) echo "未知 profile: $PROFILE(general|fin|fin41|code|law|med|sci|graphics|restore)" >&2; exit 2;;
 esac
 [ -n "$HF_OVR" ] && HF_SET="$(cd "$HF_OVR" && pwd)"
 S=8192                       # 锚 token 数(整份语料等距窗抽样)
@@ -567,11 +580,77 @@ print("  第一窗解码(看模板形状):\n" + tok.decode(out[:win], skip_speci
 PY
 }
 
+# ★还原侧车的混合拟合份(2026-10-24, docs/restore_sidecar.md §2 段 A)★: 从各域【现成的拟合份/反修份/量化份】按配额等距抽 128 位窗拼成一份,
+# 判决份一个窗都不碰(来源全是 fit / vqhalf_a / vqhalf_q, 从不读 judge / vqhalf_j), 拼完再逐窗对全部判决份核零重合。
+# 为什么等距不随机: 确定性, 同参数重跑逐字节同(idshalf 同一条纪律); 为什么按域给 layout 行: v41_amp_run 的 held-out = 每域窗号 k%4==3,
+# 每域 ≥ 4 窗才有 val 行 —— 配额最小的域 12 窗, 够。用法: amp_campaign.sh --profile restore idsmix
+stage_idsmix(){
+    [ "$PROFILE" = restore ] || DIE "idsmix 只给 restore profile"
+    local D2="$VQD"; mkdir -p "$D2"
+    local OUT="$D2/fit.ids"
+    [ -s "$OUT" ] && [ -s "$OUT.layout" ] && { LOG "①混合拟合份已在 $OUT, 跳过(要重切先 mv 走)"; return 0; }
+    LOG "①混合拟合份 → $OUT(编程 96 窗 / 数学 12 / 图形 12 = 120 窗 × 128; 10-24 晚配额)"
+    python3 - "$ROOT/gguf/go-onebit" "$OUT" <<'PY' || DIE "混合拟合份失败"
+import sys, os
+G, out = sys.argv[1], sys.argv[2]; W = 128
+def ids(p): return [int(x) for x in open(os.path.join(G, p)).read().split()]
+def lay(p):   # [(域, 起始行, 行数)]
+    L = []
+    for ln in open(os.path.join(G, p + ".layout")):
+        c = ln.split()
+        if len(c) == 3 and c[1].isdigit(): L.append((c[0], int(c[1]), int(c[2])))
+    return L
+def wins(p, keep=None):
+    """源份切成 128 位窗; keep = 只要这些 layout 域(None = 全部)"""
+    a = ids(p); out = []
+    for d, s, n in lay(p):
+        if keep is not None and d not in keep: continue
+        for k in range(s, s + n - W + 1, W): out.append((p, k, a[k:k + W]))
+    return out
+# 零重合: 候选窗(整 128 位)等于任何判决份里任何对齐窗的, 先剔再抽(10-24 实撞: law/fit.ids 第 7680 行的考题与 law/judge.ids 同行逐字同 ——
+# 09-27 法律语料去重漏了一篇, 09-28 法律侧车的拟合份里有这 1/120 窗的泄题; 这里剔掉并在 manifest 里记数, 不让它进还原侧车)
+# 两级指纹(10-24 晚 leak_audit 实撞: 整窗零重合之后 16-gram 还命中 4 窗 —— ObjC AppDelegate 头 / Rails 配置注释 / C# using 串 / 合同套话, 都是样板,
+# 但判决份里有的片段一个都不许进拟合份, 宁可换窗): 整窗 J 之外再做 16-gram JG, 候选窗任一 16-gram 命中就剔
+J = set(); JG = set(); NG = 16
+for p in ["code/judge.ids", "graphics/judge.ids", "law/judge.ids", "med/judge.ids", "sci/judge.ids", "vqfin41/vqhalf_j.ids", "vqhalf/vqhalf_j.ids", "g7/wt2.ids"]:
+    a = ids(p); J |= {tuple(a[k:k + W]) for k in range(0, len(a) - W + 1, W)}
+    JG |= {tuple(a[i:i + NG]) for i in range(len(a) - NG + 1)}
+skipped = []
+def leaky(w): return tuple(w) in J or any(tuple(w[i:i + NG]) in JG for i in range(W - NG + 1))
+def pick(ws, k):
+    ok = [w for w in ws if not leaky(w[2])]
+    skipped.extend(f"{w[0]}:{w[1]}" for w in ws if leaky(w[2]))
+    n = len(ok); assert n >= k, f"{ws[0][0]} 只有 {n} 窗 < {k}"
+    return [ok[round((i + 0.5) * n / k - 0.5)] for i in range(k)]
+# 配额(10-24 晚用户定, 第一版 8 域混合 48/12/12/9/9/9/9/12 判决份 81.51% 输现役编程 ② 81.90% 后改): 编程 80% + 数学 10% + 图形 10%, 不再掺金法医科/通用
+PLAN = [("code", pick(wins("code/fit.ids"), 96)),
+        ("math", pick(wins("vqhalf/vqhalf_a.ids", {"math"}) + wins("vqhalf/vqhalf_q.ids", {"math"}), 12)),
+        ("graphics", pick(wins("graphics/fit.ids"), 12))]
+seen = set(); rows = []; layout = []; man = []
+for dom, ws in PLAN:
+    layout.append((dom, len(rows), len(ws) * W))
+    for p, k, w in ws:
+        t = tuple(w)
+        assert t not in J, f"{dom} 窗 {p}:{k} 与判决份重合"
+        assert t not in seen, f"{dom} 窗 {p}:{k} 重复抽到"
+        seen.add(t); rows += w; man.append(f"{dom}\t{p}\t{k}")
+assert len(rows) == 120 * W, len(rows)
+open(out, "w").write("\n".join(map(str, rows)) + "\n")
+with open(out + ".layout", "w") as f:
+    f.write("# fit.ids 的行布局 — stage_idsmix 自动产出, 勿手改\n# win=每域内的等距窗宽(窗与窗之间是源语料里的跳跃=上下文断点)\n# 每行: <域名> <起始行> <行数>\nwin 128\n")
+    for d, s, n in layout: f.write(f"{d} {s} {n}\n")
+open(out + ".manifest.txt", "w").write("# 域\t来源份\t源起始行(10-24 stage_idsmix: 各域现成拟合份按配额等距抽窗, 判决份零重合已核)\n" + "\n".join(man) + "\n"
+                                       + "".join(f"# 剔(与判决份整窗重合): {s}\n" for s in skipped))
+print("混合拟合份 " + " / ".join(f"{d} {n // W} 窗" for d, s, n in layout) + f" = {len(rows)} 位; 对 7 份判决份零重合 ✓(候选里剔掉 {len(skipped)} 窗: {' '.join(skipped) or '无'}) → {out}")
+PY
+}
+
 # 用法: amp_campaign.sh --profile law sidecar   (idshalf 没切会先切; 三个域串行跑就在外面一个 for 循环)
 #       amp_campaign.sh --profile code --fit-variant think --gguf … --hf … sidecar   (拟合份套思考模板, 判决份同一份)
+#       amp_campaign.sh --profile restore --gguf … --hf … sidecar   (混合拟合份解一份还原侧车; 尺 = 编程判决份主裁 + 六把域尺 + wt2)
 stage_sidecar(){
-    case "$PROFILE" in code|law|med|sci|fin41) ;; *) DIE "sidecar 段只给 code/law/med/sci/fin41, 收到 $PROFILE";; esac
-    stage_idshalf
+    case "$PROFILE" in code|law|med|sci|graphics|restore|fin41) ;; *) DIE "sidecar 段只给 code/law/med/sci/graphics/restore/fin41, 收到 $PROFILE";; esac
+    if [ "$PROFILE" = restore ]; then stage_idsmix; else stage_idshalf; fi
     local J="$SC/v41_judge.sh"
     # 拟合份 / 判决份文件名按 profile 的 SPLITS 取(code/law/med/sci = fit/judge; fin41 = vqhalf_a/vqhalf_j, 09-21 金融侧车就是这两份)。
     # fin41 进 sidecar 段(2026-10-17 用户令"其他四个域也全部接上"): 现役金融侧车 09-21 是手敲 v41_judge.sh engamp 做的, 这里收成同一条链。
@@ -584,32 +663,50 @@ stage_sidecar(){
     local HFARG=(--hf "$HF_SET")
     local FIT_N="$SPLIT_N"   # 拟合份 token 数: 原样 = SPLIT_N; 套了思考模板的份每窗多 T 个模板 token, 按文件行数取
     if [ -n "$FIT_VARIANT" ]; then
-        case "$PROFILE" in code|law|med|sci) ;; *) DIE "--fit-variant 只给 code/law/med/sci(拟合份叫 fit 的那几个), 收到 $PROFILE";; esac
+        case "$PROFILE" in code|law|med|sci|graphics) ;; *) DIE "--fit-variant 只给 code/law/med/sci/graphics(拟合份叫 fit 的那几个), 收到 $PROFILE";; esac
         case "$FIT_VARIANT" in think) ;; *) DIE "--fit-variant 只认 think, 收到 $FIT_VARIANT";; esac
         stage_fit_think "$VQD/$FITN.ids" "$VQD/${FITN}_$FIT_VARIANT.ids"
         FITN="${FITN}_$FIT_VARIANT"; FIT_N=$(grep -c . "$VQD/$FITN.ids")
     fi
     local FIT="$VQD/$FITN.ids" JUD="$VQD/$JUDN.ids" WT2="$G7/wt2.ids" f d
+    # restore 没有自己的判决份: 主裁 = 编程判决份(用户: 编程最重, 现役部署对的公开数就是它), 其余域尺在 ④ 轮着判
+    [ "$PROFILE" = restore ] && JUD="$ROOT/gguf/go-onebit/code/judge.ids"
     for f in "$GG" "$FIT" "$FIT.layout" "$JUD" "$WT2" "$HF_SET/config.json"; do [ -s "$f" ] || DIE "缺 $f"; done
-    LOG "基座 $(basename "$GG") / 出厂权重 $HF_SET / 拟合份 $FITN n=$FIT_N / 判决份 $JUDN n=$SPLIT_N"
-    # 与 v41_judge.sh engamp 档的命名逐字同(<基座>-<模式>-<目录>_<文件名>_n<N>-engine), 对不上 ② 就会把自己当成"别的侧车"
+    LOG "基座 $(basename "$GG") / 出厂权重 $HF_SET / 拟合份 $FITN n=$FIT_N / 判决份 $JUDN n=$SPLIT_N / 解前 $LAYERS 层"
+    # 与 v41_judge.sh engamp 档的命名逐字同(<基座>-<模式>-<目录>_<文件名>_n<N>[_L<层数>-probe]-engine), 对不上 ② 就会把自己当成"别的侧车"
     # code: <基座>-grrb-code_fit_n15360-engine(与改前逐字同); fin41: <基座>-grrb-vqfin41_vqhalf_a_n8192-engine(与现役金融侧车同名法)
-    local ARM="$ROOT/gguf/v41/$(basename "$GG" .gguf)-grrb-$(basename "$VQD")_${FITN}_n${FIT_N}-engine"
+    local LSFX=""; [ "$LAYERS" != 40 ] && LSFX="_L$LAYERS-probe"
+    local ARM="$ROOT/gguf/v41/$(basename "$GG" .gguf)-grrb-$(basename "$VQD")_${FITN}_n${FIT_N}${LSFX}-engine"
     LOG "① 解 $NAME 侧车 + $NAME 判决份五指标 → $ARM"
     # 基座与拟合料传仓库相对路径(v41_judge.sh 先 cd 到仓库根): 解算器把这两个参数原样写进侧车 manifest.txt, 传绝对路径
     # 就是把 /home/<本机用户>/ 写进要公开发布的文件, hf_publish_spark.sh 的 stage 会因此拒发(09-28 实撞, 三份 manifest 手工改回)
-    "$J" "$JUD" "$SPLIT_N" "${HFARG[@]}" "engamp:${FIT#$ROOT/}:$FIT_N:${GG#$ROOT/}:0:40:grrb" || DIE "① 解侧车/判决失败"
+    "$J" "$JUD" "$SPLIT_N" "${HFARG[@]}" "engamp:${FIT#$ROOT/}:$FIT_N:${GG#$ROOT/}:0:$LAYERS:grrb" || DIE "① 解侧车/判决失败"
     grep -q "^# 完成" "$ARM/manifest.txt" 2>/dev/null || DIE "侧车目录没有完成标记: $ARM"
+    # 探针(不满 40 层)到此为止: 对照臂与 wt2 要再装几次模型, 对一个几层的半成品没有读数意义(机制与耗时看解算日志的 e2e 行)
+    [ "$LAYERS" = 40 ] || { LOG "探针(前 $LAYERS 层)只验机制, 跳过 ②③④"; return 0; }
     local CMP=("engine:$GG")
     for d in "$ROOT/gguf/v41/$(basename "$GG" .gguf)"-grrb-*-engine; do
         [ "$d" = "$ARM" ] && continue
         case "$d" in *-probe-engine) continue;; esac       # 消融探针(如 norb-probe)不是交付的侧车
         grep -q "^# 完成" "$d/manifest.txt" 2>/dev/null && CMP+=("engine:$GG:$d")
     done
-    LOG "② 对照 ${#CMP[@]} 档(裸基座 + 其他领域侧车), 同一判决份"
+    # 现役部署的 ②(serve_pick 第 2 行, 名字带 .1018 这类后缀, 上面的 glob 够不着)也进对照: 还原侧车要赢的就是它
+    local DEP; DEP=$(sed -n 2p "$ROOT/gguf/serve_pick.txt" 2>/dev/null); DEP="${DEP:-}"
+    [ -n "$DEP" ] && [ "$DEP" != "$ARM" ] && grep -q "^# 完成" "$DEP/manifest.txt" 2>/dev/null && CMP+=("engine:$GG:$DEP")
+    LOG "② 对照 ${#CMP[@]} 档(裸基座 + 其他领域侧车 + 现役 ②), 同一判决份"
     "$J" "$JUD" "$SPLIT_N" "${HFARG[@]}" "${CMP[@]}" || DIE "② 对照失败"
     LOG "③ wt2 512 守门: 裸基座 / +$NAME 侧车"
     "$J" "$WT2" 512 "${HFARG[@]}" "engine:$GG" "engine:$GG:$ARM" || DIE "③ wt2 守门失败"
+    if [ "$PROFILE" = restore ]; then
+        # ④ 其余四个域的尺(业务只有五个域: 编程 / 金融 / 法律 / 医疗 / 科研, 用户 10-24 定; 编程在 ①② 当主裁): 裸 / 现役 ② / 还原侧车 三臂同趟
+        #   图形判决份与八域 vqhalf_j 不是业务域, 不进这里(要看就手敲 v41_judge.sh)
+        local R
+        for R in "vqfin41/vqhalf_j.ids 8192" "law/judge.ids 15360" "med/judge.ids 15360" "sci/judge.ids 15360"; do
+            set -- $R
+            LOG "④ 域尺 $1 n=$2: 裸 / 现役 ② / 还原侧车"
+            "$J" "$ROOT/gguf/go-onebit/$1" "$2" "${HFARG[@]}" "engine:$GG" ${DEP:+"engine:$GG:$DEP"} "engine:$GG:$ARM" || DIE "④ 域尺 $1 失败"
+        done
+    fi
 }
 
 # ★放大器半扩样(2026-08-26 zloss90 战役, 用户令: 体积≤2GB 换 Σmin→0.90)★
@@ -1446,7 +1543,7 @@ case "$ST" in
   preflight) stage_preflight;; ids) stage_ids;; anchor) stage_anchor;;
   capture) stage_capture;; probe) stage_probe;; solve) stage_solve;; pass2) stage_pass2;;
   fitthink) stage_fit_think "$VQD/fit.ids" "$VQD/fit_think.ids";;   # 只产套模板的拟合份(发车前看一眼形状; 不碰模型)
-  chain) stage_chain;; judge) stage_judge;; dilute) stage_dilute;; idshalf) stage_idshalf;; sidecar) stage_sidecar;; idshalf_ext) shift; stage_idshalf_ext"$@";; vqmerge) stage_vqmerge;; vqcap) stage_vqcap;; vqsolve) stage_vqsolve;; dynladder) stage_dynladder;; dynquant) shift; stage_dynquant "$@";; dynjudge) stage_dynjudge;; champbf) shift; stage_champbf "$@";; champ86) stage_champ86;; champreset) stage_champ_reset;; champ3rd) stage_champ3rd;; corpdiff) stage_corpdiff;; anchors3) stage_anchors3;; anchorwt2) stage_anchor_wt2;; champ3) stage_champ3;; elmprobe) stage_elmprobe;; probe3) stage_probe3;; judge3) shift; stage_judge3 "$@";; champrb) stage_champ_rbsweep;; chainx) stage_chainx;; full) shift; stage_full "$@";;
+  chain) stage_chain;; judge) stage_judge;; dilute) stage_dilute;; idshalf) stage_idshalf;; idsmix) stage_idsmix;; sidecar) stage_sidecar;; idshalf_ext) shift; stage_idshalf_ext"$@";; vqmerge) stage_vqmerge;; vqcap) stage_vqcap;; vqsolve) stage_vqsolve;; dynladder) stage_dynladder;; dynquant) shift; stage_dynquant "$@";; dynjudge) stage_dynjudge;; champbf) shift; stage_champbf "$@";; champ86) stage_champ86;; champreset) stage_champ_reset;; champ3rd) stage_champ3rd;; corpdiff) stage_corpdiff;; anchors3) stage_anchors3;; anchorwt2) stage_anchor_wt2;; champ3) stage_champ3;; elmprobe) stage_elmprobe;; probe3) stage_probe3;; judge3) shift; stage_judge3 "$@";; champrb) stage_champ_rbsweep;; chainx) stage_chainx;; full) shift; stage_full "$@";;
   all) stage_preflight; stage_ids; stage_anchor; stage_capture
        stage_solve; stage_chain; stage_judge;;
   *) echo "未知段: $ST"; echo "段: preflight ids anchor capture solve pass2 chain judge dilute all (probe/dilute=诊断)"; exit 2;;

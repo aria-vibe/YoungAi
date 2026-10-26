@@ -1,10 +1,21 @@
 /* v41_amp_lowrank.inc.c — 低秩放大器(amp_Lnn.bin: y += x·(B·A))那条路的逐层解算, v41_amp_run.c 单 TU include。
  * 拆出来只为守单文件 ≤500 行。这是 09-12 的第一形态, 09-13 被权重侧逐专家增益(v41_gr_run.inc.c)取代 ——
  * 留着是因为 --target kl 蒸馏靶与 K 扫描仍走这条路, 且它是"层内赢但端到端不赢"那段账的活证据。 */
-/* 解第 il 层: 置换 → 上传 → FP 靶 → K×λ 扫描 → 择优 → 解 → 落盘 + manifest。返回 <0 失败, 0 跳过, 1 挂上 */
-static int solve_layer(ctx_t *c, int il) {
+/* 择优(= v41_amp_hooks._choose): 百分比表 pct[NL][NK], val ≥ KEEP×最优 的格里取最小 K, 同 K 取最大 λ。返回 0 = 没有可选格 */
+static int choose(const float pct[NL][NK], float *best, int *ki, int *lj) {
+    *best = pct[0][0];
+    for (int l = 0; l < NL; l++) for (int k = 0; k < NK; k++) if (pct[l][k] > *best) *best = pct[l][k];
+    if (*best <= 0.f) return 0;
+    *ki = -1; *lj = -1;
+    for (int k = 0; k < NK && *ki < 0; k++) for (int l = 0; l < NL; l++) if (pct[l][k] >= KEEP * *best) { *ki = k; break; }
+    for (int l = NL - 1; l >= 0; l--) if (pct[l][*ki] >= KEEP * *best) { *lj = l; break; }
+    return 1;
+}
+
+/* 解算前的共同准备(低秩路与增益路同用): HF 索引 → 取料自检 → 行置换 → 上传 → 靶(FP 或蒸馏)。*t0 = 开始, *t1 = 靶算完。 */
+static int prep_layer(ctx_t *c, int il, double *t0, double *t1) {
     const int n = c->n, D = c->D, nu = c->n_used;
-    const double t0 = now_s();
+    *t0 = now_s();
     if (!c->klt && resolve_layer(c, il)) return -1;   /* 蒸馏靶不碰 HF 出厂权重: 靶只来自两份 logits */
     if (c->want_ye) {
         /* ★机制审计★ 逐专家输出必须能逐位重建引擎这一层的输出: y[i][d] == Σ_k rw[i][k]·ye[i][k][d]。
@@ -58,8 +69,18 @@ static int solve_layer(ctx_t *c, int il) {
     } else if (v41_fp_moe_layer(c->ex, c->n_expert, &c->sh, c->dX, c->hsel, c->hrw, ns, D, c->MID, nu, c->clamp, c->dYfp)) {
         fprintf(stderr, "  [L%02d] ★FP 靶计算失败, 停车★\n", il); return -1;
     }
-    const double t1 = now_s(); c->t_fp += t1 - t0;
-    if (c->want_ye) return solve_layer_gr(c, il, t0, t1);
+    *t1 = now_s(); c->t_fp += *t1 - *t0;
+    return 0;
+}
+
+/* 低秩路: 准备 → K×λ 扫描 → 择优 → 解 → 落盘 + manifest。返回 <0 失败, 0 跳过, 1 挂上 */
+static int solve_layer(ctx_t *c, int il) {
+    const int n = c->n, D = c->D;
+    double t0, t1;
+    if (prep_layer(c, il, &t0, &t1)) return -1;
+    const int ns = c->nsel > 0 ? c->nsel : n; const size_t nD = (size_t)ns * D;
+    double qn2 = 0.0; for (size_t i = 0; i < nD; i++) qn2 += (double)c->hy[i] * c->hy[i];
+    const double qnorm = sqrt(qn2);   /* 靶/‖y_q‖ 的分母(prep_layer 里算过一遍, 这里是低秩路自己的账) */
     float tr[NL * NK], va[NL * NK], trw[NL * NK], vaw[NL * NK], rel = 0.f;
     if (v41_amp_scan_k_gpu(c->dX, c->dYfp, c->dYq, n, D, c->nfit, SEL_KS, NK, SEL_LAMS, NL, tr, va, &rel, c->whiten, trw, vaw)) { fprintf(stderr, "  [L%02d] ★K×λ 扫描失败, 停车★\n", il); return -1; }
     const double t2 = now_s(); c->t_scan += t2 - t1;

@@ -9,6 +9,7 @@
 #   先等机上正在跑的 amp_campaign.sh / v41_judge.sh / v41_amp_run 退完再开(不抢机器, 也不与它们双装)。
 # 停车规则: 任一域失败就停(exit 1), 不跳到下一个 —— 少一个侧车必须让人看见, 不许"跑完了"却缺一格。
 #   --fit-variant think(2026-10-20): 拟合份逐窗套官方思考模板再解(amp_campaign.sh stage_fit_think), 判决份不变; 侧车名带 fit_think。
+#   --layers N(2026-10-21/24): 只解前 N 层的机制探针(端到端择优改动后先 2 层看通不通), 产物目录带 -probe, 不进对照不进部署。
 # 模型子进程(2026-10-20): 工作台正在服务时机器被 113 GB 底座占着, 解算器与引擎学生各要整机 ⇒ 子进程 idle 就停它, 跑完按
 #   gguf/serve_pick.txt 装回(model_restart_spark.sh, 与页面同路); 子进程不是 idle(有人在聊)就不停、直接退出。
 set -uo pipefail
@@ -17,7 +18,8 @@ GG=""; HF=""; DOMS=(); FITV=()
 while [ $# -gt 0 ]; do case "$1" in
   --gguf) GG="${2:?--gguf 要文件}"; shift 2;;
   --hf) HF="${2:?--hf 要目录}"; shift 2;;
-  --fit-variant) FITV=(--fit-variant "${2:?--fit-variant 要值 think}"); shift 2;;
+  --fit-variant) FITV+=(--fit-variant "${2:?--fit-variant 要值 think}"); shift 2;;
+  --layers) FITV+=(--layers "${2:?--layers 要层数}"); shift 2;;
   -*) echo "★不认识的参数 $1★"; exit 2;;
   *) DOMS+=("$1"); shift;;
 esac; done
@@ -33,8 +35,9 @@ if pgrep -x ds4-server >/dev/null; then
     pgrep -x ds4-server >/dev/null && { pkill -x -KILL ds4-server; sleep 5; }
     pgrep -x ds4-server >/dev/null && { M "★ds4-server 杀不掉★"; exit 1; }
     sleep 6
-    trap 'rc=$?; M "装回模型子进程"; bash gguf-tools/scripts/model_restart_spark.sh; echo "SIDECARS_EXIT $rc"' EXIT
 fi
+# 装回的条件是"工作台在"而不是"刚才有子进程"(10-20 实撞: 上一趟刚退、子进程还没拉起来的那几秒里发车, 没设 trap, 跑完模型就一直是空的)
+pgrep -x ds4-train >/dev/null && trap 'rc=$?; M "装回模型子进程"; bash gguf-tools/scripts/model_restart_spark.sh; echo "SIDECARS_EXIT $rc"' EXIT
 BUSY="amp_campaign[.]sh|v41_judge[.]sh|v41_amp_ru[n] |v41_teacher[.]py|ds[4] -m"
 if pgrep -f "$BUSY" >/dev/null; then
     M "机上还有反修/判决在跑, 等它退完再开:"; pgrep -a -f "$BUSY" | head -3 | cut -c1-160

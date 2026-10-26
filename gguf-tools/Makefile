@@ -279,6 +279,7 @@ $(AMP)/v41_route_solve.o: $(AMP)/v41_route_solve.cu $(AMP)/v41_route_solve.h
 # 写法旧二进制不认识, 报的却是"行段不合法", 查了半天才发现是二进制没换)。
 $(AMP)/v41_amp_run.o: $(AMP)/v41_amp_run.c $(AMP)/v41_calib_dump.inc.c $(QZ)/v41_calib.h $(AMP)/v41_gr_run.inc.c $(AMP)/v41_amp_lowrank.inc.c $(AMP)/v41_sft_run.inc.c $(AMP)/v41_margin_solve.inc.c $(AMP)/v41_adv_run.inc.c \
                       $(AMP)/v41_margin_gen.inc.c $(AMP)/v41_fp_bind.inc.c $(AMP)/v41_rb_run.inc.c $(AMP)/v41_route_solve.h \
+                      $(AMP)/v41_amp_hook.inc.c $(AMP)/v41_e2e_select.inc.c $(BEN)/anchor_row.h \
                       $(AMP)/v41_fp_moe.h $(AMP)/v41_kl_target.h ../src/common/ds4_st41.h ../src/common/ds4_quantfmt.h \
                       ../src/common/ds4_etgd.h ../src/common/ds4_gr_fnv.h ../src/common/ds4_gguf.h ../ds4.h ../ds4_v41_api.h
 	$(CC) $(BARE) $(NATIVE) -std=c99 -Wall -I.. -I$(CUDA_HOME)/include -c $< -o $@
@@ -288,7 +289,8 @@ $(AMP)/v41_kl_target.o: $(AMP)/v41_kl_target.cu $(AMP)/v41_kl_target.h ../src/co
 # GGUF 读器: 父仓只在 ds4_unit 里直接编它, 没有现成 .o —— 这里自己编一份(同一份源, 不是抄第二份实现)
 $(AMP)/ds4_gguf.o: ../src/common/ds4_gguf.c ../src/common/ds4_gguf.h
 	$(CC) $(BARE) $(NATIVE) -std=c99 -Wall -I.. -c $< -o $@
-$(AMP)/v41_amp_run: $(AMP)/v41_amp_run.o $(AMP)/v41_amp_solve.o $(AMP)/v41_fp_moe.o $(AMP)/v41_kl_target.o $(AMP)/v41_gr_solve.o $(AMP)/v41_route_solve.o $(AMP)/ds4_gguf.o
+# bench/anchor_row.o(2026-10-21): 端到端择优的逐位指标与判决器同一份对象
+$(AMP)/v41_amp_run: $(AMP)/v41_amp_run.o $(AMP)/v41_amp_solve.o $(AMP)/v41_fp_moe.o $(AMP)/v41_kl_target.o $(AMP)/v41_gr_solve.o $(AMP)/v41_route_solve.o $(AMP)/ds4_gguf.o $(BEN)/anchor_row.o
 	@test -f ../ds4_cuda.o || { echo "★引擎对象缺: 先在仓库根 make cuda-spark★"; exit 1; }
 	$(NVCC) -O3 -o $@ $^ $$( $(V41AMP_ENGINE_OBJS_CMD) ) $(QUALITY_LDLIBS) -lcusolver
 else
