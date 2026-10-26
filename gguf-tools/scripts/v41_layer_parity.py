@@ -3,15 +3,23 @@
 
 两边都落 f32 [n][5120]: Python `--dump-moe DIR` → DIR/x_Lnn.bin, y_Lnn.bin; 引擎(n ≤ 64 自动) → <out>.x_Lnn.bin。
 每层打: x 的相对误差 ‖Δ‖/‖ref‖、cos; y 同; 误差在哪一层跳起来, 差就在那一层的那个块里。
-用法: v41_layer_parity.py <python dump dir> <engine out prefix> <n_layers=40>
+用法: v41_layer_parity.py <python dump dir> <engine out prefix> <n_layers=40> [--buckets 128,640,1001]
+  --buckets(10-25): 每层 x 的相对误差再按位置段各报一次(段界 = 给的位置, 最后一段到末尾)。为什么: FP 教师 600 位之后回看失灵,
+  要看"哪一层、从哪个位置段起"误差跳起来 —— 整条一个数会被前面正常的位置摊平。段界取 128(窗口) / 640(窗口 + top-512) / 第二份起点。
 """
 import sys
 from pathlib import Path
 
 import numpy as np
 
-pd, ep = Path(sys.argv[1]), sys.argv[2]
-nl = int(sys.argv[3]) if len(sys.argv) > 3 else 40
+argv = sys.argv[1:]
+buckets = []
+if "--buckets" in argv:
+    i = argv.index("--buckets")
+    buckets = [int(v) for v in argv[i + 1].split(",")]
+    argv = argv[:i] + argv[i + 2:]
+pd, ep = Path(argv[0]), argv[1]
+nl = int(argv[2]) if len(argv) > 2 else 40
 # 第二个参数也可以是另一个 Python dump 目录(Python 口径 A vs B, 看两条 bf16 流水线自身的分叉地板)
 if Path(ep).is_dir():
     ep = ep.rstrip("/") + "/"   # 目录前缀: "<dir>/" + "x_Lnn.bin"(Path(d)/"" 不会带尾斜杠, 别用)
@@ -45,7 +53,11 @@ if hid.exists() and not Path(ep).is_dir():
                 m = min(a.size, b.size); a, b = a[:m].reshape(-1, 4 * 5120), b[:m].reshape(-1, 4 * 5120)
                 r, c = rel(a, b); perrow = np.linalg.norm(a - b, axis=1) / (np.linalg.norm(b, axis=1) + 1e-30)
                 print(f"[engram L{L:02d}] engram 后 hc: 相对误差 {r:.4e} cos {c:.5f}; 前 8 位置逐行: " + " ".join(f"{v:.3e}" for v in perrow[:8]))
-print(f"{'层':>3} | {'x 相对误差':>10} {'x cos':>8} | {'y 相对误差':>10} {'y cos':>8} | 备注")
+bhdr = ""
+if buckets:
+    edges = [0] + buckets
+    bhdr = " | " + " ".join(f"x[{lo}:{hi if hi else '末'})" .rjust(13) for lo, hi in zip(edges, buckets + [0]))
+print(f"{'层':>3} | {'x 相对误差':>10} {'x cos':>8} | {'y 相对误差':>10} {'y cos':>8} | 备注{bhdr}")
 for L in range(nl):
     px, py = pd / f"x_L{L:02d}.bin", pd / f"y_L{L:02d}.bin"
     ex, ey = Path(_fmt("x", L)), Path(_fmt("y", L))
@@ -55,12 +67,16 @@ for L in range(nl):
     n = min(a.size, b.size); a, b = a[:n].reshape(-1, 5120), b[:n].reshape(-1, 5120)
     rx, cx = rel(a, b)
     note = ""
+    bk = ""
+    if buckets:   # 按位置段的 x 相对误差(每段 ‖Δ‖/‖ref‖), 哪一段先跳起来一眼可见
+        edges = [0] + buckets + [a.shape[0]]
+        bk = " | " + " ".join(f"{rel(a[lo:hi], b[lo:hi])[0]:13.4e}" if hi > lo else f"{'-':>13}" for lo, hi in zip(edges[:-1], edges[1:]))
     if py.exists() and ey.exists():
         a2, b2 = np.fromfile(ey, np.float32), np.fromfile(py, np.float32)
         m = min(a2.size, b2.size); a2, b2 = a2[:m].reshape(-1, 5120), b2[:m].reshape(-1, 5120)
         ry, cy = rel(a2, b2)
         worst = int(np.argmax(np.linalg.norm(a2 - b2, axis=1) / (np.linalg.norm(b2, axis=1) + 1e-30)))
         note = f"y 最差行 t={worst}"
-        print(f"{L:3d} | {rx:10.4e} {cx:8.5f} | {ry:10.4e} {cy:8.5f} | {note}")
+        print(f"{L:3d} | {rx:10.4e} {cx:8.5f} | {ry:10.4e} {cy:8.5f} | {note}{bk}")
     else:
-        print(f"{L:3d} | {rx:10.4e} {cx:8.5f} | {'-':>10} {'-':>8} |")
+        print(f"{L:3d} | {rx:10.4e} {cx:8.5f} | {'-':>10} {'-':>8} |{bk}")

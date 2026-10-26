@@ -64,6 +64,38 @@ def parse_args():
     ap.add_argument("--exact-weights", action="store_true",
                     help="★对拍夹具★: fp4/fp8/VQ 解出的权重留 f32 不舍 bf16(官方 fp4/fp8 kernel 就是用精确权重算的;"
                          " 舍 bf16 是本夹具为了喂官方 bf16 模型声明做的近似)。引擎用的是文件精确值, 对拍用这个口径")
+    ap.add_argument("--index-topk", type=int, default=0,
+                    help="★诊断夹具★: 覆盖 config 的 index_topk(每个 query 可见的压缩位数, 1017 是 512)。给大于序列长的值 = 索引器不做选择、"
+                         "全部压缩位都看 —— 10-25 查教师 500 位之后回看失灵(抄 1500 位的第二份错块、工具 schema 段 NLL 5 对引擎 1.3)时, 用它分辨是索引选择坏还是别处坏。不是生产配置")
+    ap.add_argument("--dump-idx", default="",
+                    help="★诊断夹具(10-25)★: 把每个索引源层(L2/8/14/20/24/28/32/36)索引器选出的压缩位落到该目录 idx_Lnn.bin(int32 [s][topk], 未加 offset, "
+                         "不可见位 -1)。用途: FP 路(出厂权重)与 file 路(量化目录)同一序列各落一份, 逐查询比 top-512 集合的重叠 —— 教师 600 位后回看失灵, 先定是不是选错了位")
+    ap.add_argument("--verify-load", action="store_true",
+                    help="★诊断夹具(10-25)★: 每个非 routed 专家的张量装到 GPU 后, 再从 mmap 用 CPU 独立解一遍逐位比, 不同就打出来。"
+                         "为什么: GB10 内存吃紧时 NVRM 报 _memdescAllocInternal OOM, 10-22 引擎撞过'GPU 读主机页静默读坏'; 教师 FP 路 + engram 开是整机最紧的组合, "
+                         "症状(确定性复现、关 engram 就好、只有长程选择坏)像装载时某些张量被读坏。抓到哪个张量不同, 病根就在装载而不在算法")
+    ap.add_argument("--ffn-from", default="",
+                    help="★诊断夹具(10-25)★: layers.N.ffn.* (routed/shared 专家 + gate)改从这个目录装, 其余(注意力/索引器/压缩器/engram/头)仍从主目录装 —— "
+                         "FP 路(精确权重)长程失灵而量化目录不失灵, 用它做 2×2 二分: 量化目录 + --ffn-from FP = q4_K 骨架 + 精确专家; FP + --ffn-from 量化目录 = 精确骨架 + VQ 专家。"
+                         "与 --fp-dir 不同: --fp-dir 只在反修算靶那一遍(qmode 关)才接管 ffn, 平常前向不生效")
+    ap.add_argument("--act-quant", action="store_true",
+                    help="★诊断夹具(10-25)★: 量化权重(fp4/fp8/VQ/q4_K)的 linear 先按官方 linear() 口径把激活压 fp8(per-32 ue8m0, 量化再反量化)再算。"
+                         "教师默认不压(fp32 精确激活); 精确 FP4 专家下长程失灵而 VQ 专家不失灵, 剩下的唯一差别就是这步 —— 模型可能是靠它校准的")
+    ap.add_argument("--kernel-check", action="store_true",
+                    help="★诊断夹具(10-25)★: 保留的三个官方 tilelang 核(act_quant 原地 fp8 / fp4_act_quant 原地 fp4 / hc_split_sinkhorn)每次调用都在旁边用 torch 参考"
+                         "(v41_kernel_rowprobe.py 同一套公式)再算一遍, 记最大差、不同元素数、输入幅度; 前向仍用核的结果。rowprobe 只在随机小幅输入上对过, "
+                         "这里对的是真实激活(巨值通道)。有差 ⇒ 核在 GB10 上对某些幅度算错; 无差 ⇒ 核排除")
+    ap.add_argument("--ffn-part", default="", choices=["", "routed", "shared"],
+                    help="配 --ffn-from: 只换 routed 专家(layers.N.ffn.experts.*, FP 侧是 FP4)或只换 shared 专家(layers.N.ffn.shared_experts.*, FP 侧是 FP8, 量化目录里是 Q4_K); 空 = 整个 ffn")
+    ap.add_argument("--balloon-gb", type=float, default=0.0,
+                    help="★诊断夹具(10-25)★: 建模后先在 GPU 上占住这么多 GB 不放(填 1), 人为把整机内存压到 FP 路的水位。给干净的 file 档加它: "
+                         "坏了 ⇒ 病是内存压力下的静默读坏(NVRM _memdescAllocInternal OOM 那条路), 不是权重也不是算法")
+    ap.add_argument("--force-idx", default="",
+                    help="★诊断夹具(10-25)★: 索引器不自己选, 直接用该目录里 --dump-idx 落的 idx_Lnn.bin(同一序列、另一条路如 file 档跑出来的选择)。"
+                         "FP 路换上 file 路的选择后能抄 ⇒ 病在索引选择; 还不能 ⇒ 病在注意力值/分数。不是生产配置")
+    ap.add_argument("--index-fp32", action="store_true",
+                    help="★诊断夹具(10-25)★: 索引分数(q·k → relu → ×权重 → 按头求和)全程 fp32, 不按官方在 bf16 里算。官方/引擎都是 bf16 口径, 这个旗只用来分辨"
+                         "'选错位'是不是 bf16 精度/并列造成的。不是生产配置")
     ap.add_argument("--no-engram", action="store_true",
                     help="★对拍夹具★: 摘掉 engram 层(L1/L14 的 n-gram 查表加法), 给引擎 P2 分段对拍用 —— 引擎先不带"
                          " engram 跑通其余链路, 两边同口径比 logits。不是生产配置")
