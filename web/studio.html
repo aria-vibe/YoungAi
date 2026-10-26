@@ -256,6 +256,9 @@
   .plan .pq ul { margin: 4px 0 0; padding-left: 20px; } .plan .phint { font-size: 12px; }
   @media (max-width: 760px) { .plan { margin-left: 0; } }
   .aend { margin-left: 42px; } .aerr { margin-left: 42px; font-size: 13px; }
+  .vnote { margin-left: 42px; display: flex; gap: 8px; align-items: flex-start; color: var(--dim); font-size: 12.5px; }
+  .vnote .vtag { flex: none; border: 1px solid var(--accent-line); border-radius: 99px; padding: 0 8px; line-height: 18px; }
+  .vnote .vtext { white-space: pre-wrap; word-break: break-word; max-height: 2.9em; overflow: hidden; cursor: pointer; } .vnote .vtext.open { max-height: none; }
   /* 进/出(方案稿 §13): 设备卡 = 等这台设备做事(剪贴板/选文件); 交付卡 = 模型写进工作区的文件; 终稿卡 = 复制/分享 + 正文里抽出的链接·电话·导航 */
   .tool.dev { border-color: var(--accent-line); }
   .deliver { margin: 8px 0 8px 42px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center; font-size: 13px; }
@@ -332,7 +335,7 @@
   textarea.memtxt { width: 100%; min-height: 360px; resize: vertical; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 10px 0; }
   #v-act .card { margin-bottom: 16px; } #v-act td.wrap { white-space: normal; word-break: break-all; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; } #v-act td .act { font-size: 12.5px; padding: 3px 9px; }
   @media (max-width: 1100px) { .mem-grid { grid-template-columns: 1fr; } }
-  @media (max-width: 760px) { .tool, .aend, .aerr { margin-left: 0; } }
+  @media (max-width: 760px) { .tool, .aend, .aerr, .vnote { margin-left: 0; } }
 
   /* ---------- 训练 ---------- */
   .train-grid { display: grid; grid-template-columns: 320px minmax(0, 1fr); gap: 18px; align-items: start; }
@@ -1189,6 +1192,7 @@ const I18N = {
     tab_tasks: "任务", hint_tasks: "交给助理持续跟着的事: 它到点自己再看一遍, 进展都在这里; 点卡片进它的对话, 能看它每一次做了什么",
     tk_fab: "新任务: 去助理里说要跟什么", tk_empty: "还没有任务。点右下角 +, 在助理里说一句要持续跟的事(盯一个价格、追一件事的进展、每天整理一份东西…), 它会建成任务。",
     tk_pause: "暂停", tk_resume: "继续", tk_run: "现在跟进", tk_done: "完成", tk_del: "删除", tk_del_confirm: "删除这个任务和它的对话? (挪进 ~/.ds4/assistant/trash/, 盘上还能找回)",
+    vf_tag: "校验 {0}",
     pl_tag: "计划", pl_wait: "等你确认", pl_active: "进行中 {0}/{1}", pl_paused: "已暂停 {0}/{1}", pl_done: "已完成 {0}/{1}", pl_abandoned: "已放弃", pl_q: "要你拿主意:", pl_start: "开始", pl_discard: "放弃",
     pl_hint: "按开始之前助理只查不动: 不写文件、不跑程序、不发通知。有要改的直接在下面回它。", pl_discard_confirm: "放弃这个计划? 对话还在, 计划不会再跟进。", pl_next: "下一步: {0}", tk_proposed: "等你确认计划",
     tk_runs: "跟进 {0} 次", tk_next: "下次 {0}", tk_running: "进行中", tk_queued: "排队中", tk_waiting: "等你批准", tk_paused: "已暂停", tk_done_s: "已完成", tk_err: "上次出错", tk_note: "助理的话: {0}", tk_created: "创建于 {0}",
@@ -1362,6 +1366,7 @@ const I18N = {
     tab_tasks: "Tasks", hint_tasks: "Things the assistant keeps following: it comes back on its own, progress shows here; tap a card to open its conversation and see what it did each time",
     tk_fab: "New task: tell the assistant what to follow", tk_empty: "No tasks yet. Tap + at the bottom right and tell the assistant something to keep following (watch a price, track how something is going, tidy something up every day…); it turns that into a task.",
     tk_pause: "Pause", tk_resume: "Resume", tk_run: "Follow up now", tk_done: "Done", tk_del: "Delete", tk_del_confirm: "Delete this task and its conversation? (moved to ~/.ds4/assistant/trash/, still recoverable on disk)",
+    vf_tag: "Check {0}",
     pl_tag: "Plan", pl_wait: "Waiting for you", pl_active: "In progress {0}/{1}", pl_paused: "Paused {0}/{1}", pl_done: "Done {0}/{1}", pl_abandoned: "Discarded", pl_q: "Decisions for you:", pl_start: "Start", pl_discard: "Discard",
     pl_hint: "Until you press Start the assistant only looks things up: no files written, no programs run, no notifications. Reply below to change anything.", pl_discard_confirm: "Discard this plan? The conversation stays; the plan is no longer followed.", pl_next: "next: {0}", tk_proposed: "Plan waiting for you",
     tk_runs: "{0} follow-ups", tk_next: "next {0}", tk_running: "Running", tk_queued: "Queued", tk_waiting: "Waiting for you", tk_paused: "Paused", tk_done_s: "Done", tk_err: "Last run failed", tk_note: "Assistant's note: {0}", tk_created: "created {0}",
@@ -2046,6 +2051,7 @@ function applyEv(v, e) {
     const paths = (e.paths || []).filter(p => !shared.has(p));
     if (paths.length) v.items.push({ kind: "files", paths });
   }
+  else if (e.ev === "verify_note") v.items.push({ kind: "vnote", round: e.round, text: e.text });   /* 校验相(asst_verify.c): 框架摆给模型的事实, 灰色系统气泡; 不是用户说的 */
   else if (e.ev === "usage") v.usage = e;
   else if (e.ev === "error") v.items.push({ kind: "error", msg: e.msg });
   else if (e.ev === "end") { v.state = "idle"; v.items.push({ kind: "end", reason: e.reason, usage: v.usage }); }
@@ -2158,6 +2164,12 @@ async function answer(it, dec) {
 function itemEl(it, i) {
   if (it.kind === "user") return msgEl({ role: "user", content: it.text }, false);
   if (it.kind === "error") return node("div", "bad aerr", it.msg);
+  if (it.kind === "vnote") {   /* 校验事实: 标签 + 原文(默认折两行, 点开全看) */
+    const w = node("div", "vnote"), tx = node("div", "vtext" + (it.open ? " open" : ""), it.text);
+    w.appendChild(node("span", "vtag", t("vf_tag", it.round))); w.appendChild(tx);
+    tx.onclick = () => { it.open = !it.open; tx.classList.toggle("open", it.open); };
+    return w;
+  }
   const w = node("div", "item");
   if (it.kind === "plan") { w.appendChild(planEl(it)); return w; }
   if (it.kind === "tool") { w.appendChild(toolEl(it)); const d = deliverEl(it); if (d) w.appendChild(d); return w; }

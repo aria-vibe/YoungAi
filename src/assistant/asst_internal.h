@@ -426,6 +426,8 @@ int asst_file_get(const char *path, ds4_buf *out, const char **ctype);     /* 20
 char *asst_file_mentioned(const char *answer);   /* 终稿里写出的、工作区里真有的文件 → JSON 数组(工作区相对路径); 一个没有 → NULL。运行结束发 files 事件, 页面出交付卡 */
 char *asst_file_save(const char *name, const char *data, size_t n);        /* 存进 workspace/inbox/<净化过的名字>, 返回给模型看的一句话 */
 
+/* 校验相(做 → 核 → 答)的账本、事实消息与 view_file: 另一个头 asst_verify.h(2026-10-23, 方案稿 docs/assistant_verify.md) */
+
 /* ---------------- 网页预览(asst_preview.c, 方案稿 docs/assistant_page.md): GET /p/<口令>/<路径>, CSP sandbox 不透明源 + 封出网 ---------------- */
 #define ASST_PV_MAX 64                 /* 口令表上限: 满了挤最老的 */
 #define ASST_PV_TTL_S 3600L            /* 口令 60 分钟过期; 页面每次打开预览重新要 */

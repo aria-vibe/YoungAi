@@ -6,7 +6,7 @@
  * 只答 GET; 页面本身从内存给, 别的路径一律映射到工作区里的文件(realpath 后必须还在工作区内, 软链跳出去也不行);
  *   口令不对一律 404 —— 渲染那几十秒里, 同机别的用户扫端口也拿不到工作区文件。
  * 出错会怎样: 页面引用了不存在的图 → 404, 浏览器里是一张裂图, 页面控制台报错会回到结果里给模型。 */
-#include "../asst_internal.h"
+#include "../asst_verify.h"
 #include <arpa/inet.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -19,7 +19,7 @@
 #define PAGE_NAME ".ds4-page.html"   /* 点开头: 不会和工作区里的真文件撞名 */
 #define REQ_MAX 8192
 
-struct asst_vsrv { int fd; pthread_t th; char tok[33]; char *page; size_t pn; volatile int stop; };
+struct asst_vsrv { int fd; pthread_t th; char tok[33]; char *page; size_t pn; char name[ASST_PATH]; volatile int stop; };   /* name = 页面挂在 /<口令>/ 下的相对路径(缺省 PAGE_NAME; view_file 给真文件的相对路径, 同目录资源才解析得对) */
 
 static const char CSP[] = "default-src 'self' data: blob: 'unsafe-inline' 'unsafe-eval'; form-action 'none'; base-uri 'self'";
 
@@ -66,7 +66,7 @@ static void serve(asst_vsrv *s, int c) {
         rel[k++] = (char)ch;
     }
     rel[k] = 0;
-    if (!strcmp(rel, PAGE_NAME)) { reply(c, 200, "text/html; charset=utf-8", s->page, s->pn); return; }
+    if (!strcmp(rel, s->name)) { reply(c, 200, asst_web_ctype(s->name), s->page, s->pn); return; }
     char abs[ASST_PATH]; struct stat st;
     if (!rel[0] || rel[0] == '/' || !asst_path_resolve(rel, abs, sizeof abs) || !asst_under(abs, asst_ws) || stat(abs, &st) || !S_ISREG(st.st_mode) || (unsigned long long)st.st_size > ASST_FILE_MAX) {
         reply(c, 404, "text/plain", "", 0); return;
@@ -94,7 +94,9 @@ static void *loop(void *ud) {
     return NULL;
 }
 
-asst_vsrv *asst_vsrv_start(const char *page, size_t n, char *url, size_t urln, char *err, size_t errn) {
+asst_vsrv *asst_vsrv_start(const char *page, size_t n, char *url, size_t urln, char *err, size_t errn) { return asst_vsrv_start_at(page, n, PAGE_NAME, url, urln, err, errn); }
+
+asst_vsrv *asst_vsrv_start_at(const char *page, size_t n, const char *rel, char *url, size_t urln, char *err, size_t errn) {
     unsigned char rnd[16]; const int rf = open("/dev/urandom", O_RDONLY);
     if (rf < 0 || read(rf, rnd, sizeof rnd) != (ssize_t)sizeof rnd) { if (rf >= 0) close(rf); snprintf(err, errn, "no randomness for the render server"); return NULL; }
     close(rf);
@@ -108,8 +110,15 @@ asst_vsrv *asst_vsrv_start(const char *page, size_t n, char *url, size_t urln, c
     }
     fcntl(s->fd, F_SETFD, FD_CLOEXEC);
     s->page = malloc(n + 1); memcpy(s->page, page, n); s->page[n] = 0; s->pn = n;
+    snprintf(s->name, sizeof s->name, "%s", rel && rel[0] ? rel : PAGE_NAME);
     if (pthread_create(&s->th, NULL, loop, s)) { snprintf(err, errn, "render server: thread"); close(s->fd); free(s->page); free(s); return NULL; }
-    snprintf(url, urln, "http://127.0.0.1:%d/%s/" PAGE_NAME, ntohs(a.sin_port), s->tok);
+    const int k = snprintf(url, urln, "http://127.0.0.1:%d/%s/", ntohs(a.sin_port), s->tok);
+    for (const unsigned char *p = (const unsigned char *)s->name; *p && (size_t)k + 4 < urln; p++) {   /* 路径段百分号编码(保留 '/'): 中文文件名、空格都要能当 URL */
+        const size_t at = strlen(url);
+        if (at + 4 >= urln) break;
+        if ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z') || (*p >= '0' && *p <= '9') || strchr("-._~/", *p)) { url[at] = (char)*p; url[at + 1] = 0; }
+        else snprintf(url + at, urln - at, "%%%02X", *p);
+    }
     return s;
 }
 

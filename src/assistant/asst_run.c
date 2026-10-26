@@ -2,8 +2,10 @@
  * 为什么一次只跑一个: 机器上只有一份模型; ds4-server 的活 KV 检查点只有一个, 两个会话交替跑 = 来回从盘恢复, 排队反而快。
  * 运行线程不知道有没有人在看: 它只往 events.jsonl 追加, 页面(任何设备、刷新、关了再开)从任意偏移接着读(asst_sse.c)。Muse 的"关了 app 继续跑"靠这个。
  * 不设轮数上限(与"不设上限"口径一致); 停止键随时停。同名同参的工具连调第三次, 结果前加一句提醒 —— 提示, 不拦。
+ * 校验相(10-23, asst_verify.c): 这一趟动过手的运行, 模型第一次不调工具(想收口)时不结束, 先把这趟的账(调了什么 / 产出改动了什么 / 哪些没看过 / 点名却不存在的)
+ *   以 user 角色摆回去再给它一步, 最多 ASST_VERIFY_ROUNDS 次; 页面上是一条灰色系统气泡(verify_note 事件), 不是用户说的话。做 → 核 → 答是范式, 不分任务类型。
  * 要审批时线程睡在 asst_cv 上等答复(或停止), 会话状态 waiting_approval; 每个 tool_call id 都必须有一条 tool 结果, 不然下一轮历史就不成对, 停止时没跑的也补"cancelled"。 */
-#include "asst_internal.h"
+#include "asst_verify.h"
 #include <time.h>
 #include <unistd.h>
 
@@ -32,10 +34,10 @@ static void on_text(void *ud, const char *s, size_t n) { (void)n; ev_str(ud, "te
 static void on_think(void *ud, const char *s, size_t n) { (void)n; ev_str(ud, "think", "d", s); }
 static bool want_stop(void *ud) { (void)ud; pthread_mutex_lock(&asst_mu); const bool s = cur_stop; pthread_mutex_unlock(&asst_mu); return s; }
 
-/* 收口压力(不是硬上限): 一次运行调到这么多次工具还没出终稿, 之后每条工具结果尾巴都提醒"手头有什么答什么, 说明缺什么"。
- * 为什么不硬砍: 10-12 "全网最低价 DGX Spark" 43 次调用每次都有新信息, 砍了就没终稿; 同日"附近有什么吃的" 30 次调用全在猜坐标在哪条街, 零进展。
- * 框架分不清进展与打转, 但能把"该收口了"的压力给到模型 —— 它看到提醒就会用手头的作答(10-12 假 key 探针: 两次报错后第 3 轮自己收口)。 */
-#define ASST_CALL_BUDGET 10
+/* 没有"调了 N 次还没答就催收口"的提醒(10-23 删掉原来的第 10 次起每条结果尾巴催一句): 它掐的是正在变好的活 —— 鹈鹕那趟原话
+ * "I got a nudge to answer. I should quickly verify the final render once and then answer", 改到一半就交了; DeepSeek Harness 没有这条,
+ * 官方原件同一句请求调 41~47 次, 每次都有用。当初加它是为 10-12"附近有什么吃的"30 次猜坐标, 那个病根后来由 locate 工具 + nearby 坐标参数治了。
+ * 打转只剩两道机械护栏: 同名同参连调第三次起提醒换路(下面 repeat), 和校验相(asst_verify.c)收口前摆事实。 */
 
 static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return (double)t.tv_sec + t.tv_nsec * 1e-9; }
 
@@ -125,7 +127,8 @@ static void run_one(const char *sid, const char *text, const char *device, const
     asst_msg(sid, b.ptr); ds4_buf_free(&b); ds4_buf_free(&full);
     ev_str(sid, "user", "text", text);
     char upd[32]; snprintf(upd, sizeof upd, "%ld", (long)time(NULL)); asst_meta_set(sid, "updated", upd);
-    char last_sig[512] = ""; int repeat = 0, ncalls = 0;
+    char last_sig[512] = ""; int repeat = 0;
+    asst_ledger led; asst_ledger_init(&led);   /* 这一趟的账: 校验相摆事实用 */
     const char *end = "done";
     char *last_text = NULL;   /* 最后一轮的正文: 任务列表里的"上次进展"、通知的正文 */
     const double t_run = now_s();
@@ -163,7 +166,17 @@ static void run_one(const char *sid, const char *text, const char *device, const
             char msg[160]; snprintf(msg, sizeof msg, "model hit the output limit after %ld tokens of thinking without producing an answer", o.completion_tokens);
             ev_str(sid, "error", "msg", msg); asst_llm_out_free(&o); end = "error"; break;
         }
-        if (!nc) { asst_llm_out_free(&o); break; }
+        if (!nc) {   /* 想收口: 动过手就先核一遍(事实消息), 没得核 / 轮数到了才真结束 */
+            char *note = asst_verify_note(&led, o.content.ptr ? o.content.ptr : "");
+            asst_llm_out_free(&o);
+            if (!note) break;
+            ds4_buf vm = {0}; ds4_buf_puts(&vm, "{\"role\":\"user\",\"content\":"); ds4_json_escape(&vm, note); ds4_buf_putc(&vm, '}'); asst_msg(sid, vm.ptr); ds4_buf_free(&vm);
+            ds4_buf_printf(&vm, "{\"ev\":\"verify_note\",\"round\":%d,\"text\":", led.rounds); ds4_json_escape(&vm, note); ds4_buf_putc(&vm, '}'); asst_ev(sid, vm.ptr); ds4_buf_free(&vm);
+            ds4_buf_printf(&vm, "{\"session\":\"%s\",\"tool\":\"verify\",\"cls\":\"verify\",\"args\":\"check %d of %d\",\"decision\":\"note\",\"ok\":true,\"ms\":0,\"sandbox\":\"%s\",\"result\":", sid, led.rounds, ASST_VERIFY_ROUNDS, asst_sbx_kind());
+            char cut[401]; snprintf(cut, sizeof cut, "%s", note); ds4_json_escape(&vm, cut); ds4_buf_putc(&vm, '}'); asst_audit(vm.ptr); ds4_buf_free(&vm);
+            free(note);
+            continue;
+        }
         bool stopped = false;
         for (int i = 0; i < nc; i++) {
             const char *id = o.call_id[i], *name = o.call_name[i], *args = o.call_args[i].ptr ? o.call_args[i].ptr : "{}";
@@ -173,13 +186,15 @@ static void run_one(const char *sid, const char *text, const char *device, const
             asst_ev(sid, e.ptr); ds4_buf_free(&e);
             char decision[16] = "cancelled"; int ok = 0; char *res; asst_gres g; memset(&g, 0, sizeof g);
             const double t0 = now_s();
+            void *snap = !strcmp(name, "run") ? asst_ledger_snap() : NULL;   /* run 能写任何工作区文件: 前后扫一遍比出改了什么 */
             if (stopped || want_stop(NULL)) { stopped = true; res = strdup("cancelled: the user stopped the run\n"); }
             else res = run_call(sid, &tc, id, name, args, decision, sizeof decision, &ok, &g);
             if (!strcmp(decision, "cancelled")) stopped = true;
+            asst_ledger_note(&led, name, &g, res, ok && !stopped);
+            if (snap) asst_ledger_diff(&led, snap, name);
             char sig[512]; snprintf(sig, sizeof sig, "%s|%.400s", name, args);
             repeat = !strcmp(sig, last_sig) ? repeat + 1 : 1; snprintf(last_sig, sizeof last_sig, "%s", sig);
             if (repeat >= 3) { ds4_buf r = {0}; ds4_buf_printf(&r, "[note: this is the %d-th identical %s call in a row; if it is not working, change approach or ask the user]\n", repeat, name); ds4_buf_puts(&r, res); free(res); res = ds4_buf_take(&r); }
-            if (++ncalls > ASST_CALL_BUDGET) { ds4_buf r = {0}; ds4_buf_puts(&r, res); ds4_buf_printf(&r, "\n[note: %d tool calls in this run and still no final answer. Answer the user now with what you have and say what is missing; keep searching only if the user explicitly asked for exhaustive work.]\n", ncalls); free(res); res = ds4_buf_take(&r); }
             const double ms = (now_s() - t0) * 1000;
             if (strcmp(decision, "cancelled")) audit_call(sid, name, args, decision, ok, ms, res, &g);
             ds4_buf t = {0};

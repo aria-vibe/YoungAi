@@ -320,6 +320,7 @@ int main(int argc, char **argv) {
     { extern int asst_test_lottery(const char *base); g_fail += asst_test_lottery(base); } /* 彩票工具夹具 + 自带 lottery 技能(10-18) */
     { extern int asst_test_db(const char *base); g_fail += asst_test_db(base); }           /* 连接器 + src/db 金标(BSON/SCRAM/SHA-1/RSA/SQL 白名单); 本机有 Mongo 才跑 live(10-19) */
     { extern int asst_test_video(const char *base); g_fail += asst_test_video(base); }   /* 要火狐; 没有就 SKIP。在 logic 之后: 它建好了助理根目录 */
+    { extern int asst_test_verify(void); g_fail += asst_test_verify(); }                 /* 校验相: 账本 / run 扫描 / 收口事实消息 / view_file 五类(网页段要火狐, 10-23) */
     { extern int studio_auth_test(const char *base); g_fail += studio_auth_test(base); }
     { extern int studio_net_test(const char *base); g_fail += studio_net_test(base); }
     { extern int studio_models_test(const char *base); g_fail += studio_models_test(base); }

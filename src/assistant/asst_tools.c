@@ -5,7 +5,7 @@
  * 执行点: MEM = 主进程直接写 memory/; SBX = asst_guard_spec 给的沙盒规则里 fork 子进程跑; NET = 火狐(tool_browser.c / tool_geo.c); DEV = 用户正在用的那台设备, 页面执行。
  * 可用条件按设备与本机稳定(报了能力 / 装了火狐), 不按 key 有无忽隐忽现: 模型会学到"这个工具有时候没有"然后自己绕路。
  * 网页正文太长时只给模型头 16 KB, 全文落工作区 .web/ 下, 模型要更多就 read_file 分页 —— 一页 900 KB 的正文直接塞进上下文是 30 万 token 的预填。 */
-#include "asst_internal.h"
+#include "asst_verify.h"
 #include <sys/stat.h>
 #include <time.h>
 
@@ -118,6 +118,9 @@ static const asst_tool TOOLS[] = {
     /* 只看不改(tool_image.c): 一块放大 + 原图坐标网格; 模型整图上指小东西偏约 10%, 放大读网格偏 7~13 px(docs/assistant_image.md §3.7) */
     { "view_image", TOOL("view_image", "Look closer at part of an image in the workspace without changing it. Returns the region enlarged, with a magenta grid whose crossing labels are that point's x,y in source pixels. Positions you estimate on a whole picture are rough (about a tenth of its size off), so before editing something small, look at it here and take the coordinates from the grid numbers.",
                        S("path", "Image in the workspace") "," I("x", "Left of the region in source pixels (omit x,y,w,h for the whole image)") "," I("y", "Top of the region") "," I("w", "Width of the region") "," I("h", "Height of the region"), "\"path\""), SBX, 0, NULL, false, NULL, false },
+    /* 看文件(tool_view.c, 校验相 docs/assistant_verify.md): 像用户那样看任何产物, 模型核自己的活用; 网页要火狐, 没有时结果里直说(不按火狐有无忽隐忽现) */
+    { "view_file", TOOL("view_file", "See a file the way the user will see it, to check your own work before you say it is done. A web page (.html/.svg) comes back rendered as pictures at the moments in `times` (default 0 s and 1 s; a moment identical to the one before is not repeated), with the script errors the browser reported and the resources that failed to load (missing files, blocked external URLs); an image comes back as the picture; a video as the frames saved when it was made; .docx/.pptx/.xlsx as their text; .pdf as extracted text when this machine can; anything else as its first lines. It changes nothing.",
+                      S("path", "File path (relative = inside the workspace)") "," I("width", "Web pages only: viewport width in pixels, 64-4096 (default 1280)") "," I("height", "Web pages only: viewport height in pixels (default 800)") "," "\"times\":{\"type\":\"array\",\"description\":\"Web pages only: up to 4 moments in seconds to look at, e.g. [0, 2.5, 6] (default [0, 1])\",\"items\":{\"type\":\"number\"}}", "\"path\""), SBX, 0, NULL, false, NULL, false },
     { "edit_file", TOOL("edit_file", "Replace an exact piece of text in a file. old_string must appear exactly once unless replace_all is true.", S("path", "File path") "," S("old_string", "Exact text to replace") "," S("new_string", "Replacement text") "," B("replace_all", "Replace every occurrence"), "\"path\",\"old_string\",\"new_string\""), SBX, 0, NULL, false, NULL, false },
     { "run", NULL, SBX, 0, NULL, false, build_run, false },
     { "web_search", TOOL("web_search", "Search the web (Bing) and get result titles and links.", S("query", "Search query"), "\"query\""), NET, 0, NULL, true, NULL, false },
@@ -352,6 +355,7 @@ char *asst_tool_exec(const char *sid, const char *tool, const char *args, const 
     if (asst_office_tool(tool)) return asst_office_exec(tool, args, g, trash, ok);
     if (!strcmp(tool, "edit_image")) return asst_image_exec(args, g, trash, ok);
     if (!strcmp(tool, "view_image")) return asst_image_view(args, g, trash, ok);   /* 分割模型主进程 spawn, 像素工作在沙盒子进程(tool_image.c) */
+    if (!strcmp(tool, "view_file")) return asst_view_exec(args, g, trash, ok);     /* 网页走火狐(主进程), 截图落盘在沙盒子进程; 别的格式只读(tool_view.c) */
     if (!strcmp(tool, "make_video")) return asst_video_exec(args, g, trash, ok);   /* 主进程驱动火狐渲染, 编码在沙盒子进程(tool_video.c) */
     if (!strcmp(tool, "render_image")) return asst_render_exec(args, g, trash, ok);   /* 主进程驱动火狐截图, 落盘在沙盒子进程(tool_render.c) */
     char *out = NULL; asst_sbx_rc rc;
