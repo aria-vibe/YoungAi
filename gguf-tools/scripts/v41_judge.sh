@@ -33,7 +33,7 @@ IDS="${1:?ids 文件}"; NTOK="${2:?token 数}"; shift 2
 # --act-from <量化份ids>: 用【量化份】语料捕一次激活列权 E[x²], 所有档统一带上 —— 这是
 # 量化校准那一环。三份语料各司其职, 缺一环就不是完整配方: 量化份校准 / 反修份拟合放大器 /
 # 判决份打分, 谁都不许串岗。
-ACTIDS=""
+ACTIDS=""; AMSET=""
 # --hf DIR(2026-10-17): 换出厂权重(新底座 DeepSeek-V4.1-Flash-1017 与旧版并排)。教师锚、链态夹具都是从 HF 算的,
 # 换了底座就是另一套数 ⇒ 非默认目录时缓存文件名统一带 _<目录名> 后缀(HFSFX), 不然 [ -s "$REF" ] 直接拿旧底座的锚
 # 判新底座的学生 —— 不报错, 只出一组"看着合理"的假数(与上面两套同名语料共用锚是同一类坑)。
@@ -42,6 +42,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --act-from) ACTIDS="${2:?--act-from 要 ids}"; shift 2;;
     --hf) HF="$(cd "${2:?--hf 要目录}" && pwd)" || exit 2; shift 2;;
+    --set) AMSET="--set $(cd "$(dirname "${2:?--set 要 ids 文件}")" && pwd)/$(basename "$2")"; shift 2;;   # 透传给 anchor_metrics: 逐位行多两列 = 这组 token 的概率质量(10-25 决策位尺)
     *) break;;
   esac
 done
@@ -332,7 +333,7 @@ for NB in "$@"; do
       LOG "③ 五指标 引擎 $(basename "$GG" .gguf)${SFX}"
       # 逐位行(位置 kld Σmin same …)落在学生文件旁: 两臂配对算标准误用(z_nightly kd_wt2_se, 10-03) —— 五指标是 512 个位置的平均,
       #   相邻两份 ③ 的 Σmin 差 1pp 在不在噪声里, 只有逐位配对才答得出
-      "$AM" --ref-raw "$REF" --ids "$IDS" --student "$STU" --row-out "${STU%.bin}.rows" || { LOG "★判决失败★"; FAIL=$((${FAIL:-0}+1)); }
+      "$AM" --ref-raw "$REF" --ids "$IDS" --student "$STU" --row-out "${STU%.bin}.rows" $AMSET || { LOG "★判决失败★"; FAIL=$((${FAIL:-0}+1)); }
       LOG "逐位行 → ${STU%.bin}.rows"
       continue;;
     engamp:*) # 引擎反修档(2026-09-13): engamp:<拟合ids>:<拟合ntok>[:<gguf>[:<白化 0/1/2>[:<层数>[:<模式>]]]]
@@ -360,18 +361,30 @@ for NB in "$@"; do
           GRARG="--capture-ye --rb $DUMP"; KIND="grrb" ;;
         *) LOG "★engamp 第七字段只认空/gr/grrb, 收到 $MODE★"; continue ;;
       esac
-      WSFX=""; [ "$WH" != 0 ] && WSFX="_w$WH"; LSFX=""; [ "$NLY" != 40 ] && LSFX="_L$NLY"
+      # 不满 40 层的产物是探针, 目录名带 -probe(amp_campaign.sh 的 ② 对照与 serve_pick 都跳过 *-probe-engine): 2 层的半成品混进对照表就是假账
+      WSFX=""; [ "$WH" != 0 ] && WSFX="_w$WH"; LSFX=""; [ "$NLY" != 40 ] && LSFX="_L$NLY-probe"
       ARM="$ROOT/gguf/v41/$(basename "$GG" .gguf)-$KIND-$(corpus_tag "$FIT")_n${FN}${WSFX}${LSFX}-engine"
+      # 增益路(gr/grrb)的择优尺 = 端到端(2026-10-21): 解算器每层把候选挂上跑全前向, 在拟合料 val 行上对【拟合料自己的教师锚】算
+      # KLD/NLL/Same top 选赢家。锚 = grrb 的链态夹具那趟顺手落的 teacher_<料>; gr 模式没有那趟, 缺就先出一份。★不是判决份的锚★。
+      E2EARG=""
+      if [ -n "$GRARG" ]; then
+          KREF="$OUT/teacher_$(corpus_tag "$FIT")_n${FN}$HFSFX.bin"
+          if [ ! -s "$KREF" ]; then
+              LOG "拟合料教师锚 $(basename "$KREF") 缺(端到端择优要它), 先出"
+              run_py "teacher_$(corpus_tag "$FIT")_n${FN}$HFSFX" "配置|完成|PPL|→" --ids "$FIT" --ntok "$FN" --out "$KREF" || continue
+          fi
+          E2EARG="--e2e-ref $KREF"
+      fi
       if grep -q "^# 完成" "$ARM/manifest.txt" 2>/dev/null; then
           LOG "②a 放大器已在 $ARM (manifest 完成), 复用"
       else
           rm -rf "$ARM"
           make -C "$ROOT/gguf-tools" v41_amp_run >"$OUT/log_make_v41_amp_run.txt" 2>&1 \
               || { LOG "★v41_amp_run 编译失败★"; tail -20 "$OUT/log_make_v41_amp_run.txt"; continue; }
-          LOG "②a 引擎序贯反修·$KIND: $(basename "$GG") × 拟合料 $(corpus_tag "$FIT") n=$FN, 前 $NLY 层, 白化 $WH → $ARM"
+          LOG "②a 引擎序贯反修·$KIND: $(basename "$GG") × 拟合料 $(corpus_tag "$FIT") n=$FN, 前 $NLY 层, 白化 $WH${E2EARG:+, 端到端择优} → $ARM"
           lf="$OUT/log_solve_$(basename "$ARM").txt"
-          "$ROOT/gguf-tools/amp/v41_amp_run" "$GG" "$HF" "$FIT" "$FN" "$ARM" --layers "$NLY" --whiten "$WH" --mem-budget-mb 40000 --weight-cache-mb 88000 $GRARG 2>&1 \
-              | tee "$lf" | grep --line-buffered -E "held-out|反修|引擎\]|\[L[0-9]|择优|PPL|失败|★|error|Error|watchdog"
+          "$ROOT/gguf-tools/amp/v41_amp_run" "$GG" "$HF" "$FIT" "$FN" "$ARM" --layers "$NLY" --whiten "$WH" --mem-budget-mb 40000 --weight-cache-mb 88000 $GRARG $E2EARG 2>&1 \
+              | tee "$lf" | grep --line-buffered -E "held-out|反修|引擎\]|\[L[0-9]|择优|\[e2e\]|PPL|失败|★|error|Error|watchdog"
           [ "${PIPESTATUS[0]}" = 0 ] || { LOG "★反修失败 —— 全量日志 $lf, 尾部:★"; tail -20 "$lf"; FAIL=$((${FAIL:-0}+1)); continue; }
       fi
       STU="$OUT/stu_${TAG}_eng_$(basename "$GG" .gguf)_amp_$(basename "$ARM").bin"
@@ -422,7 +435,9 @@ for NB in "$@"; do
       MODEL_DIR="$HF"
       [ $rc = 0 ] || continue
       LOG "③ 五指标 落盘模型 $(basename "$MD")"
-      "$AM" --ref-raw "$REF" --ids "$IDS" --student "$STU" || { LOG "★判决失败★"; FAIL=$((${FAIL:-0}+1)); }
+      # 逐位行(10-21): 拆账各臂要对基线算按窗配对 SE(anchor_metrics --pair), 只有五个均值判不了差在不在噪声里
+      "$AM" --ref-raw "$REF" --ids "$IDS" --student "$STU" --row-out "${STU%.bin}.rows" $AMSET || { LOG "★判决失败★"; FAIL=$((${FAIL:-0}+1)); }
+      LOG "逐位行 → ${STU%.bin}.rows"
       continue;;
     *:*)   # VQ 档
       VD="${NB%%:*}"; VN="${NB##*:}"

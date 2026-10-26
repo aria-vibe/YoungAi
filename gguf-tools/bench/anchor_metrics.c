@@ -12,6 +12,7 @@
  *       [--ref-raw raw.bin | --ref-eval eval.bin] [--fit N] [--tail N] [--rows a:b[,c:d,...]]
  *       --ref-topk topk.bin --predict <候选目录/predict.txt> --predict-sample N  (自检 2)
  *       --ref-topk 基线.bin --vs-topk 候选.bin [--rows R]   (守门 1: 两态 argmax 变了多少)
+ *       --pair A.rows B.rows [--win 128]   (两份 --row-out 的配对差 + 按窗 SE, 见 anchor_metrics_pair.inc.c)
  * --ref-raw = --score-out(解码路, 带 <S,V> 头); --ref-eval = --eval-logits(prefill 批路, 无头带 BOS 行)
  * --ref-nll = --eval-nll 的 f32[S](引擎已算好逐位 NLL, 只出 PPL/NLL; 省掉 5 个数量级的盘)
  * ★--rows 收多段(2026-09-08)★: 后训练判决只算"本应写出的报告"那些 token, 每条样本的
@@ -22,6 +23,7 @@
 #include <stdint.h>
 #include <math.h>
 #include <pthread.h>
+#include "anchor_row.h"
 
 typedef struct { int S, HCM, DIM, NL, VOCAB, NACT; } meta_t;
 
@@ -89,37 +91,23 @@ static float *read_student(const char *path, int *S, int *V) {
     return lg;
 }
 
-/* 行内 log-softmax → out(f64); 返回 logsumexp 供复用 */
-static void log_softmax_row(const float *x, double *out, int V) {
-    float mx = x[0];
-    for (int v = 1; v < V; v++) if (x[v] > mx) mx = x[v];
-    double s = 0;
-    for (int v = 0; v < V; v++) s += exp((double)x[v] - mx);
-    double lse = log(s);
-    for (int v = 0; v < V; v++) out[v] = (double)x[v] - mx - lse;
+/* 逐位置的式子(log-softmax / NLL / KLD / Σmin / same / top32 窗)住 anchor_row.c —— 反修解算器的端到端择优与这里同一份(2026-10-21) */
+#define nll_at anchor_nll_at
+
+/* 一行里一组 token 的概率质量 Σ_{v∈set} p(v)(--set, 决策位尺 2026-10-25): lse 借 nll_at 反推(nll(tgt) = lse − x[tgt]), 免整行展开两次 */
+static double set_mass(const float *row, int V, const int *set, int n) {
+    double lse = nll_at(row, V, 0) + row[0], m = 0;
+    for (int i = 0; i < n; i++) if (set[i] >= 0 && set[i] < V) m += exp((double)row[set[i]] - lse);
+    return m;
+}
+/* 一行一个整数的 id 文件(--set) */
+static int read_ids_int(const char *path, int **out) {
+    FILE *f = fopen(path, "r"); if (!f) return -1;
+    int cap = 1024, n = 0, v; int *a = malloc(cap * sizeof(int));
+    while (fscanf(f, "%d", &v) == 1) { if (n == cap) { cap *= 2; a = realloc(a, cap * sizeof(int)); } a[n++] = v; }
+    fclose(f); *out = a; return n;
 }
 
-/* teacher-forced NLL: 只需要目标列 → 免整行展开 */
-static double nll_at(const float *row, int V, int tgt) {
-    float mx = row[0];
-    for (int v = 1; v < V; v++) if (row[v] > mx) mx = row[v];
-    double s = 0;
-    for (int v = 0; v < V; v++) s += exp((double)row[v] - mx);
-    return -((double)row[tgt] - mx - log(s));
-}
-
-/* top-K 索引(无序), 简单选择: 维护 K 槽最小值替换 */
-static void topk_idx(const double *p, int V, int K, int *idx) {
-    double vals[64]; int n = 0;
-    for (int v = 0; v < V; v++) {
-        if (n < K) { idx[n] = v; vals[n] = p[v]; n++; continue; }
-        int mi = 0;
-        for (int i = 1; i < K; i++) if (vals[i] < vals[mi]) mi = i;
-        if (p[v] > vals[mi]) { vals[mi] = p[v]; idx[mi] = v; }
-    }
-}
-
-static int cmp_int(const void *a, const void *b) { return *(const int *)a - *(const int *)b; }
 static int cmp_dbl_desc(const void *a, const void *b) {
     double d = *(const double *)b - *(const double *)a;
     return d > 0 ? 1 : d < 0 ? -1 : 0;
@@ -140,34 +128,10 @@ static void met_worker(void *vc, int t0, int t1) {
     double *lr = malloc(V * sizeof(double)), *ls = malloc(V * sizeof(double));
     double *pr = malloc(V * sizeof(double)), *ps = malloc(V * sizeof(double));
     for (int t = t0; t < t1; t++) {
-        const float *r = c->ref + (size_t)c->row[t] * V;
-        const float *s = c->stu + (size_t)c->row[t] * V;
-        log_softmax_row(r, lr, V); log_softmax_row(s, ls, V);
-        double kl = 0; int ir = 0, iu = 0;
-        for (int v = 0; v < V; v++) {
-            pr[v] = exp(lr[v]); ps[v] = exp(ls[v]);
-            kl += pr[v] * (lr[v] - ls[v]);
-            if (r[v] > r[ir]) ir = v;
-            if (s[v] > s[iu]) iu = v;
-        }
-        c->kld[t] = kl;
-        { double sm = 0; for (int v = 0; v < V; v++) sm += pr[v] < ps[v] ? pr[v] : ps[v];
-          c->smin[t] = sm; }   /* 分布还原率 Σmin(还原率铁律的主尺) */
-        c->same[t] = (ir == iu); c->ir[t] = ir; c->iu[t] = iu;
-        c->dtop[t] = fabs(pr[ir] - ps[ir]);
-        /* top32 联合窗均方 */
-        int ia[32], ib[32], u[64], nu = 0;
-        topk_idx(pr, V, 32, ia); topk_idx(ps, V, 32, ib);
-        memcpy(u, ia, sizeof ia); memcpy(u + 32, ib, sizeof ib);
-        qsort(u, 64, sizeof(int), cmp_int);
-        double d2 = 0; int cnt = 0;
-        for (int i = 0; i < 64; i++) {
-            if (i && u[i] == u[i - 1]) continue;
-            double d = pr[u[i]] - ps[u[i]];
-            d2 += d * d; cnt++; nu++;
-        }
-        (void)nu;
-        c->rms[t] = d2 / cnt;
+        anchor_row_t o;
+        anchor_row_metrics(c->ref + (size_t)c->row[t] * V, c->stu + (size_t)c->row[t] * V, V, lr, ls, pr, ps, &o);
+        c->kld[t] = o.kld; c->smin[t] = o.smin; c->same[t] = (uint8_t)o.same; c->ir[t] = o.ir; c->iu[t] = o.iu;
+        c->dtop[t] = o.dtop; c->rms[t] = o.rms;
     }
     free(lr); free(ls); free(pr); free(ps);
 }
@@ -244,6 +208,7 @@ static pplr ppl_block_nll(const float *v, int S, const int *row, int n) {
 
 
 #include "anchor_metrics_topk.inc.c"   /* --ref-topk: 决策点 argmax 命中率(后训练主尺) */
+#include "anchor_metrics_pair.inc.c"   /* --pair: 两份逐行文件的配对差与按窗 SE */
 
 int main(int argc, char **argv) {
     const char *refp = NULL, *rawp = NULL, *idsp = NULL, *stup = NULL, *sraw = NULL, *revl = NULL;
@@ -254,8 +219,12 @@ int main(int argc, char **argv) {
     int xs0 = -1, xn = 0; const char *rowspec = NULL, *rnll = NULL;
     /* --ref-topk: 引擎 --score-topk 的产物; 后训练主尺(决策点 argmax 命中率)。--alt: 另一版 ids。 */
     const char *rtopk = NULL, *altp = NULL, *predp = NULL, *vstopk = NULL; int preds = 0;
+    const char *pra = NULL, *prb = NULL; int win = 128;   /* --pair; 128 = 判决份切窗的长度 */
+    const char *setp = NULL;   /* --set <ids 文件>: 逐位行再加两列 = ref/stu 落在这组 token 上的概率质量(决策位尺: "此处本可以收"的质量) */
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--xshift") && i + 2 < argc) { xs0 = atoi(argv[++i]); xn = atoi(argv[++i]); }
+        else if (!strcmp(argv[i], "--pair") && i + 2 < argc) { pra = argv[++i]; prb = argv[++i]; }
+        else if (!strcmp(argv[i], "--win") && i + 1 < argc) win = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--rows") && i + 1 < argc) rowspec = argv[++i];
         else if (!strcmp(argv[i], "--ref") && i + 1 < argc) refp = argv[++i];
         else if (!strcmp(argv[i], "--ref-raw") && i + 1 < argc) rawp = argv[++i];
@@ -273,9 +242,13 @@ int main(int argc, char **argv) {
         else if (!strcmp(argv[i], "--tail") && i + 1 < argc) tail = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--threads") && i + 1 < argc) threads = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--row-out") && i + 1 < argc) rowout = argv[++i];
+        else if (!strcmp(argv[i], "--set") && i + 1 < argc) setp = argv[++i];
     }
+    int *setv = NULL, nset = 0;
+    if (setp) { nset = read_ids_int(setp, &setv); if (nset <= 0) { fprintf(stderr, "--set %s 读不到 token id\n", setp); return 2; } }
     /* --ref-topk 自带行号与目标 token, 不需要 --ids —— 早退在读 ids 之前, 免得为一把
      * 只看 argmax 的尺去准备它用不上的东西。 */
+    if (pra) return win > 0 ? pair_report(pra, prb, win) : 2;
     if (rtopk && vstopk) return topk_vs(rtopk, vstopk, rowspec);    /* 守门 1: 两态 argmax 有没有变 */
     if (rtopk && predp) return topk_predict(rtopk, predp, preds);   /* 自检 2: 预测 vs 真前向 */
     if (rtopk) return topk_report(rtopk, rowspec, altp);
@@ -425,13 +398,19 @@ int main(int argc, char **argv) {
         printf("  RMS Δp(top32窗) = %.4f%%\n", sqrt(mr / n) * 100);
         printf("  Same top token  = %.2f%%\n", ms / n * 100);
         printf("  Δp(ref top tok) = %.4f (p95 %.4f)\n", md / n, quantile(dtop, n, 0.95));
-        if (rowout) {   /* 行=位置 kld smin same ref命中 stu命中 ref_argmax stu_argmax(命中 = argmax == 实际下一个 token; 无 ids 时 -1)。
-                         * 末两列 2026-09-22 加: 复读入口要看"老师想选谁", 光有命中标志不够 */
+        if (rowout) {   /* 行=位置 kld smin same ref命中 stu命中 ref_argmax stu_argmax ref_nll stu_nll [set质量ref set质量stu]
+                         * (命中 = argmax == 实际下一个 token; 无 ids 时 -1)。第 7/8 列 2026-09-22 加: 复读入口要看"老师想选谁";
+                         * 第 9/10 列 2026-10-25 加: 决策位尺要的是"此处实际 token 两边各给多少 p", 命中标志与 KLD 都答不了 1% 量级的偏差;
+                         * 第 11/12 列只在 --set 时有: 这组 token(如全部 "</…" 收尾 token)的概率质量 = 模型在该处"想收"的程度。 */
             FILE *fo = fopen(rowout, si == 0 ? "w" : "a");
             if (fo) { for (int t = 0; t < n; t++) {
                 int nx = row[t] + 1 < nids ? (int)ids[row[t] + 1] : -1;
-                fprintf(fo, "%d %.6f %.6f %d %d %d %d %d\n", row[t], kld[t], smin[t], same[t],
-                        nx < 0 ? -1 : irx[t] == nx, nx < 0 ? -1 : iux[t] == nx, irx[t], iux[t]); }
+                const float *rr = ref + (size_t)row[t] * V, *ss = stu + (size_t)row[t] * V;
+                fprintf(fo, "%d %.6f %.6f %d %d %d %d %d %.6f %.6f", row[t], kld[t], smin[t], same[t],
+                        nx < 0 ? -1 : irx[t] == nx, nx < 0 ? -1 : iux[t] == nx, irx[t], iux[t],
+                        nx < 0 ? -1.0 : nll_at(rr, V, nx), nx < 0 ? -1.0 : nll_at(ss, V, nx));
+                if (setv) fprintf(fo, " %.6f %.6f", set_mass(rr, V, setv, nset), set_mass(ss, V, setv, nset));
+                fputc('\n', fo); }
                 fclose(fo); }
         }
         free(kld); free(rms); free(dtop); free(smin); free(same); free(irx); free(iux);

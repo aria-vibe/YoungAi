@@ -171,10 +171,13 @@ $(BEN)/posttrain_reward: $(BEN)/posttrain_reward.c
 	$(CC) $(BARE) $(NATIVE) -o $@ $< -lm
 
 anchor_metrics: $(BEN)/anchor_metrics
+# 逐位置指标的唯一实现(2026-10-21): 判决器与 v41_amp_run 的端到端择优共链这一个对象, 式子不许在两边各抄一份
+$(BEN)/anchor_row.o: $(BEN)/anchor_row.c $(BEN)/anchor_row.h
+	$(CC) $(BARE) $(NATIVE) -c $< -o $@
 # 依赖里必须列上 .inc.c 与共用头: 少列一项就会"编译成功但跑的是旧二进制", 而自检照样 PASS
 # (2026-09-13 实撞: 改了 --ref-topk 的读取, make 说"无需做任何事", 自检过的是上一版)
-$(BEN)/anchor_metrics: $(BEN)/anchor_metrics.c $(BEN)/anchor_metrics_topk.inc.c $(BEN)/anchor_metrics_rows.inc.c ../src/common/ds4_etgd.h
-	$(CC) $(BARE) $(NATIVE) -o $@ $< -lm -lpthread
+$(BEN)/anchor_metrics: $(BEN)/anchor_metrics.c $(BEN)/anchor_metrics_topk.inc.c $(BEN)/anchor_metrics_rows.inc.c $(BEN)/anchor_metrics_pair.inc.c ../src/common/ds4_etgd.h $(BEN)/anchor_row.o
+	$(CC) $(BARE) $(NATIVE) -o $@ $< $(BEN)/anchor_row.o -lm -lpthread
 
 compare_scores: $(QT)/compare_scores
 $(QT)/compare_scores: $(QT)/compare_scores.c
