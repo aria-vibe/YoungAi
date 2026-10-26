@@ -199,6 +199,11 @@ static bool accelerator_cache_model_tensor_spans(const ds4_model *m, uint64_t *c
         /* ★同级不够, 必须把三塔排到专家**前面**★(2026-09-16 实撞): 先试过"投机开着就把 mtp 从 2 降到 1",
          * 读数一点没动 —— 因为同一优先级内是按**文件偏移**排的, 而 mtp.* 是转换器追加在文件最末尾的,
          * 排在所有专家 blob 后面, 照样是被挤出去的那 3.28 GiB。要它进设备就得自己占一档。 */
+        /* ★投机关着(--no-dspark)三塔干脆不进设备副本(2026-10-23)★: 排最后仍会被拷, 直到 MemAvailable 撞 12 GB 地板才停 ——
+         * 训练实测 7.2 GiB 塔进了设备、只挤出 0.12 GiB, 一次都不读, 却让训练器只剩 ~2.6 GB(看门狗 2.5 GB), 训 10 层专家增益就被内存闸拒。
+         * 安全性: 投机开关只在开模型前由命令行设一次(cli_*.c / server_config.c), 开完不会再从关切到开, 所以没人会经主机映射去读塔
+         * (塔在文件末尾, 映射尾页首读偶发垃圾 —— 09-12 那个坑, 真要读就必须在设备里)。 */
+        if (is_mtp && !g_ds4_v41_dspark) continue;
         const uint32_t mtp_prio = g_ds4_v41_dspark ? 1u : 3u;
         const uint32_t exp_prio = g_ds4_v41_dspark ? 2u : 1u;
         spans[nspan++] = (accelerator_tensor_span){
