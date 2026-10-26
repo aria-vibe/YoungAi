@@ -39,6 +39,9 @@ static void test_prompt(void) {
     CHECK(en && strstr(en, "## About the user\n") && strstr(en, "## How the user wants you to work\n") && strstr(en, "## Devices and accounts\n"), "en headings");
     CHECK(yes && strstr(yes, "## 关于用户") < strstr(yes, "## 用户要你怎么做事") && strstr(yes, "## 用户要你怎么做事") < strstr(yes, "## 设备与账号") && strstr(yes, "## 设备与账号") < strstr(yes, "## 现在"), "section order");
     CHECK(no && strstr(no, "写进工作区的文件, 在回答里写出它的路径") && en && strstr(en, "write its path in your answer"), "identity: files are handed over by writing the path");
+    /* 10-23: "简洁"只管说话, "不扩大范围"只管不加别的事, 活本身做足(原句被模型拿来克制活本身: "Keep minimal / Not necessary; keep focus") */
+    CHECK(no && strstr(no, "说话简洁、直接") && strstr(no, "不擅自加别的事; 这件事本身做到你能做到的最好") && !strstr(no, "不擅自扩大范围") &&
+          en && strstr(en, "Talk concisely") && strstr(en, "do that thing as well as you can"), "identity: concise talk, full effort on the task itself");
     free(no); free(yes); free(en);
     char *r = asst_forget("微信"); CHECK(r && strstr(r, "默认用微信") && strstr(r, "云手机微信已登录"), "forget reaches every kind"); free(r);
     char *hb = mem_file("habits.md"), *ev = mem_file("env.md");
