@@ -67,6 +67,10 @@ ds4_gpu_tensor *test_v41_tensor(const void *src, uint64_t bytes);
 int test_v41_read(const ds4_gpu_tensor *t, void *dst, uint64_t bytes);
 int test_v41_cmp(const char *name, const float *got, const float *ref, uint64_t n, float tol, float floor_);
 void test_v41_ref_matmul(const float *x, const float *w, float *out, uint32_t M, uint32_t N, uint32_t K, int round_out);
+typedef double (*test_v41_fd_fn)(void *ctx, const float *buf);
+void test_v41_fd_probe(const char *name, test_v41_fd_fn f, void *ctx, float *buf, const uint32_t *idxs, uint32_t np, const float *g, float h, float tol, float gscale);
+float test_v41_rms(const float *g, uint64_t n);
+void test_v41_bwd_attn(void);   /* t_v41_bwd_attn.c: 两后端通用(64 头), suite --bwd-attn */
 void test_metal_v41_dense(void);
 void test_metal_v41_layer(void);
 void test_metal_v41_attn(void);

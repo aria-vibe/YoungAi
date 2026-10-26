@@ -7,14 +7,14 @@
 
 int ds4_gpu_bwd_sparse_attn_tensor(ds4_gpu_tensor *gq, ds4_gpu_tensor *gkv, ds4_gpu_tensor *gcomp, const ds4_gpu_tensor *go, const ds4_gpu_tensor *o, const ds4_gpu_tensor *q,
                                    const ds4_gpu_tensor *kv_win, const ds4_gpu_tensor *kv_comp, const ds4_gpu_tensor *idx, const void *model_map, uint64_t model_size,
-                                   uint64_t sink_offset, uint32_t n_tok, uint32_t window, uint32_t ng, uint32_t topk, uint32_t n_head, uint32_t head_dim, float scale) {
+                                   uint64_t sink_offset, uint32_t n_tok, uint32_t pos0, uint32_t window, uint32_t ng, uint32_t topk, uint32_t n_head, uint32_t head_dim, float scale) {
     if (!gq || !gkv || !go || !o || !q || !kv_win || head_dim != 512u || n_tok == 0 || (n_head % 8u)) return 0;
     if ((kv_comp == NULL) != (idx == NULL)) return 0;
     uint64_t so = 0;
     id<MTLBuffer> sb = v41_model_buf(model_map, model_size, sink_offset, (uint64_t)n_head * 4, &so, "bwd sink");
     if (!sb) return 0;
     if (!v41_fill_u32(gkv, 0, (uint64_t)n_tok * head_dim, 0u)) return 0;
-    v41_battn_args a = { window, ng, kv_comp ? topk : 0u, n_head, head_dim, kv_comp ? 1u : 0u, (gcomp && kv_comp) ? 1u : 0u, 0, scale, 0, 0, 0 };
+    v41_battn_args a = { window, ng, kv_comp ? topk : 0u, n_head, head_dim, kv_comp ? 1u : 0u, (gcomp && kv_comp) ? 1u : 0u, pos0, scale, 0, 0, 0 };
     v41_bind b[] = { V41_A(a), V41_T(gq), V41_T(gkv), V41_T(gcomp), V41_T(go), V41_T(o), V41_T(q), V41_T(kv_win), V41_T(kv_comp), V41_T(idx), V41_B(sb, (NSUInteger)so) };
     return v41_launch("kernel_v41_bwd_sparse_attn", b, 11, MTLSizeMake(n_tok, n_head / 8u, 1), MTLSizeMake(256, 1, 1));
 }

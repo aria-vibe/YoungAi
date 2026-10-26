@@ -1,10 +1,13 @@
 /* t_metal_v41_util.c — V4.1 Metal 原语数值回归的公共件(2026-10-08): 合成"模型映射"、各类型合成权重 + 金标解码、张量搬运、比对。
  * 金标 = src/common 的标量解码(ds4_deq_bytes / ds4_fp8.h), 与引擎 CUDA 路共用的同一份; 比对口径 = 最大绝对误差 ≤ tol × 参考 RMS。 */
 #include "test_internal.h"
-#if !defined(DS4_NO_GPU) && defined(__APPLE__)   /* Metal 专用: CUDA 构建里这些核的形状闸不同(专家核只认 11/12/13 位、注意力只认 64 头), 合成小形状不适用 */
+/* 合成映射/张量搬运/比对/有限差分是两后端通用的(10-25: --bwd-attn 在 CUDA 也要); 只有按 V41_WT_* 造权重那段是 Metal 专用 */
+#ifndef DS4_NO_GPU
 #include "../src/common/ds4_quantfmt.h"
 #include "../src/common/ds4_fp8.h"
+#ifdef __APPLE__   /* Metal 专用: CUDA 构建里这些核的形状闸不同(专家核只认 11/12/13 位、注意力只认 64 头), 合成小形状不适用 */
 #include "../src/metal/metal_v41_args.h"
+#endif
 
 static uint64_t g_v41_rng = 0x9E3779B97F4A7C15ull;
 void test_v41_seed(uint64_t s) { g_v41_rng = s ? s : 1; }
@@ -42,6 +45,7 @@ uint8_t *test_v41_model_ptr(uint64_t off) { return g_v41_model + off; }
 const void *test_v41_model_map(void) { return g_v41_model; }
 uint64_t test_v41_model_size(void) { return g_v41_model_cap; }
 int test_v41_map(void) { return ds4_gpu_set_model_map(g_v41_model, g_v41_model_cap) != 0; }
+#ifdef __APPLE__
 
 /* 一个 [rows][cols] 矩阵: 合成字节写进 dst, 金标 f32 写进 ref(rows*cols)。类型号 V41_WT_*(metal_v41_args.h)。 */
 uint64_t test_v41_wbytes(uint32_t wt, uint64_t rows, uint64_t cols) {
@@ -85,12 +89,13 @@ void test_v41_make_weights(uint32_t wt, uint64_t rows, uint64_t cols, uint8_t *d
         }
     }
 }
+#endif
 /* 随机 bf16 格点激活(引擎里进 GEMV 的激活本来就在格点上) */
 void test_v41_fill_bf16(float *x, uint64_t n, float scale) { for (uint64_t i = 0; i < n; i++) x[i] = test_v41_bf16r(test_v41_randf() * scale); }
 ds4_gpu_tensor *test_v41_tensor(const void *src, uint64_t bytes) {
     ds4_gpu_tensor *t = ds4_gpu_tensor_alloc(bytes);
     if (t && src) (void)ds4_gpu_tensor_write(t, 0, src, bytes);
-    else if (t) { void *p = ds4_gpu_tensor_contents(t); memset(p, 0, (size_t)bytes); }
+    else if (t) { void *z = calloc(1, (size_t)bytes); (void)ds4_gpu_tensor_write(t, 0, z, bytes); free(z); }   /* 不走 contents+memset: CUDA 张量是 cudaMalloc 显存, 主机写它是未定义 */
     return t;
 }
 int test_v41_read(const ds4_gpu_tensor *t, void *dst, uint64_t bytes) {
@@ -121,6 +126,20 @@ void test_v41_ref_matmul(const float *x, const float *w, float *out, uint32_t M,
         out[(uint64_t)m * N + n] = round_out ? test_v41_bf16r((float)s) : (float)s;
     }
 }
+/* 有限差分: 在 buf 的 np 个下标上做中心差分, 最差 |fd − g| ≤ tol × gscale(g 的 RMS)才算过 */
+void test_v41_fd_probe(const char *name, test_v41_fd_fn f, void *ctx, float *buf, const uint32_t *idxs, uint32_t np, const float *g, float h, float tol, float gscale) {
+    float worst = 0.f, wfd = 0.f; uint32_t at = 0;
+    for (uint32_t k = 0; k < np; k++) {
+        const uint32_t i = idxs[k]; const float o = buf[i];
+        buf[i] = o + h; const double fp = f(ctx, buf); buf[i] = o - h; const double fm = f(ctx, buf); buf[i] = o;
+        const float fd = (float)((fp - fm) / (2.0 * h)), e = fabsf(fd - g[i]);
+        if (e > worst) { worst = e; at = i; wfd = fd; }
+    }
+    const float lim = tol * gscale;
+    fprintf(stderr, "ds4: [v41-test] %-28s FD %u 点: 最差 |fd−g|=%.3g (限 %.3g) @%u fd=%.5g g=%.5g %s\n", name, np, worst, lim, at, wfd, g[at], worst <= lim ? "ok" : "★FAIL★");
+    TEST_ASSERT(worst <= lim);
+}
+float test_v41_rms(const float *g, uint64_t n) { double s = 0; for (uint64_t i = 0; i < n; i++) s += (double)g[i] * g[i]; return (float)sqrt(s / n); }
 typedef int ds4_t_metal_v41_util_nonempty_tu;
 #else
 typedef int ds4_t_metal_v41_util_nonempty_tu;

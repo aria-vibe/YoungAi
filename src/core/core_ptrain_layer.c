@@ -39,22 +39,28 @@ bool pt_layer_alloc(const pt_cfg *c, pt_run *r) {
     };
     for (size_t i = 0; i < sizeof plan / sizeof plan[0] && ok; i++) *plan[i].t = v41_alloc(plan[i].bytes, &ok);
     bool any_src = false, any_eng = false;
-    int32_t *pg = xmalloc((size_t)n * 4);
+    /* 压缩行梯度/组位置表按整条样本的组数分(前缀形态 ctxlen 位 ⇒ ctxlen/ratio 组; 前缀的组也在表里, 位置绝对 g·ratio), 行级存档仍按尾窗 n。
+     * +2 与 v41_state_alloc 的 ngcap 同式。老形态 ctxlen = 0 ⇒ nctx = n, 组数 ≥ 原来的 n 行 ⇒ 不变小。 */
+    const uint64_t nctx = c->ctxlen > c->maxlen ? c->ctxlen : c->maxlen;
+    int32_t *pg = xmalloc((size_t)(nctx + 2u) * 4);
     for (uint32_t il = c->layer_lo; il <= c->layer_hi && ok; il++) {
         r->save.hc_in[il] = v41_alloc(n * HC * E * 2, &ok);
         r->save.pm_in[il] = v41_alloc(n * HC * 4, &ok);
         r->save.idx[il] = v41_alloc(n * DS4_N_INDEXER_TOP_K * 4, &ok);
         r->save.sel[il] = v41_alloc(n * KU * 4, &ok);
         const uint32_t ratio = ds4_layer_compress_ratio(il);
-        if (ok && g_ds4_v41.is_kv_source[il] && ratio) {   /* 源层在训练段里: 压缩行梯度 + 组位置表(从位置 0 起, 第 g 组在 g·ratio) */
+        if (ok && g_ds4_v41.is_kv_source[il] && ratio) {   /* 源层在训练段里: 压缩行梯度 + 组位置表(第 g 组在绝对位置 g·ratio) */
             any_src = true;
-            b->gcomp[il] = v41_alloc(n * HD * 4, &ok); b->posg[il] = v41_alloc(n * 4, &ok);
-            for (uint64_t g = 0; g < n; g++) pg[g] = (int32_t)(g * ratio);
-            if (ok) ok = ds4_gpu_tensor_write(b->posg[il], 0, pg, n * 4) != 0;
+            const uint64_t ngc = nctx / ratio + 2u;
+            b->gcomp[il] = v41_alloc(ngc * HD * 4, &ok); b->posg[il] = v41_alloc(ngc * 4, &ok);
+            for (uint64_t g = 0; g < ngc; g++) pg[g] = (int32_t)(g * ratio);
+            if (ok) ok = ds4_gpu_tensor_write(b->posg[il], 0, pg, ngc * 4) != 0;
         }
         if (ok && g_ds4_v41.engram_index_of[il] >= 0) { any_eng = true; r->save.ekv[il] = v41_alloc(n * (HC + 1u) * E * 2, &ok); }
     }
     free(pg);
+    if (ok && c->ctxlen > c->maxlen)   /* 前缀形态: 每层窗口环头的快照(见 core_ptrain.h pt_run.ring_snap), 40 × 128 × 512 × 4 B */
+        for (uint32_t il = 0; il < DS4_N_LAYER && ok; il++) { r->ring_snap[il] = v41_alloc((uint64_t)DS4_N_SWA * HD * 4, &ok); r->ring_post[il] = v41_alloc((uint64_t)DS4_N_SWA * HD * 4, &ok); }
     if (ok && any_src) { b->cckv = v41_alloc(n * HD * 4, &ok); b->ccsc = v41_alloc(n * HD * 4, &ok); b->cpool = v41_alloc(n * HD * 4, &ok);
                          b->cgpool = v41_alloc(n * HD * 4, &ok); b->cgkv = v41_alloc(n * HD * 4, &ok); b->cgsc = v41_alloc(n * HD * 4, &ok); }
     if (ok && any_eng) { b->ekvf = v41_alloc(n * (HC + 1u) * E * 4, &ok); b->hpre = v41_alloc(n * HC * E * 4, &ok); }
@@ -68,7 +74,7 @@ void pt_layer_free(pt_run *r) {
     ds4_gpu_tensor **all[] = { PT_LB_LIST(b) };
     for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) if (*all[i]) { ds4_gpu_tensor_free(*all[i]); *all[i] = NULL; }
     for (uint32_t il = 0; il < DS4_MAX_LAYER; il++) {
-        ds4_gpu_tensor **pl[] = { &r->save.idx[il], &r->save.ekv[il], &r->save.sel[il], &b->gcomp[il], &b->posg[il] };
+        ds4_gpu_tensor **pl[] = { &r->save.idx[il], &r->save.ekv[il], &r->save.sel[il], &b->gcomp[il], &b->posg[il], &r->ring_snap[il], &r->ring_post[il] };
         for (size_t i = 0; i < sizeof pl / sizeof pl[0]; i++) if (*pl[i]) { ds4_gpu_tensor_free(*pl[i]); *pl[i] = NULL; }
     }
     b->ready = 0;
@@ -122,7 +128,7 @@ static bool pt_layer_recompute(ds4_engine *e, pt_run *r, uint32_t il, uint32_t n
     pt_layer_buf *b = &r->lb; const v41_tsave *sv = &r->save;
     const uint64_t E = DS4_N_EMBD, HC = DS4_N_HC, MIX = 2u * HC + HC * HC, HD = DS4_N_HEAD_DIM, QH = (uint64_t)DS4_N_HEAD * HD, SWA = DS4_N_SWA;
     const uint32_t ratio = ds4_layer_compress_ratio(il);
-    st->n = n; st->pos0 = 0; st->graph = 0;
+    st->n = n; st->pos0 = r->pfx; st->graph = 0;   /* 前缀形态: 尾窗块首位的绝对位置(RoPE 走 st->pos 表, 注意力按 pos0 读环头) */
     /* L0 的入口是词嵌入(q4_K 解码值, 不在 bf16 格点上): 按 bf16 存档是有损的(10-01 重算对拍: 只有 L0 出口差 2.9e-3, 其余各层恰好 0),
      * 所以 L0 从 token 直接重算(st->tok 还是这一题的), 别的层入口都是 hc_post 舍过 bf16 的, 存档无损 */
     bool ok = il == 0u ? v41_embed(m, st->x, st->tok, e->weights.token_embd, DS4_N_VOCAB, n, E) && ds4_gpu_v41_expand_hc_tensor(b->hcin, st->x, (uint32_t)E, (uint32_t)HC, n)
@@ -136,6 +142,8 @@ static bool pt_layer_recompute(ds4_engine *e, pt_run *r, uint32_t il, uint32_t n
               PT_CP(b->prea, st->pre_mix, n * HC * 4) && PT_CP(b->xa, st->x, n * E * 4) && PT_CP(b->xna, st->xn, n * E * 4) &&
               v41_attn_in(e, st, il) && PT_CP(b->qr, st->qr, n * DS4_N_LORA_Q * 4) && PT_CP(b->kv, st->kv, n * HD * 4) &&
               ds4_gpu_tensor_copy(st->win[il], SWA * HD * 4, st->kvn, 0, n * HD * 4);   /* 合批时各题的块区首尾相接, 合起来也正是这一段 */
+    /* 前缀形态: 环头 [0,SWA) 还原成前缀预填完那一刻的(尾窗前向末尾的环提交把它盖成了尾窗末 128 键), 注意力核按 pos0 从环头读位置 < pos0 的键 */
+    if (ok && r->pfx && r->ring_snap[il]) ok = ds4_gpu_tensor_copy(st->win[il], 0, r->ring_snap[il], 0, SWA * HD * 4);
     pt_seg sg[PT_PACK_MAX];
     const uint32_t nsg = pt_segs(r, il, n, sg);
     for (uint32_t i = 0; ok && i < nsg; i++) {   /* 稀疏注意力按题: 各题自己的窗口 / 压缩行 / 冻结的选组 */
@@ -143,7 +151,7 @@ static bool pt_layer_recompute(ds4_engine *e, pt_run *r, uint32_t il, uint32_t n
         const bool hasc = ratio && g->ng && g->topk;
         ds4_gpu_tensor *v[3] = { pt_rows(st->o, g->r0, g->n, QH), pt_rows(st->q, g->r0, g->n, QH), hasc ? pt_idx_view(r, il, g) : NULL };
         ok = v[0] && v[1] && (!hasc || v[2]) &&
-             ds4_gpu_v41_sparse_attn_tensor(v[0], v[1], g->win, hasc ? g->comp : NULL, v[2], m->map, m->size, l->attn_sinks->abs_offset, g->n, 0, (uint32_t)SWA,
+             ds4_gpu_v41_sparse_attn_tensor(v[0], v[1], g->win, hasc ? g->comp : NULL, v[2], m->map, m->size, l->attn_sinks->abs_offset, g->n, r->pfx, (uint32_t)SWA,
                                             g->ng, hasc ? g->topk : 0u, hasc ? g->iratio : 0u, DS4_N_HEAD, (uint32_t)HD,
                                             (float)(1.0 / sqrt((double)HD)), 0, 1, 0u, NULL, 0u) != 0;
         pt_free_views(v, 3);
@@ -166,27 +174,28 @@ static bool pt_layer_recompute(ds4_engine *e, pt_run *r, uint32_t il, uint32_t n
 /* 源层的压缩器反向: lb.gcomp[il](读取层与本层注意力累加好的、对 RoPE 之后压缩行的梯度)→ 逆 RoPE → RMSNorm 反向 → 池化反向 → 投影转置乘,
  * 加进 g_xna。先按 v41_compress_source 同一串核重算归一化之前的 pooled(从位置 0 起一块, 尾巴不满一组的行不进池化)。
  * 按题调: 第 r0 行起 n 行是一道题, 它的组在 gcomp 第 g0 组起(组位置表 posg 从 0 起, 每题的位置都从 0 起); 暂存 cckv..cgsc 各题依次复用。 */
-static bool pt_compress_bwd(ds4_engine *e, pt_run *r, uint32_t il, uint32_t r0, uint32_t n, uint32_t g0) {
+static bool pt_compress_bwd(ds4_engine *e, pt_run *r, uint32_t il, uint32_t r0, uint32_t n, uint32_t g0, uint32_t pg0) {
+    /* pg0 = 这几组在位置表 posg 里的起点: 合批各题位置从 0 起传 0(组号 g0 只是 gcomp 里的落脚点); 前缀形态传 g0 = pfx/ratio(位置绝对, 与组号同一个数) */
     const ds4_model *m = &e->model; const ds4_layer_weights *l = &e->weights.layer[il];
     pt_layer_buf *b = &r->lb;
     const uint32_t E = DS4_N_EMBD, HD = DS4_N_HEAD_DIM, ratio = ds4_layer_compress_ratio(il), ng = n / ratio;
     if (!ng) return true;   /* 一组都没凑满: 前向没产压缩行, 也就没人读 */
-    ds4_gpu_tensor *v[3] = { pt_rows(b->xna, r0, n, E), pt_rows(b->g_xna, r0, n, E), pt_rows(b->gcomp[il], g0, ng, HD) };
-    ds4_gpu_tensor *xna = v[0], *gxna = v[1], *gc = v[2];
-    bool ok = xna && gxna && gc;
+    ds4_gpu_tensor *v[4] = { pt_rows(b->xna, r0, n, E), pt_rows(b->g_xna, r0, n, E), pt_rows(b->gcomp[il], g0, ng, HD), pt_rows(b->posg[il], pg0, ng, 1) };
+    ds4_gpu_tensor *xna = v[0], *gxna = v[1], *gc = v[2], *posg = v[3];
+    bool ok = xna && gxna && gc && posg;
     if (ok && ratio > 1u) ok = ds4_gpu_v41_matmul_bf16_tensor(b->cckv, m->map, m->size, l->attn_compressor_kv->abs_offset, E, HD, xna, n) &&
                                ds4_gpu_v41_matmul_bf16_tensor(b->ccsc, m->map, m->size, l->attn_compressor_gate->abs_offset, E, HD, xna, n) &&
                                ds4_gpu_v41_compress_pool_tensor(b->cpool, b->cckv, b->ccsc, n, ratio, HD);
     else if (ok) ok = ds4_gpu_v41_matmul_bf16_tensor(b->cpool, m->map, m->size, l->attn_compressor_kv->abs_offset, E, HD, xna, n) &&
                       ds4_gpu_v41_round_bf16_tensor(b->cpool, (uint64_t)n * HD);
-    ok = ok && ds4_gpu_bwd_rope_tensor(gc, b->posg[il], ng, 1, HD, DS4_N_ROT, DS4_COMPRESS_ROPE_FREQ_BASE, (uint32_t)DS4_ROPE_ORIG_CTX,
+    ok = ok && ds4_gpu_bwd_rope_tensor(gc, posg, ng, 1, HD, DS4_N_ROT, DS4_COMPRESS_ROPE_FREQ_BASE, (uint32_t)DS4_ROPE_ORIG_CTX,
                                        DS4_ROPE_SCALE_FACTOR, DS4_ROPE_YARN_BETA_FAST, DS4_ROPE_YARN_BETA_SLOW, true) &&
          ds4_gpu_bwd_rms_norm_tensor(b->cgpool, gc, b->cpool, m->map, m->size, l->attn_compressor_norm->abs_offset, HD, ng, DS4_RMS_EPS, 0);
     if (ratio > 1u) ok = ok && ds4_gpu_tensor_fill_f32(b->cgkv, 0.f, (uint64_t)n * HD) && ds4_gpu_tensor_fill_f32(b->cgsc, 0.f, (uint64_t)n * HD) &&
                          ds4_gpu_bwd_compress_pool_tensor(b->cgkv, b->cgsc, b->cgpool, b->cckv, b->ccsc, ng, ratio, HD) &&
                          PT_MT(gxna, l->attn_compressor_kv, E, HD, b->cgkv, 1) && PT_MT(gxna, l->attn_compressor_gate, E, HD, b->cgsc, 1);
     else ok = ok && PT_MT(gxna, l->attn_compressor_kv, E, HD, b->cgpool, 1);
-    pt_free_views(v, 3);
+    pt_free_views(v, 4);
     if (!ok) fprintf(stderr, "ds4: [ptrain] L%u 压缩器反向失败(ratio %u, 行 %u+%u, %u 组)\n", il, ratio, r0, n, ng);
     return ok;
 }
@@ -298,7 +307,7 @@ static bool pt_layer_bwd(ds4_engine *e, const pt_cfg *c, pt_run *r, uint32_t il,
                                      gcw ? pt_rows(b->gcomp[src], g->g0, g->ng, HD) : NULL, hasc ? pt_idx_view(r, il, g) : NULL };
             ok = v[0] && v[1] && v[2] && v[3] && v[4] && (!gcw || v[5]) && (!hasc || v[6]) &&
                  ds4_gpu_bwd_sparse_attn_tensor(v[0], v[1], v[5], v[2], v[3], v[4], g->win, hasc ? g->comp : NULL, v[6], m->map, m->size,
-                                                l->attn_sinks->abs_offset, g->n, DS4_N_SWA, g->ng, hasc ? g->topk : 0u, NH, HD, (float)(1.0 / sqrt((double)HD)));
+                                                l->attn_sinks->abs_offset, g->n, r->pfx, DS4_N_SWA, g->ng, hasc ? g->topk : 0u, NH, HD, (float)(1.0 / sqrt((double)HD)));
             pt_free_views(v, 7);
         }
     }
@@ -316,7 +325,8 @@ static bool pt_layer_bwd(ds4_engine *e, const pt_cfg *c, pt_run *r, uint32_t il,
         pt_dbg(c, r, il, "源层: gcomp(压缩前)", b->gcomp[il], HD); pt_dbg(c, r, il, "源层: g_xna 压缩器前", b->g_xna, E);
         const uint32_t nb = r->pk.nb ? r->pk.nb : 1u;
         for (uint32_t i = 0; ok && i < nb; i++)
-            ok = r->pk.nb ? pt_compress_bwd(e, r, il, r->pk.r0[i], r->pk.n[i], r->pk.g0[i][il]) : pt_compress_bwd(e, r, il, 0, n, 0);
+            ok = r->pk.nb ? pt_compress_bwd(e, r, il, r->pk.r0[i], r->pk.n[i], r->pk.g0[i][il], 0u)
+                          : pt_compress_bwd(e, r, il, 0, n, r->pfx / ratio, r->pfx / ratio);   /* 前缀形态: 只对尾窗自己的组求导, 前缀组的梯度丢(常量) */
         pt_dbg(c, r, il, "源层: g_xna 压缩器后", b->g_xna, E); pt_dbg(c, r, il, "源层: cpool(重算)", b->cpool, HD);
         pt_dbg(c, r, il, "源层: cgpool", b->cgpool, HD);
     }
@@ -366,7 +376,7 @@ static void pt_poison_layer(pt_run *r, uint32_t il, uint32_t n) {
 
 bool pt_layers_bwd(ds4_engine *e, const pt_cfg *c, pt_run *r, uint32_t n) {
     for (uint32_t il = c->layer_lo; il <= c->layer_hi; il++)   /* 压缩行梯度按题累加: 每题从 0 起 */
-        if (r->lb.gcomp[il] && !ds4_gpu_tensor_fill_f32(r->lb.gcomp[il], 0.f, (uint64_t)n * DS4_N_HEAD_DIM)) return false;
+        if (r->lb.gcomp[il] && !ds4_gpu_tensor_fill_f32(r->lb.gcomp[il], 0.f, ds4_gpu_tensor_bytes(r->lb.gcomp[il]) / 4u)) return false;   /* 整块(按 ctxlen 的组数分) */
     int said = 0;
     for (uint32_t il = c->layer_hi + 1u; il-- > c->layer_lo; ) {
         if (c->poison) pt_poison_layer(r, il, n);

@@ -58,12 +58,16 @@ bool pt_cfg_load(pt_cfg *c, const char *path) {
         else if (!strcmp(k, "epochs")) c->epochs = (uint32_t)atoi(v);
         else if (!strcmp(k, "batch")) c->batch = (uint32_t)atoi(v);
         else if (!strcmp(k, "maxlen")) c->maxlen = (uint32_t)atoi(v);
+        else if (!strcmp(k, "ctxlen")) c->ctxlen = (uint32_t)atoi(v);   /* 前缀形态的样本上限(见 core_ptrain.h pt_cfg.ctxlen) */
+        else if (!strcmp(k, "eval_n")) c->eval_n = (uint32_t)atoi(v);
+        else if (!strcmp(k, "doc_tail")) c->doc_tail = (uint32_t)atoi(v);   /* 每篇只训末 K 段(见 pt_cfg.doc_tail) */   /* 留出段只评几段(见 pt_cfg.eval_n) */
         else if (!strcmp(k, "probe_n")) c->probe_n = (uint32_t)atoi(v);
         else if (!strcmp(k, "probe_tok")) c->probe_tok = (uint32_t)atoi(v);
         else if (!strcmp(k, "seed")) c->seed = (uint32_t)atoi(v);
         else if (!strcmp(k, "gradcheck")) c->gradcheck = (uint32_t)atoi(v);
         else if (!strcmp(k, "prof")) c->prof = (uint32_t)atoi(v);
         else if (!strcmp(k, "rccheck")) c->rccheck = (uint32_t)atoi(v);
+        else if (!strcmp(k, "contcheck")) c->contcheck = (uint32_t)atoi(v);
         else if (!strcmp(k, "diag")) c->diag = (uint32_t)atoi(v);
         else if (!strcmp(k, "max_steps")) c->max_steps = (uint32_t)atoi(v);
         else if (!strcmp(k, "epoch_tok")) c->epoch_tok = (uint32_t)atoi(v);
@@ -101,6 +105,7 @@ bool pt_cfg_load(pt_cfg *c, const char *path) {
     if (c->layer_hi != DS4_N_LAYER - 1u) { fprintf(stderr, "ds4: --ptrain layers 必须到末层 L%u(给的是 %u-%u)\n", DS4_N_LAYER - 1u, c->layer_lo, c->layer_hi); return false; }
     if (c->evalf[0] && !strcmp(c->evalf, c->data)) { fprintf(stderr, "ds4: --ptrain eval= 与 data= 是同一份料: 泛化留出必须是没进训练的另一份\n"); return false; }
     if (!c->rank || c->topk < 1 || c->topk > 128 || !c->batch || c->maxlen < 16) { fprintf(stderr, "ds4: --ptrain rank/topk(1..128)/batch/maxlen 不合法\n"); return false; }
+    if (c->ctxlen && c->ctxlen < c->maxlen) { fprintf(stderr, "ds4: --ptrain ctxlen %u 小于 maxlen %u(ctxlen 是样本上限, 尾窗 = maxlen)\n", c->ctxlen, c->maxlen); return false; }
     if (c->teacher_fp[0] && c->sample_n) { fprintf(stderr, "ds4: --ptrain teacher=fp: 与 sample_n 不能同开: 步 2 的教师是部署态自己当场打分, 两种教师不能混一趟\n"); return false; }
     return true;
 }
@@ -152,29 +157,65 @@ static void pt_fill_onehot(const pt_cfg *c, pt_sample *s) {
 }
 
 /* text 行: BOS + 原文 + EOS, 从第 1 个 token 起每个都是目标。超 maxlen 的按 token 切成连续几段(每段 BOS + ≤ maxlen−1 个 token, EOS 只跟末段),
- * 各段自成样本、同一边留出(按整段原文算 FNV) —— unsloth 是截到 max_seq_length 丢尾, 这里不丢: 料就是一篇文档一行, 丢尾 = 后半篇白传。 */
-static bool pt_add_text(ds4_engine *e, const pt_cfg *c, pt_data *d, int src, const char *txt) {
+ * 各段自成样本、同一边留出(按整段原文算 FNV) —— unsloth 是截到 max_seq_length 丢尾, 这里不丢: 料就是一篇文档一行, 丢尾 = 后半篇白传。
+ * ★给了 ctxlen(前缀形态)★: 第 k 段 = 原文 [0, en_k)(超 ctxlen 才从前面截), 目标只是本段新的 token, 前面全当上下文。
+ *   为什么不按 ctxlen 切不重叠的段: 训练时只有尾窗进损失(core_ptrain_bwd.c), 段长 4096 就有 3/4 的 token 永远不当靶。
+ *   段界: en_k = (k+1)·S − 1(S = maxlen−2 以下 pt_pfx_align() 的最大倍数, 现役 1022) ⇒ 第 k 段的序列长 (k+1)·S 对齐到组, 正好是第 k+1 段的前缀长 —— 训练器按篇接力
+ *   (pt_run.cont_s), 上一段跑完的状态直接当下一段的前缀, 不重新预填。段界那 1 位(原文第 kS−1 个)由上一段多带的"只当目标"token 补上(xt);
+ *   末位(EOS)若正好落在段界, 并进上一段(尾窗 S+1 ≤ maxlen)。行里 "eos": false(原文没写完)时末尾不补 EOS。
+ *   整条轨迹一行进来就行 —— 别在料里先切窗: 每行末尾都补 EOS, 切在思考中间的窗 = 教它想到一半就停。 */
+uint32_t pt_pfx_align(void) {
+    uint32_t a = 2u;
+    for (uint32_t il = 0; il < DS4_N_LAYER; il++) { const uint32_t r = ds4_layer_compress_ratio(il); if (r > a) a = r; }
+    return a;
+}
+
+/* 每读一行(text 或问答)占一个 doc 号, docids/docn 与 ndoc 同步长, 问答行是 NULL/0。
+ * 10-26 实撞: 只在 text 行上长数组, 保持料 63 行也占 doc 号, 收尾按 ndoc 释放就越界 —— 训完、③ 落盘后 SIGSEGV(rc 139), 链误判训练失败。 */
+static void pt_doc_slot(pt_data *d) {
+    d->docids = realloc(d->docids, (size_t)(d->ndoc + 1u) * sizeof *d->docids); d->docn = realloc(d->docn, (size_t)(d->ndoc + 1u) * sizeof *d->docn);
+    d->docids[d->ndoc] = NULL; d->docn[d->ndoc] = 0;
+}
+
+static bool pt_add_text(ds4_engine *e, const pt_cfg *c, pt_data *d, int src, const char *txt, int eos) {
     const uint32_t ci = pt_chunk_of(d, "", 0, 1);
     const int eval = src == 2 ? 2 : (src == 0 && c->evalf[0]) ? 0 : pt_is_eval(txt);   /* 给了 eval= 时料不留出(同 pt_add_sample) */
     ds4_tokens at = {0};
     /* 认特殊 token 的切分(10-22): 原文段里的 <think> / </think> / <｜end▁of▁sentence｜> 要成为它们的 id, 思考轨迹尾段才能把 </think> 这个决策位放进 KL;
      * 纯 BPE 会把 "</think>" 切成几个普通片。不含这些字串的原文两条路逐 token 同(只有一个 span, 同一个 BPE) */
     ds4_tokenize_rendered_chat(e, txt, &at);
-    ds4_tokens_push(&at, ds4_token_eos(e));
-    const uint32_t W = c->maxlen - 1u;
-    for (uint32_t off = 0; off < (uint32_t)at.len; off += W) {
-        const uint32_t m = (uint32_t)at.len - off < W ? (uint32_t)at.len - off : W;
+    if (eos) ds4_tokens_push(&at, ds4_token_eos(e));
+    const bool pf = c->ctxlen > c->maxlen;
+    const uint32_t T = (uint32_t)at.len, S = pf ? (c->maxlen - 2u) / pt_pfx_align() * pt_pfx_align() : c->maxlen - 1u, Wc = c->ctxlen - 1u;
+    uint32_t nseg = 0;   /* 前缀形态的段数(与下面的段界同式): doc_tail 按它数末 K 段 */
+    if (pf) for (uint32_t k = 0, off = 0; off < T; k++) { uint32_t en = (k + 1u) * S - 1u < T ? (k + 1u) * S - 1u : T; if (en + 1u == T) en = T; nseg++; off = (k + 1u) * S; if (en >= T) break; }
+    /* 整篇一条教师序列(10-26): 前缀形态下各段的 tids 都是它的前缀(没被 ctxlen 截时), FP 表按它导一次填所有段, 不按段的窗各导一条(一篇 doc_tail 遍白算) */
+    pt_doc_slot(d); uint64_t fpkey = 0;
+    if (pf) {
+        int32_t *ds = xmalloc((size_t)(T + 1u) * 4); ds[0] = e->vocab.bos_id; memcpy(ds + 1, at.v, (size_t)T * 4);
+        d->docids[d->ndoc] = ds; d->docn[d->ndoc] = T + 1u; fpkey = pt_ids_fnv(ds, T + 1u);
+    }
+    for (uint32_t k = 0, off = 0; off < T; k++) {
+        uint32_t en = !pf ? (T - off < S ? T : off + S) : ((k + 1u) * S - 1u < T ? (k + 1u) * S - 1u : T);
+        if (pf && en + 1u == T) en = T;   /* EOS 落在段界: 并进本段 */
+        if (pf && c->doc_tail && k + c->doc_tail < nseg) { off = (k + 1u) * S; continue; }   /* 末 K 段以前: 只当上下文, 不出样本 */
+        /* xt: 非末段多带 1 个"只当目标"的 token(原文第 en 个, 存在 sids[sn], 不进前向): 它的 logits 是本段尾窗末行, 下一段的前缀正好到它之前 ——
+         * 不带的话段界那一位谁都不当靶(每 S 位丢 1 个, 10-25 晚补上)。sn 仍是输入长度, 接力判据(下一段前缀 == 本段 sn)不变 */
+        const uint32_t xt = pf && en < T ? 1u : 0u, st0 = !pf ? off : en > Wc ? en - Wc : 0u, m = en - off + xt;
         d->s = realloc(d->s, (d->ns + 1) * sizeof *d->s);
         pt_sample *s = &d->s[d->ns++];
         memset(s, 0, sizeof *s);
-        s->chunk = ci; s->eval = eval; s->raw = 1; s->q = strdup(""); s->a = strdup(""); s->src = src;
-        s->sn = m + 1u; s->sa0 = 1u; s->m = m;
-        s->sids = xmalloc((size_t)s->sn * 4);
+        s->chunk = ci; s->eval = eval; s->raw = 1; s->doc = d->ndoc; s->q = strdup(""); s->a = strdup(""); s->src = src;
+        s->sn = en - st0 + 1u; s->sa0 = off - st0 + 1u; s->m = m;
+        s->sids = xmalloc((size_t)(s->sn + xt) * 4);
         s->sids[0] = e->vocab.bos_id;
-        memcpy(s->sids + 1, at.v + off, (size_t)m * 4);
-        s->tids = xmalloc((size_t)s->sn * 4); memcpy(s->tids, s->sids, (size_t)s->sn * 4); s->tn = s->sn; s->ta0 = 1u;
+        memcpy(s->sids + 1, at.v + st0, (size_t)(en - st0 + xt) * 4);
+        s->tids = xmalloc((size_t)(s->sn + xt) * 4); memcpy(s->tids, s->sids, (size_t)(s->sn + xt) * 4); s->tn = s->sn; s->ta0 = s->sa0;
+        s->fpkey = (pf && st0 == 0u) ? fpkey : 0;   /* 被 ctxlen 截过头的窗不是整篇的前缀, 仍按自己的窗做键 */
         pt_fill_onehot(c, s);
+        off = pf ? (k + 1u) * S : en;
     }
+    d->ndoc++;
     ds4_tokens_free(&at);
     return true;
 }
@@ -193,13 +234,16 @@ static bool pt_add_sample(ds4_engine *e, const pt_cfg *c, pt_data *d, int src, c
     } else ds4_encode_chat_prompt(e, sys, q, DS4_THINK_NONE, &tp);   /* 保持料 / 普通题: 教师提示 = 学生提示 */
     ds4_tokenize_text(e, a, &at);
     ds4_tokens_push(&at, ds4_token_eos(e));
-    if ((uint32_t)(sp.len + at.len) > c->maxlen) { (*skipped)++; ds4_tokens_free(&sp); ds4_tokens_free(&tp); ds4_tokens_free(&at); return true; }
+    /* one-hot 的题(不带材料)可到 ctxlen(前缀形态); 带材料/保持料的教师表是部署态按整条算的, 前缀路不接, 仍以 maxlen 为限 */
+    const uint32_t lim = (d->ch[ci].sft && c->ctxlen > c->maxlen) ? c->ctxlen : c->maxlen;
+    if ((uint32_t)(sp.len + at.len) > lim) { (*skipped)++; ds4_tokens_free(&sp); ds4_tokens_free(&tp); ds4_tokens_free(&at); return true; }
     d->s = realloc(d->s, (d->ns + 1) * sizeof *d->s);
     pt_sample *s = &d->s[d->ns++];
     memset(s, 0, sizeof *s);
     /* 留出: eval 文件的题全是泛化留出(2); 料的题按 FNV 五取一 —— ★给了 eval= 时料不再留出★(10-11 下午): 泛化留出已经是没进训练的一份,
      * 再从料里抽 20% 走只会吃掉小料里一条事实唯一的信息行(youngai 24 行被抽走 5 行, fact 2/8/9/10 各只剩答案漏在问句里的那行, 挂上去这几条全错);
      * unsloth/TRL 也没有自动留出, eval_dataset 才是留出。保持料(src 1)照旧五取一: 它的留出 KL 量的是"通用回答没被带偏", 与 eval= 无关 */
+    pt_doc_slot(d); s->doc = d->ndoc++;
     s->chunk = ci; s->eval = src == 2 ? 2 : (src == 0 && c->evalf[0]) ? 0 : pt_is_eval(q); s->q = strdup(q); s->a = strdup(a); s->src = src;
     s->sids = pt_cat(&sp, &at, &s->sn); s->sa0 = (uint32_t)sp.len;
     s->tids = pt_cat(&tp, &at, &s->tn); s->ta0 = (uint32_t)tp.len;
@@ -221,7 +265,8 @@ static bool pt_add_sample(ds4_engine *e, const pt_cfg *c, pt_data *d, int src, c
 
 /* 一行 jsonl → system/context/user/assistant 四串(malloc; 没有的给 ""), 或 text 一串(*txt 非空时另四串都是 ""); 失败时 *err 指向原因(静态串)。
  * 全仓唯一的料行解析器: 扩展(core_ptrain_expand.c)收模型写的行也走它 —— 不是合法料行的就不是料 */
-bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, char **txt, const char **err) {
+bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, char **txt, int *eos, const char **err) {
+    *eos = 1;
     const char *p = ln; char *key = NULL, *role = NULL, *content = NULL;
     *sys = *ctx = *q = *a = *txt = NULL; *err = "不是 JSON 对象";
     json_ws(&p);
@@ -238,6 +283,10 @@ bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, c
             if (!json_string(&p, ctx)) { free(key); *err = "context 要是字符串"; return false; }
         } else if (!strcmp(key, "text")) {
             if (!json_string(&p, txt)) { free(key); *err = "text 要是字符串"; return false; }
+        } else if (!strcmp(key, "eos")) {   /* text 行可选: false = 原文没写完(撞长度上限的轨迹), 末尾不补 EOS */
+            bool b = true;
+            if (!json_bool(&p, &b)) { free(key); *err = "eos 要是 true/false"; return false; }
+            *eos = b ? 1 : 0;
         } else if (!strcmp(key, "messages")) {
             json_ws(&p);
             if (*p != '[') { free(key); *err = "messages 要是数组"; return false; }
@@ -269,7 +318,7 @@ bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, c
                 json_ws(&p);
                 if (*p == ',') p++;
             }
-        } else { free(key); *err = "只认 messages / context / text 三个字段(reward/mode/split 10-10 起不收)"; return false; }
+        } else { free(key); *err = "只认 messages / context / text(+eos) 这几个字段(reward/mode/split 10-10 起不收)"; return false; }
         free(key);
         json_ws(&p);
         if (*p == ',') p++;
@@ -278,6 +327,7 @@ bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, c
     if (*p) { *err = "行尾有多余内容"; return false; }
     if (!*sys) *sys = strdup("");
     if (!*ctx) *ctx = strdup("");
+    if (!*txt && !*eos) { *err = "eos 只给 text 行(问答的答案恒以 EOS 收尾)"; return false; }
     if (*txt) {   /* 原文行: 不许再带 messages/context(一行只能是一种料, 混着写说不清目标是什么) */
         if (*q || *a || (*ctx)[0]) { *err = "text 行不能再带 messages / context"; return false; }
         pt_rstrip(*txt);
@@ -304,10 +354,10 @@ static bool pt_load_file(ds4_engine *e, const pt_cfg *c, pt_data *d, const char 
         lineno++;
         const char *q0 = p; while (*q0 == ' ' || *q0 == '\t' || *q0 == '\r') q0++;
         if (*q0) {
-            char *sys, *ctx, *q, *a, *txt; const char *err;
-            if (!pt_parse_line(p, &sys, &ctx, &q, &a, &txt, &err)) { fprintf(stderr, "ds4: --ptrain %s 第 %u 行: %s\n", path, lineno, err); ok = false; }
+            char *sys, *ctx, *q, *a, *txt; const char *err; int eos = 1;
+            if (!pt_parse_line(p, &sys, &ctx, &q, &a, &txt, &eos, &err)) { fprintf(stderr, "ds4: --ptrain %s 第 %u 行: %s\n", path, lineno, err); ok = false; }
             else if (src == 1 && (ctx[0] || txt[0])) { fprintf(stderr, "ds4: --ptrain %s 第 %u 行: 保持料只收不带 context 的问答(教师 = 部署态自己)\n", path, lineno); ok = false; }
-            else if (txt[0]) ok = pt_add_text(e, c, d, src, txt);
+            else if (txt[0]) ok = pt_add_text(e, c, d, src, txt, eos);
             else ok = pt_add_sample(e, c, d, src, sys[0] ? sys : NULL, ctx, q, a, skipped);
             free(sys); free(ctx); free(q); free(a); free(txt);
         }
@@ -335,6 +385,19 @@ bool pt_data_load(ds4_engine *e, const pt_cfg *c, pt_data *d) {
     else fprintf(stderr, "ds4: ★[ptrain] 没给 hold=(保持料): ③ 在通用问题上没有东西钉着, 10-01 实撞局部性崩 —— 只在故意对照时这么跑★\n");
     if (c->evalf[0] && !pt_load_file(e, c, d, c->evalf, 2, &skipped)) return false;
     pt_data_lcp(d);
+    if (c->eval_n) {   /* 料的留出段(eval 1, src 0)按篇等间隔留, 约 eval_n 段: 第 j 篇留下当且仅当 ⌊(j+1)·N/nv⌋ > ⌊j·N/nv⌋(按段数比例抽篇, 散在全料)。
+                        * 整篇留不按段抽: 前缀形态按篇接力(pt_run.cont_s), 抽散的段每段都要从 0 重新预填前缀(18:4x 那趟 649 段 43 分钟没评完) */
+        uint32_t nv = 0, nd = 0, nk = 0;
+        for (uint32_t i = 0; i < d->ns; i++) nv += d->s[i].eval == 1 && d->s[i].src == 0 ? 1u : 0u;
+        if (nv > c->eval_n) {
+            uint32_t j = 0, last = UINT32_MAX; bool keep = false;
+            for (uint32_t i = 0; i < d->ns; i++) if (d->s[i].eval == 1 && d->s[i].src == 0) {
+                if (d->s[i].doc != last) { last = d->s[i].doc; keep = (uint64_t)(j + 1u) * c->eval_n / nv > (uint64_t)j * c->eval_n / nv; j++; }
+                if (keep) nk++; else { d->s[i].eval = 3; nd++; }
+            }
+            fprintf(stderr, "ds4: [ptrain] eval_n=%u: 留出 %u 篇 %u 段, 整篇抽留 %u 段评估, 其余 %u 段不训也不评\n", c->eval_n, j, nv, nk, nd);
+        }
+    }
     uint32_t ne = 0, ng = 0, nsft = 0, nraw = 0, nh = 0, mx = 0, h[4] = { 0, 0, 0, 0 };   /* 学生序列长度分布: 训练缓冲按 maxlen 行预分配, 定 maxlen 要看尾巴有多长 */
     for (uint32_t i = 0; i < d->ns; i++) {
         ne += d->s[i].eval ? 1u : 0u; ng += d->s[i].eval == 2 ? 1u : 0u; nsft += d->s[i].sft && !d->s[i].raw ? 1u : 0u; nraw += d->s[i].raw ? 1u : 0u; nh += d->s[i].src == 1 ? 1u : 0u;
@@ -370,6 +433,8 @@ void pt_data_free(pt_data *d) {
         pt_sample *s = &d->s[i];
         free(s->q); free(s->a); free(s->sids); free(s->tids); free(s->top_id); free(s->top_p); free(s->top_rest); free(s->dids);
     }
+    if (d->docids) for (uint32_t i = 0; i < d->ndoc; i++) free(d->docids[i]);
+    free(d->docids); free(d->docn);
     free(d->ch); free(d->s); memset(d, 0, sizeof *d);
 }
 #endif /* !DS4_NO_GPU */

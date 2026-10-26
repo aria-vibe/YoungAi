@@ -157,9 +157,11 @@ kernel void kernel_v41_unpack_bf16(device float *o [[buffer(0)]], device const u
     if ((ulong)i < n) o[i] = v41_bf16_to_f32(x[i]);
 }
 
-// ---- 稀疏注意力反向(一题一块、pos0 = 0; 窗口缓冲第 window+i 行 = 位置 i): 一 threadgroup 一 (query, 8 头), 8 键一片进 threadgroup;
-// 两遍: 先 lse(与前向同序的在线 max/sum), 再 g_s = p·(dp − D) → g_q += scale·g_s·k; 键梯度 scale·g_s·q + p·g_o 原子加进 gkv[位置] / gcomp[组]。
-struct v41_battn_args { uint window, ng, topk, n_head, hd, has_comp, has_gcomp, pad; float scale; float pad1, pad2, pad3; };
+// ---- 稀疏注意力反向(一题一块, 块首位绝对位置 pos0; 窗口缓冲第 window+i 行 = 位置 pos0+i, 位置 a < pos0 的键在环头第 a % window 格, 与 CUDA
+// 的 v41_win_row(ring=1) 同一映射; pos0 = 0 时环头读不到 = 老形态): 一 threadgroup 一 (query, 8 头), 8 键一片进 threadgroup;
+// 两遍: 先 lse(与前向同序的在线 max/sum), 再 g_s = p·(dp − D) → g_q += scale·g_s·k; 键梯度 scale·g_s·q + p·g_o 原子加进 gkv[块区行] / gcomp[组];
+// 环头里的前缀键是常量, 不出梯度(10-25 "前缀只预填、尾窗才反传"的截断)。★Metal 端 pos0 ≠ 0 的路没有真机验过(16 GB Mac 跑不了训练)★, 算式照 CUDA 抄。
+struct v41_battn_args { uint window, ng, topk, n_head, hd, has_comp, has_gcomp, pos0; float scale; float pad1, pad2, pad3; };
 kernel void kernel_v41_bwd_sparse_attn(constant v41_battn_args &a [[buffer(0)]], device float *gq [[buffer(1)]], device atomic_float *gkv [[buffer(2)]],
                                        device atomic_float *gcomp [[buffer(3)]], device const float *go [[buffer(4)]], device const float *o [[buffer(5)]],
                                        device const float *q [[buffer(6)]], device const float *kvw [[buffer(7)]], device const uchar *kvc [[buffer(8)]],
@@ -168,7 +170,8 @@ kernel void kernel_v41_bwd_sparse_attn(constant v41_battn_args &a [[buffer(0)]],
     threadgroup float ks[8][512], ksc[8][32];
     threadgroup int kok[8], kpos[8];
     const uint i = tg.x, h = tg.y * 8u + sgitg, hd = a.hd, per = hd / 32u;
-    const uint lo = i + 1u > a.window ? i + 1u - a.window : 0u, nwin = i - lo + 1u, topk = a.has_comp ? a.topk : 0u, nkeys = nwin + topk;
+    const uint p = a.pos0 + i;   /* 本 query 的绝对位置 */
+    const uint lo = p + 1u > a.window ? p + 1u - a.window : 0u, nwin = p - lo + 1u, topk = a.has_comp ? a.topk : 0u, nkeys = nwin + topk;
     float qa[16], ga[16], gacc[16];
     float D = 0.0f;
     for (uint e = 0; e < per; e++) {
@@ -185,9 +188,11 @@ kernel void kernel_v41_bwd_sparse_attn(constant v41_battn_args &a [[buffer(0)]],
             if (sgitg < nt) {
                 const uint t = sgitg, kk = base + t;
                 bool have_w = false, have_c = false; ulong wrow = 0; device const uchar *cpk = kvc; int g = -1;
-                if (kk < nwin) { have_w = true; wrow = (ulong)(a.window + lo + kk) * hd; }
+                int wpos = -1;   /* 块区行号(≥ 0 才出梯度); 前缀键(abs < pos0)住环头 abs % window, 是常量 */
+                if (kk < nwin) { const uint abs = lo + kk; have_w = true;
+                                 if (abs < a.pos0) wrow = (ulong)(abs % a.window) * hd; else { wrow = (ulong)(a.window + abs - a.pos0) * hd; wpos = (int)(abs - a.pos0); } }
                 else { g = idx[(ulong)i * topk + (kk - nwin)]; if (g >= 0 && (uint)g < a.ng) { have_c = true; cpk = kvc + (ulong)g * 288u; } }
-                if (lane == 0u) { kok[t] = (have_w || have_c) ? 1 : 0; kpos[t] = have_w ? (int)(lo + kk) : (have_c ? -2 - g : -1); }
+                if (lane == 0u) { kok[t] = (have_w || have_c) ? 1 : 0; kpos[t] = have_w ? wpos : (have_c ? -2 - g : -1); }
                 if (have_c) ksc[t][lane] = v41_e4m3_to_f32(cpk[256u + lane]);
                 simdgroup_barrier(mem_flags::mem_threadgroup);
                 for (uint d = lane; d < hd; d += 32u) ks[t][d] = have_w ? kvw[wrow + d] : (have_c ? v41_ckv_get_s(cpk, d, ksc[t]) : 0.0f);

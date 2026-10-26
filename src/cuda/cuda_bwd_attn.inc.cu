@@ -1,6 +1,7 @@
 /* cuda_bwd_attn.inc.cu — ds4_cuda.cu 分片: 后训练反传的注意力与 RoPE(契约 ds4_gpu_bwd.h, 2026-10-01; 10-02 重写注意力两核)。
  *
- * 只接后训练要的形态: 一题一块、从位置 0 起(pos0 = 0), 窗口键全在本批(窗口缓冲第 window+i 行 = 第 i 个位置的 kvn),
+ * 只接后训练要的形态: 一题一块, 块首位绝对位置 pos0(10-25 起可非 0: 前缀只预填、尾窗才反传): 窗口缓冲第 window+i 行 = 位置 pos0+i 的 kvn(块区),
+ * 位置 a < pos0 的键在环头第 a % window 格(取法与前向共用 ds4_fa_gather / v41_win_row), 它们是常量 —— 键梯度核见到 a < pos0 直接跳过;
  * 压缩行来自 kv 源层: 源层在训练段里时传 gcomp, 对压缩行的梯度累加进去, 源层在训练段之下就是常量、传 NULL;
  * 选哪些压缩行(indexer topk)是离散的, 照前向存档的 idx 用。
  * 前向算式(v41_sparse_attn_kernel): s_t = scale·<q, k_t>, o = Σ_t e^{s_t−m}·k_t / (Σ_t e^{s_t−m} + e^{sink−m})(值 = 键, sink 只进分母)。
@@ -32,7 +33,7 @@
  * 精度: q/g_o/键/g_s 转 bf16 乘、f32 累加(与 kg 核、vqt 同口径), 旧核全 f32 ⇒ 不逐位同; 门 = packcheck 有限差分 + 同题新旧梯度范数。 */
 __global__ __launch_bounds__(256) static void bwd_attn_qm_kernel(float *gq, uint16_t *wb, uint32_t nkmax, const float *go, const float *o,
                                                                 const float *q, const float *kvw, const uint8_t *kvc, const int32_t *idx,
-                                                                const float *sink, uint32_t n_head, uint32_t window, uint32_t ng, uint32_t topk,
+                                                                const float *sink, uint32_t n_head, uint32_t pos0, uint32_t window, uint32_t ng, uint32_t topk,
                                                                 float scale) {
     constexpr uint32_t KT = DS4_ATTN_MMA_KT, HB = DS4_ATTN_MMA_HEADS, HD = DS4_ATTN_MMA_HD;
     extern __shared__ __align__(16) char bwd_qm_smem[];
@@ -43,7 +44,8 @@ __global__ __launch_bounds__(256) static void bwd_attn_qm_kernel(float *gq, uint
     float *rmax = (float *)(gtile + HB * KT), *rsum = rmax + HB, *lse = rsum + HB, *Dh = lse + HB, *dpart = Dh + HB;   /* dpart [8 warp][16 头] */
     int *valid = (int *)(dpart + 8u * HB);
     const uint32_t i = blockIdx.x, h0 = blockIdx.y * HB, lane = threadIdx.x & 31u, warp = threadIdx.x >> 5;
-    const uint32_t lo = i + 1u > window ? i + 1u - window : 0u, nwin = i - lo + 1u, nkeys = nwin + topk;
+    const uint32_t p = pos0 + i;   /* 本 query 的绝对位置; 窗口键 = 位置 [lo, p], 其中 < pos0 的在环头 */
+    const uint32_t lo = p + 1u > window ? p + 1u - window : 0u, nwin = p - lo + 1u, nkeys = nwin + topk;
     uint32_t qa[4][4], ga[4][4];   /* q / g_o 的 A 片段: warp w 管维 [64w, 64w+64) 的 4 个 k16(布局同前向) */
     {
         const uint32_t r = lane >> 2, c = (lane & 3u) * 2u;
@@ -93,7 +95,7 @@ __global__ __launch_bounds__(256) static void bwd_attn_qm_kernel(float *gq, uint
     for (uint32_t base = 0; base < nkeys; base += KT) {   /* 第一遍: lse(在线 max/sum, 一线程一头, 键序串行 —— 与前向同序) */
         const uint32_t nt = (nkeys - base) < KT ? (nkeys - base) : KT;
         __syncthreads();
-        ds4_fa_gather(ks, valid, kvw, kvc, idx, i, base, nt, nwin, lo, 0u, window, ng, topk);
+        ds4_fa_gather(ks, valid, kvw, kvc, idx, i, base, nt, nwin, lo, pos0, window, ng, topk);
         __syncthreads();
         tile_mma(qa, stile, nt, true);
         if (threadIdx.x < HB) {
@@ -113,7 +115,7 @@ __global__ __launch_bounds__(256) static void bwd_attn_qm_kernel(float *gq, uint
     for (uint32_t base = 0; base < nkeys; base += KT) {   /* 第二遍: g_s → wb, g_q */
         const uint32_t nt = (nkeys - base) < KT ? (nkeys - base) : KT;
         __syncthreads();
-        ds4_fa_gather(ks, valid, kvw, kvc, idx, i, base, nt, nwin, lo, 0u, window, ng, topk);
+        ds4_fa_gather(ks, valid, kvw, kvc, idx, i, base, nt, nwin, lo, pos0, window, ng, topk);
         __syncthreads();
         tile_mma(qa, stile, nt, true);
         tile_mma(ga, dtile, nt, false);
@@ -162,13 +164,14 @@ static size_t bwd_qm_smem_bytes(void) {
  * e < 头 → V = q_ie(权重 scale·g_s), 否则 V = g_o(权重 p)。一轮吃 64 个 e: A 片 = V 的 [64 个 e][128 维](f32 → bf16, 按 [K][M] 存, .trans 取);
  * B 片 = wb 的 [128 个键][64 个 e](已是 bf16, 直接搬; 交织/取法同 vqm 的 B 片)。出口: 键 < nwin → gkv[lo+键], 否则 → gcomp[组号]。 */
 __global__ __launch_bounds__(512, 1) static void bwd_attn_kg_kernel(float *gkv, float *gcomp, const uint16_t *wb, uint32_t nkmax, const float *q,
-                                                                    const float *go, const int32_t *idx, uint32_t n_head, uint32_t window,
+                                                                    const float *go, const int32_t *idx, uint32_t n_head, uint32_t pos0, uint32_t window,
                                                                     uint32_t ng, uint32_t topk) {
     __shared__ __align__(16) uint8_t As[64u * BWD_KG_BM * 2u];   /* 16 KB */
     __shared__ __align__(16) uint8_t Bs[BWD_KG_BN * 64u * 2u];   /* 16 KB */
     constexpr uint32_t NFW = (BWD_KG_BN / 8u) / 2u;               /* 每 warp 8 个 n8 片(键分两半给 th = 0/1) */
     const uint32_t i = blockIdx.x, kc0 = blockIdx.y * BWD_KG_BN, d0 = blockIdx.z * BWD_KG_BM;
-    const uint32_t lo = i + 1u > window ? i + 1u - window : 0u, nwin = i - lo + 1u, nk = nwin + topk;
+    const uint32_t p = pos0 + i;   /* 与 qm 核同一套窗口下界: wb 的键序是 [lo, p] 的窗口键再接 topk 压缩行 */
+    const uint32_t lo = p + 1u > window ? p + 1u - window : 0u, nwin = p - lo + 1u, nk = nwin + topk;
     if (kc0 >= nk) return;   /* 整个 block 一起退, 不会卡在屏障上 */
     const uint32_t nt = nk - kc0 < BWD_KG_BN ? nk - kc0 : BWD_KG_BN;
     const uint32_t tid = threadIdx.x, lane = tid & 31u, warp = tid >> 5, wr = warp & 7u, th = warp >> 3;
@@ -235,8 +238,11 @@ __global__ __launch_bounds__(512, 1) static void bwd_attn_kg_kernel(float *gkv, 
                 if (t >= nt) continue;
                 const uint32_t kk = kc0 + t;
                 float *dst;
-                if (kk < nwin) dst = gkv + (uint64_t)(lo + kk) * 512u;
-                else {
+                if (kk < nwin) {
+                    const uint32_t a = lo + kk;   /* 窗口键的绝对位置: 前缀(环头, a < pos0)是常量, 没有梯度行; 块区行 = a − pos0 */
+                    if (a < pos0) continue;
+                    dst = gkv + (uint64_t)(a - pos0) * 512u;
+                } else {
                     if (!gcomp) continue;   /* 源层在训练段之下: 压缩行是常量 */
                     const int32_t g = idx[(uint64_t)i * topk + (kk - nwin)];
                     if (g < 0 || (uint32_t)g >= ng) continue;
@@ -252,7 +258,7 @@ static v41_scratch g_bwd_wb;
 int ds4_gpu_bwd_sparse_attn_tensor(ds4_gpu_tensor *gq, ds4_gpu_tensor *gkv, ds4_gpu_tensor *gcomp, const ds4_gpu_tensor *go, const ds4_gpu_tensor *o,
                                    const ds4_gpu_tensor *q, const ds4_gpu_tensor *kv_win, const ds4_gpu_tensor *kv_comp,
                                    const ds4_gpu_tensor *idx, const void *model_map, uint64_t model_size, uint64_t sink_offset,
-                                   uint32_t n_tok, uint32_t window, uint32_t ng, uint32_t topk, uint32_t n_head, uint32_t head_dim, float scale) {
+                                   uint32_t n_tok, uint32_t pos0, uint32_t window, uint32_t ng, uint32_t topk, uint32_t n_head, uint32_t head_dim, float scale) {
     (void)model_size;
     if (!gq || !gkv || !go || !o || !q || !kv_win || head_dim != 512u || n_tok == 0) return 0;
     if (n_head % 32u) { fprintf(stderr, "ds4: [bwd] 注意力反向: 头数 %u 不是 32 的倍数(键梯度核一轮吃 64 个 e = 2·头)\n", n_head); return 0; }
@@ -265,12 +271,12 @@ int ds4_gpu_bwd_sparse_attn_tensor(ds4_gpu_tensor *gq, ds4_gpu_tensor *gkv, ds4_
     if (!sink || !wb) return 0;
     bwd_attn_qm_kernel<<<dim3(n_tok, n_head / DS4_ATTN_MMA_HEADS), 256, bwd_qm_smem_bytes(), g_cur_stream>>>((float *)gq->ptr, wb, nkmax, (const float *)go->ptr,
         (const float *)o->ptr, (const float *)q->ptr, (const float *)kv_win->ptr, kv_comp ? (const uint8_t *)kv_comp->ptr : NULL,
-        idx ? (const int32_t *)idx->ptr : NULL, sink, n_head, window, ng, topk, scale);
+        idx ? (const int32_t *)idx->ptr : NULL, sink, n_head, pos0, window, ng, topk, scale);
     if (!cuda_ok(cudaGetLastError(), "bwd attn q")) return 0;
     if (cudaMemsetAsync(gkv->ptr, 0, (size_t)n_tok * 512u * 4u, g_cur_stream) != cudaSuccess) { (void)cudaGetLastError(); return 0; }
     bwd_attn_kg_kernel<<<dim3(n_tok, (nkmax + BWD_KG_BN - 1u) / BWD_KG_BN, 512u / BWD_KG_BM), 512, 0, g_cur_stream>>>((float *)gkv->ptr,
         (gcomp && kv_comp) ? (float *)gcomp->ptr : NULL, wb, nkmax, (const float *)q->ptr, (const float *)go->ptr,
-        idx ? (const int32_t *)idx->ptr : NULL, n_head, window, ng, topk);
+        idx ? (const int32_t *)idx->ptr : NULL, n_head, pos0, window, ng, topk);
     return cuda_ok(cudaGetLastError(), "bwd attn kg");
 }
 

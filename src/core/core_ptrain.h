@@ -37,11 +37,20 @@ typedef struct {
     uint32_t expand;               /* expand=N(缺省 4): 装料时让部署态把每道训练题改写成 N 组同格式 jsonl 新问答一起训, 缓存 <data>.expandN.jsonl(0 = 关, 老路逐位同), core_ptrain_expand.c */
     uint32_t layer_lo, layer_hi;   /* 训练哪几层的放大器(含两端); 只训末层时出口反传是闭式的, 不用穿注意力 */
     uint32_t rank, topk, epochs, batch, maxlen, probe_n, probe_tok, seed;
+    uint32_t ctxlen;               /* ctxlen=N(10-25, 缺省 0 = maxlen): 样本最长可到 N 位; 超过 maxlen 的 one-hot 样本按"前缀只预填、尾窗才反传"过 ——
+                                    * 前 sn−maxlen 位当普通预填进 KV 缓存(不存档不反传), 最后 maxlen 位存档 + 反传, 损失只算尾窗里的目标。
+                                    * 为什么: 反传缓冲按 maxlen 分(每层 hc_in 存档 + 几十个 n×E×4), 4096 窗 10 GB+ 分不出(10-25 两次实撞), 而鹈鹕
+                                    * "path 少一半"是一两万位设计推理的累积, 靶必须在长上下文里 —— 前缀给上下文, 尾窗给梯度, 内存只按尾窗长。 */
+    uint32_t doc_tail;             /* doc_tail=K(10-25, 缺省 0 = 全训; 只在前缀形态): 每篇 text 只把末 K 段当训练样本, 前面的原文只当上下文(首个样本整段预填, 不反传)。
+                                    * 为什么: 图形轨迹的 </think> 与 SVG 正文在末 4~5 段(正文中位 1.4 万字符), 快速验证时前面两万位思考只要给上下文, 预填约是训练速度的 4~5 倍 */
+    uint32_t eval_n;               /* eval_n=N(10-25, 缺省 0 = 不限): 料里的留出按整篇等间隔抽, 约 N 段, 其余留出段标 eval=3(不训也不评, 同一条原文的段不漏进训练)。
+                                    * 为什么: 留出按整条原文 FNV 五取一, 整条轨迹 2.8 万位切 28 段全进留出 ⇒ 82 条轨迹留出 649 段, 第 0 步评估跑了 40 分钟还没完(10-25 18:4x) */
     uint32_t gradcheck;            /* 1 = 训练前先做有限差分梯度检查(每个训练层的 A 沿梯度方向 ±ε), 2 = 查完就退出 */
     uint32_t prof;                 /* 1 = 整步分段计时(每段前后同步, 只作诊断: 会拖慢), 每 5 步打一次累计表(pt_prof_print) */
     uint32_t max_steps;            /* >0 = 只训这么多步就退出: 不做第 0 步评估/探针、不评估不存盘 —— 专给计时用(kdprof 段), 产物不能挂 */
     uint32_t epoch_tok;            /* >0 = 一轮只过打乱序里连续的一段(各题行数含提示累计到它即收), 下一轮接着取, 取完整个打乱序才重新打乱
                                     * ⇒ 一个周期内每题恰好一次(10-03 用户定: 全层全量一轮 30 分钟低于带宽地板, 改成 10 分钟一轮的切片); 0 = 一轮 = 全量过一遍 */
+    uint32_t contcheck;            /* 1 = 按篇接力自检(前缀形态): 第一篇 ≥3 段的训练原文, 段 0、1 接力前向 + 反传, 段 2 先接力再清状态从头预填各算一次损失, 比完就退出 */
     uint32_t rccheck;              /* 1 = 重算对拍: 第一道训练题前向 + 反传一次, 每层重算后补算层出口, 与前向存档的下一层入口比, 打完就退出 */
     uint32_t gcl[16], ngcl;        /* gclayers=a/b/..: 放大器梯度检查只查这几层(不给 = 训练段全部) */
     uint8_t hcmid[16];             /* hccheck 里层号后跟 m(如 32m) = 扰动点放在该层中段(注意力半层出口、ffn 半层入口) */
@@ -65,6 +74,7 @@ typedef struct {
     uint32_t chunk;
     int eval;                       /* 1 = 留出(措辞没进训练); 2 = eval= 文件的题(换了形式的整组留出, 量泛化) */
     int raw;                        /* 1 = text 原文段 */
+    uint32_t doc;                   /* raw 段属于第几行原文(pt_data.ndoc 计数): 前缀形态按篇接力, 打乱时整篇的段按顺序挨着(core_ptrain.c pt_group_docs) */
     char *q, *a;
     int32_t *sids; uint32_t sn, sa0;   /* 学生 ids / 长度 / 答案第一个 token 的下标 */
     int32_t *tids; uint32_t tn, ta0;   /* 教师 ids / 长度 / 答案起点 */
@@ -73,12 +83,17 @@ typedef struct {
     int sft;                        /* 1 = 表是答案 token 的 one-hot(同一个 KL 核算出来就是交叉熵, 不过教师信念这一道; 装料时填好, 不进教师缓存) */
     int src;                        /* 0 = data 文件, 1 = hold 文件, 2 = eval 文件: 教师缓存按文件各一份(<文件>.teacher.bin), 同一份保持料换料重训永远命中 */
     int32_t *dids; uint32_t dn;     /* 步 2 的教师提示(不带材料的题才有: 这条问答当示范放进上下文; 带材料的题步 2 直接用 tids 的提示段) */
+    uint64_t fpkey;                 /* FP 教师表的键(10-26): 0 = 自己的 tids 整条; 前缀形态的原文段(tids 是整篇的前缀) = 整篇序列 BOS+原文(+EOS) 的 FNV ——
+                                     * 一篇只导一条教师序列、打一次表, 各段按"表序列以 tids 开头"对上、取自己那 m 行(core_ptrain_fp.c); 按段的窗去重会把一篇算 doc_tail 遍 */
 } pt_sample;
 
 typedef struct {
     pt_chunk *ch; uint32_t nch;
     pt_sample *s; uint32_t ns;
+    uint32_t ndoc;                  /* 读进来的 text 行数(pt_sample.doc 的上界) */
+    int32_t **docids; uint32_t *docn;   /* 每篇原文的整条序列(按 pt_sample.doc 下标; 只前缀形态有, 否则 NULL/0): dumpids 按它导整篇 */
 } pt_data;
+uint64_t pt_ids_fnv(const int32_t *ids, uint32_t n);   /* 教师序列的键(core_ptrain_fp.c) */
 
 /* splitmix64: 采样种子由 (seed, 轮, 题号, 份号) 这类整数定, 两趟同配置逐份同种子(步 2 与改写都用它) */
 static inline uint64_t pt_mix64(uint64_t x) {
@@ -92,8 +107,12 @@ bool pt_expand(ds4_engine *e, const pt_cfg *c, const pt_data *d, const char *cac
 
 /* core_ptrain_data.c */
 bool pt_cfg_load(pt_cfg *c, const char *path);
-bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, char **txt, const char **err);   /* 料行解析(唯一一份) */
+bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, char **txt, int *eos, const char **err);   /* 料行解析(唯一一份);
+                                    * eos: text 行的 "eos" 字段(缺省 1 = 末尾补 EOS 当目标; false = 原文没写完, 不补 —— 撞长度上限的轨迹末尾补 EOS 是假靶) */
 bool pt_data_load(ds4_engine *e, const pt_cfg *c, pt_data *d);
+/* 前缀形态的块界对齐粒度 = max(2, 各层压缩比)(层表里读; V4.1 层表压缩比只有 0/1/2, 所以就是"取偶"): 前缀长/段界都取它的倍数,
+ * 组界不跨前缀/尾窗(尾窗压缩器反传只对本窗自己的组求导, core_ptrain_layer.c pt_compress_bwd 的 pg0 = pfx/ratio)。 */
+uint32_t pt_pfx_align(void);
 void pt_data_free(pt_data *d);
 void pt_data_lcp(pt_data *d);   /* 每块的教师公共前缀(装料末尾算一次; 步 2 新造的样本同样要) */
 uint32_t pt_chunk_of(pt_data *d, const char *ctx, int hold, int raw);
@@ -161,14 +180,25 @@ typedef struct {
      * pt_run_list 按题抄进 dec_each → heldout_eNN.tsv 第 5 列。为什么: 24 位的均值两趟差 0.433/0.329 而整体留出几乎同, 不看逐题分不清是尺的噪声还是真变化 */
     double dec_last, dec_slot[PT_PACK_MAX];
     pt_layer_buf lb;                /* 多层模式(训练层不止末层)才分配 */
+    uint32_t pfx;                   /* 当前样本的前缀长(ctxlen 形态, 见 pt_cfg.ctxlen): 尾窗块首位的绝对位置; 0 = 老形态/合批 */
+    ds4_gpu_tensor *ring_snap[DS4_MAX_LAYER];   /* ctxlen > maxlen 才分: 前缀预填完每层窗口环头 [0,SWA) 的快照, 尾窗前向的环提交会盖掉它, 逐层重算前还原 */
+    ds4_gpu_tensor *ring_post[DS4_MAX_LAYER];   /* 同上, 尾窗前向刚提交完的环头: 反传重算把环头还原成了前缀那份, 反传完再拷回来, 状态才是"整段 [0, sn) 都进了缓存" */
+    const pt_sample *cont_s;        /* ★按篇接力★: 状态里此刻正好是这道样本的整段 [0, sn)(前向 + 反传完、环头已拷回); 下一道是它的接续
+                                     * (前缀 == 它的整段)就不清状态、不重新预填前缀。NULL = 状态不可接(合批/诊断用过, 或这道失败)。
+                                     * 代价: 前缀的 KV 是上一步参数下算的(批末 Adam 已更新过一次), 和 Transformer-XL 的段间缓存同一种近似 */
     double tm[11]; uint32_t tm_n, tm_steps;   /* prof 累计秒数(下标 PT_TM_*), 训练题数, 优化步数 */
     ds4_gpu_tensor *hcap; int32_t hcap_layer; int hcap_mid;   /* hc 边界检查: 反传经过第 hcap_layer 层时把该层入口(mid=1: 中段)梯度抄进 hcap */
     pt_pack pk;                     /* 合批(多层模式才开; 梯度检查/重算对拍/hc 检查仍走单题路, pk.nb = 0) */
 } pt_run;
-/* 这道题能不能进训练/评估(教师给了表、不超批态行数): 与 pt_step_sample 的跳过条件同一个 */
-static inline bool pt_runnable(const pt_run *r, const pt_sample *s) { return s->top_id && s->sn <= r->st.cap_tok; }
-/* 一个样本答案位的损失 + logits 梯度(就地写进 logits 第 row 行起 m 行; *glog = 那几行的视图, 调用方 free) */
-bool pt_loss_rows(const pt_cfg *c, pt_run *r, ds4_gpu_tensor *logits, uint32_t row, const pt_sample *s, double *loss, uint32_t *ntok, ds4_gpu_tensor **glog);
+/* 这道题能不能进训练/评估(教师给了表、不超批态行数; 长样本在 ctxlen 内走前缀形态): 与 pt_step_sample 的跳过条件同一个。
+ * 前缀形态只许 one-hot 或原文段(raw): 它们的表每行都是"整篇前缀下的分布"(one-hot / 整篇打的 FP 表, core_ptrain_fp.c), 窄窗的部署态教师表不是(data.c pt_add_sample 的 lim)。
+ * 10-26 实撞: 只认 sft 时, 挂 FP 教师的 v3 趟 503 段原文里长于 maxlen 的全被跳过 —— 步 10 批 KL 0.0000 梯度 0, 1.9 s/步, "训练前 64 题 0.0000"。 */
+static inline bool pt_runnable(const pt_run *r, const pt_sample *s) {
+    return s->top_id && (s->sn <= r->st.cap_tok || ((s->sft || s->raw) && s->sn + 8u <= r->st.ctx));   /* st.ctx = max(ctxlen, maxlen) + 8 */
+}
+/* 一个样本答案位的损失 + logits 梯度(就地写进 logits 第 row 行起 m−off 行; *glog = 那几行的视图, 调用方 free)。
+ * off = 答案位里跳过前几位(前缀形态: 落在前缀里的目标没有 logits 行), 表指针按它偏移; 老路传 0 */
+bool pt_loss_rows(const pt_cfg *c, pt_run *r, ds4_gpu_tensor *logits, uint32_t row, const pt_sample *s, uint32_t off, double *loss, uint32_t *ntok, ds4_gpu_tensor **glog);
 bool pt_run_alloc(ds4_engine *e, const pt_cfg *c, pt_run *r);
 void pt_run_free(pt_run *r);
 bool pt_step_sample(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *s, int grad, double *loss_sum, uint32_t *ntok);

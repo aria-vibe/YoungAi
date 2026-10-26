@@ -75,13 +75,15 @@ int ds4_gpu_bwd_amp_tensor(ds4_gpu_tensor *gA, ds4_gpu_tensor *gB, ds4_gpu_tenso
 
 /* ---- 第二阶段: 逐层反传(穿过注意力 / MoE / mHC 混合系数 / 压缩器 / engram), 实现在 cuda_bwd_attn / hc / moe / comp ---- */
 
-/* 稀疏注意力(窗口 + 选中的压缩行, sink 只进分母, 值 = 键)的反向。只接"一题一块、从位置 0 起"的形态: 窗口缓冲第 window+i 行 =
- * 第 i 个位置的 kvn; 压缩行(kv_comp/idx)与前向同一份。出 gq[n][H][D](覆盖)、gkv[n][D](覆盖, 键与值两种身份合计);
+/* 稀疏注意力(窗口 + 选中的压缩行, sink 只进分母, 值 = 键)的反向。形态 = 一题一块, 块首位的绝对位置 pos0: 窗口缓冲第 window+i 行 =
+ * 位置 pos0+i 的 kvn(块区), 第 [0, window) 行是环头 —— 位置 a < pos0 的键住在 a % window 格(与前向 v41_win_row 同一映射; pos0 = 0 时
+ * 环头永远读不到, 就是 10-01 起的老形态)。压缩行(kv_comp/idx)与前向同一份, 组号绝对。出 gq[n][H][D](覆盖)、gkv[n][D](覆盖, 键与值两种
+ * 身份合计, 只有块区的键有行: 环头里的前缀键是常量, 对它们的梯度丢掉 —— 这就是后训练"前缀只预填、尾窗才反传"的截断语义, 2026-10-25);
  * gcomp 非 NULL 时把对压缩行的梯度**累加**进 gcomp[组][D](源层在训练段里才要; NULL = 压缩行当常量)。 */
 int ds4_gpu_bwd_sparse_attn_tensor(ds4_gpu_tensor *gq, ds4_gpu_tensor *gkv, ds4_gpu_tensor *gcomp, const ds4_gpu_tensor *go, const ds4_gpu_tensor *o,
                                    const ds4_gpu_tensor *q, const ds4_gpu_tensor *kv_win, const ds4_gpu_tensor *kv_comp,
                                    const ds4_gpu_tensor *idx, const void *model_map, uint64_t model_size, uint64_t sink_offset,
-                                   uint32_t n_tok, uint32_t window, uint32_t ng, uint32_t topk, uint32_t n_head, uint32_t head_dim, float scale);
+                                   uint32_t n_tok, uint32_t pos0, uint32_t window, uint32_t ng, uint32_t topk, uint32_t n_head, uint32_t head_dim, float scale);
 /* RoPE 反向 = 反方向旋转、不舍 bf16。参数与前向 ds4_gpu_v41_rope_tensor 同, inverse 传"前向那一发取反"。就地改 x。 */
 int ds4_gpu_bwd_rope_tensor(ds4_gpu_tensor *x, const ds4_gpu_tensor *pos, uint32_t n_tok, uint32_t n_head, uint32_t head_dim,
                             uint32_t n_rot, float theta, uint32_t original_seq_len, float factor, float beta_fast, float beta_slow, bool inverse);

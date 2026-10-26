@@ -42,6 +42,56 @@ static void pt_prof_print(const pt_run *r, const char *tag) {
             seg / n, t[PT_TM_Q] / n, t[PT_TM_ADAM] / ns, t[PT_TM_STEP] / ns);
 }
 
+/* 前缀形态按篇接力(core_ptrain_bwd.c pt_run.cont_s)要同一篇的段按段序挨着过: 打乱后按"每篇第一次出现的位置"把整篇拉到一起。
+ * 篇的顺序仍是随机的, 只是篇内不再打散; 段在料里本来就按篇连续、段序升序(pt_add_text), 所以按下标升序收集就是段序。 */
+static int pt_u32_cmp(const void *a, const void *b) { const uint32_t x = *(const uint32_t *)a, y = *(const uint32_t *)b; return x < y ? -1 : x > y; }
+static void pt_group_docs(const pt_data *d, uint32_t *ord, uint32_t n) {
+    uint32_t *srt = xmalloc((size_t)(n + 1) * 4), *out = xmalloc((size_t)(n + 1) * 4), *beg = xmalloc((size_t)(d->ndoc + 1) * 4), no = 0;
+    uint8_t *done = xmalloc_zeroed(d->ndoc + 1u, 1);
+    memcpy(srt, ord, (size_t)n * 4);
+    qsort(srt, n, 4, pt_u32_cmp);
+    for (uint32_t a = n; a-- > 0; ) beg[d->s[srt[a]].doc] = a;   /* 每篇在升序表里的起点 */
+    for (uint32_t a = 0; a < n; a++) {
+        const uint32_t dc = d->s[ord[a]].doc;
+        if (done[dc]) continue;
+        done[dc] = 1;
+        for (uint32_t b = beg[dc]; b < n && d->s[srt[b]].doc == dc; b++) out[no++] = srt[b];
+    }
+    memcpy(ord, out, (size_t)n * 4);
+    free(srt); free(out); free(beg); free(done);
+}
+
+/* 按篇接力自检(cfg contcheck=1): 接力出来的状态必须等于从头预填的状态。四趟(同一篇的段 0/1/2, 放大器参数不动):
+ *   ① 段 0、1 带反传接力, 段 2 接力      ② 段 0、1 不反传接力, 段 2 接力      ③ 段 1 清状态从头预填      ④ 段 2 清状态从头预填
+ * 判据: ① = ② 逐位同(段 1、段 2 都是): 反传重算动过环头, 拷回后必须和没反传一样 —— 不同 = 环头拷回漏了;
+ *       段 1 的 ③ 与接力分块相同(前缀 = 段 0 那一块), 只差前向模式(训练前向 / 只算末行的预填), 相对差 < 1e-4;
+ *       段 2 的 ④ 与接力只差预填分块, 相对差 < 1e-3。10-25 19:2x 首测 ④ 差 5.1e-3 = 前缀预填走了生成路的解码器回放(core_ptrain_bwd.c 已关)。
+ * 挂了会怎样: 接力的状态脏了, 训练照跑不报错, 只是从第 2 段起每段看到的上下文是错的。 */
+static bool pt_contcheck(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_data *d) {
+    const pt_sample *sg[3] = { NULL, NULL, NULL };
+    for (uint32_t i = 0; i + 2u < d->ns && !sg[0]; i++) {
+        const pt_sample *a = &d->s[i];
+        if (a->raw && !a->eval && d->s[i + 1].doc == a->doc && d->s[i + 2].doc == a->doc && !d->s[i + 1].eval && !d->s[i + 2].eval) { sg[0] = a; sg[1] = a + 1; sg[2] = a + 2; }
+    }
+    if (!sg[0] || c->ctxlen <= c->maxlen) { fprintf(stderr, "ds4: [ptrain] contcheck 要前缀形态(ctxlen > maxlen)和一篇至少 3 段的训练原文\n"); return false; }
+    double l[8] = { 0 }; uint32_t t[8] = { 0 }; bool ok = true;
+    for (int g = 1; g >= 0 && ok; g--) {   /* ①(g=1) ② (g=0): l[2g+0..1] = 段 1/段 2 */
+        r->cont_s = NULL; double l0 = 0; uint32_t t0 = 0;
+        ok = pt_step_sample(e, c, r, sg[0], g, &l0, &t0) && r->cont_s == sg[0] && pt_step_sample(e, c, r, sg[1], g, &l[2 * g], &t[2 * g]) && r->cont_s == sg[1] &&
+             pt_step_sample(e, c, r, sg[2], 0, &l[2 * g + 1], &t[2 * g + 1]) && r->cont_s == sg[2];
+    }
+    for (int k = 0; k < 2 && ok; k++) { r->cont_s = NULL; ok = pt_step_sample(e, c, r, sg[1 + k], 0, &l[4 + k], &t[4 + k]); }   /* ③ ④ */
+    r->cont_s = NULL;
+    for (uint32_t il = c->layer_lo; ok && il <= c->layer_hi; il++)   /* 攒进来的梯度不算数 */
+        ok = ds4_gpu_tensor_fill_f32(r->gA[il], 0.f, (uint64_t)r->K * DS4_N_EMBD) && ds4_gpu_tensor_fill_f32(r->gB[il], 0.f, (uint64_t)r->K * DS4_N_EMBD);
+    const double d1 = fabs(l[4] / t[4] - l[0] / t[0]) / (l[0] / t[0]), d2 = fabs(l[5] / t[5] - l[1] / t[1]) / (l[1] / t[1]);
+    const bool s1 = l[2] == l[0] && l[3] == l[1], s2 = t[4] == t[0] && t[5] == t[1] && d1 < 1e-4 && d2 < 1e-3;
+    fprintf(stderr, "ds4: [ptrain] contcheck 篇 %u 段长 %u/%u/%u: 反传接力 %.9f/%.9f vs 不反传接力 %.9f/%.9f %s; 从头预填 段 1 %.9f(差 %.2e) 段 2 %.9f(差 %.2e) %s\n",
+            sg[0]->doc, sg[0]->sn, sg[1]->sn, sg[2]->sn, l[2] / t[2], l[3] / t[3], l[0] / t[0], l[1] / t[1], s1 ? "逐位同 ok" : "★FAIL★",
+            l[4] / t[4], d1, l[5] / t[5], d2, s2 ? "ok" : "★FAIL★");
+    return ok && s1 && s2;
+}
+
 static bool pt_in_eval(const pt_data *d, const pt_sample *s, int which, int hold) {
     return s->eval == which && s->top_id && d->ch[s->chunk].hold == hold;
 }
@@ -266,6 +316,7 @@ int ds4_engine_ptrain(ds4_engine *e, const char *spec) {
         c.rccheck = 0;   /* 只对拍这一趟, 后面的检查/训练不再打 */
         only_check = true;
     }
+    if (c.contcheck) { if (!pt_contcheck(e, &c, &r, &d)) goto out; only_check = true; }
     if (c.nhcl) { if (!pt_hccheck(e, &c, &r, &d)) goto out; only_check = true; }
     if (c.gradcheck) {
         if (!pt_gradcheck(e, &c, &r, &d)) goto out;
@@ -322,6 +373,7 @@ int ds4_engine_ptrain(ds4_engine *e, const char *spec) {
                     const uint32_t j = (uint32_t)((rs * 2685821657736338717ull) % i);
                     const uint32_t t = ord[i - 1]; ord[i - 1] = ord[j]; ord[j] = t;
                 }
+                if (c.ctxlen > c.maxlen) pt_group_docs(&d, ord, ntr);
                 cur = 0;
             }
             double ls = 0; uint32_t nt = 0;
