@@ -17,7 +17,14 @@
 set -uo pipefail
 ROOT="$HOME/ds4-main"; cd "$ROOT" || exit 1
 M(){ echo "[ptfp $(date '+%m-%d %H:%M:%S')] $*"; }
-CFG="${1:?ptrain.cfg}"; HF="${2:?HF 出厂权重目录}"; ZD="${3:?② 侧车目录, 不挂写 none}"; PER="${4:-96}"; EXTRA="${5:-}"
+CFG="${1:?ptrain.cfg}"; HF="${2:?HF 出厂权重目录}"; ZD="${3:?② 侧车目录, 不挂写 none}"; EXTRA="${5:-}"
+# 每份条数默认按 cfg 的 maxlen 折算, 保持一趟前向 ≤ 96 × 1024 位(v41_teacher_seqs 把一份整批放进 batch 维一次前向, 缓存按 条数 × 最长位 分):
+#   10-25 实撞 maxlen 4096 仍按 96 条切, 71 条 × 4094 位一次前向直接 cudaErrorOperatingSystem(主机锁页/UVM 分不出), 24 条 × 4096 = 原来验过的 98k 位规模。
+ML=$(grep '^maxlen=' "$CFG" | cut -d= -f2- | tr -d ' '); ML="${ML:-1024}"
+PER="${4:-}"   # 空 = ② 阶段按剩下序列里最长的一条折算(10-26: 前缀形态整篇一条 4 万位, 按 maxlen 折成 96 条/份一次前向必炸)
+# 第 6 个参数(10-26): 官方 API 教师原料(api_teacher.py collect 的 raw.jsonl)。给了就在 ② 之前先用它打一份 teacher.part.000(对得上的序列全写 API top-20),
+#   本地 FP 教师只跑剩下的(保持料 / 没对上的)。API 分布与 HF 原件 Same top 96.7% / KL 0.0065(fable5 10-26); </think>/EOS 两行 API 不给, 写 one-hot。
+APIRAW="${6:-}"; [ -z "$APIRAW" ] || [ -s "$APIRAW" ] || { M "★API 教师原料 $APIRAW 不在★"; exit 2; }
 [ -s "$CFG" ] && [ -s "$HF/config.json" ] || { M "★cfg $CFG 或 HF 目录 $HF 不对★"; exit 2; }
 [ -z "$EXTRA" ] || [ -s "$EXTRA" ] || { M "★附加序列文件 $EXTRA 不在★"; exit 2; }
 grep -qE '^(teacher|dumpids)=' "$CFG" && { M "★cfg 里不要写 teacher=/dumpids=, 本脚本按阶段加★"; exit 2; }
@@ -43,15 +50,30 @@ NSEQ=$(wc -l < "$OUTD/teacher.ids"); M "① 完成: $NSEQ 条序列"
 #   每份耗时与条数几乎无关(实测 96 条 2220~2507 s, 花的是装一遍原件和逐专家来回的固定开销, 不是算), 所以 ① 尾巴那份哪怕
 #   只有几条也要跑满一遍, 中途加大 PER 不该重打已有的份; ② 没跑完的半份(.ptf 没落盘)连 id 文件一起丢掉重切。
 #   表按序列内容配(core_ptrain_fp.c memcmp 整条 id), 份的顺序/大小对训练无影响。
+if [ -n "$APIRAW" ] && [ ! -s "$OUTD/teacher.part.000.ptf" ]; then
+    M "②₀ API 教师: $APIRAW → $OUTD/teacher.part.000(.ptf)"
+    "$HOME/v41env/bin/python" gguf-tools/scripts/api_teacher.py ptf --ids "$OUTD/teacher.ids" --raw "$APIRAW" --hf "$HF" --out "$OUTD/teacher.part.000.ptf" --covered "$OUTD/teacher.part.000" --topk "$K" || { M "★API 教师打表失败★"; exit 4; }
+    [ -s "$OUTD/teacher.part.000" ] || { M "★API 教师一条都没对上(看分词/模板)★"; exit 4; }
+fi
 for f in "$OUTD"/teacher.part.[0-9][0-9][0-9]; do [ -e "$f" ] || continue; [ -s "$f.ptf" ] || rm -f "$f" "$f.log"; done
 KEEP=("$OUTD"/teacher.part.[0-9][0-9][0-9]); [ -e "${KEEP[0]}" ] || KEEP=()
 if [ "${#KEEP[@]}" -gt 0 ]; then
     awk 'NR==FNR{d[$0]=1; next} !($0 in d)' <(cat "${KEEP[@]}") "$OUTD/teacher.ids" > "$OUTD/teacher.rest"
-    M "② 已有 ${#KEEP[@]} 份 .ptf(覆盖 $(cat "${KEEP[@]}" | wc -l) 条), 剩 $(wc -l < "$OUTD/teacher.rest") 条按每份 $PER 重新切"
 else
     cp "$OUTD/teacher.ids" "$OUTD/teacher.rest"
 fi
-split -l "$PER" --numeric-suffixes="${#KEEP[@]}" -a 3 "$OUTD/teacher.rest" "$OUTD/teacher.part."
+# 分份(10-26 改): 一份 = 一次前向, 缓存按 条数 × 最长位 分 ⇒ 按"条数 × 本份最长位 ≤ 98304(验过的规模) 且 ≤ PER 条"贪心装, 长的先装(排序后同长度的挤一份)。
+#   之前按 maxlen 折算固定条数: 前缀形态整篇一条几万位时, 96 条 × 4 万位一次前向必炸(10-25 实撞 71 条 × 4094 位 cudaErrorOperatingSystem); 每份都要重新流式装一遍原件, 份数也不能多。
+MAXL=$(awk '{ if (NF > m) m = NF } END { print m + 0 }' "$OUTD/teacher.rest"); PER="${PER:-96}"
+M "② 已有 ${#KEEP[@]} 份 .ptf(覆盖 $(cat "${KEEP[@]}" 2>/dev/null | wc -l) 条), 剩 $(wc -l < "$OUTD/teacher.rest") 条(最长 $MAXL 位), 每份 ≤$PER 条且 条数×最长位 ≤ 98304"
+awk -v per="$PER" -v base="${#KEEP[@]}" -v out="$OUTD/teacher.part." '
+    { n[NR] = NF; line[NR] = $0 }
+    END { for (i = 1; i <= NR; i++) idx[i] = i
+          for (i = 1; i <= NR; i++) for (j = i + 1; j <= NR; j++) if (n[idx[j]] > n[idx[i]]) { t = idx[i]; idx[i] = idx[j]; idx[j] = t }   # 长的在前
+          k = base; cnt = 0; mx = 0
+          for (i = 1; i <= NR; i++) { r = idx[i]
+              if (cnt > 0 && (cnt >= per || (cnt + 1) * (mx > n[r] ? mx : n[r]) > 98304)) { k++; cnt = 0; mx = 0 }
+              f = sprintf("%s%03d", out, k); print line[r] >> f; close(f); cnt++; if (n[r] > mx) mx = n[r] } }' "$OUTD/teacher.rest"
 rm -f "$OUTD/teacher.rest"
 PARTS=("$OUTD"/teacher.part.[0-9][0-9][0-9])
 if [ -n "$EXTRA" ]; then   # 对拍序列并进第一份【新】份: 它们在表里排在这一份训练序列之后(序号 = 本份训练条数 + 第几行)
