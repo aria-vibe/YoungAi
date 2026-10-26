@@ -292,6 +292,8 @@ extern const char *g_ds4_v41_pt_dir;    /* --posttrain <dir>: 三文件部署第
 extern ds4_v41_moe_hook_fn g_ds4_v41_hook;   /* 反修钩子(ds4_engine_v41_set_moe_hook), 无=NULL */
 extern void *g_ds4_v41_hook_ud;
 extern int g_ds4_v41_hook_layer;   /* 钩子只在这一层回调(-1=每层); 见 ds4_engine_v41_set_moe_hook_layer */
+extern ds4_v41_logits_fn g_ds4_v41_logits_hook;   /* --score-ids 出口 logits 回调(ds4_engine_v41_set_logits_hook), 无=NULL */
+extern void *g_ds4_v41_logits_ud;
 bool v41_attention_kv_only(ds4_engine *e, ds4_v41_state *st, uint32_t il);   /* CED 分界层: 只写全局 KV */
 extern const ds4_model *g_ds4_v41_model;   /* 引擎打开时指向 e->model(core_engine_open.c): 路由偏置侧车要按层找 exp_probs_b 张量(core_v41_amp.c) */
 bool v41_amp_load(ds4_v41_state *st, const char *dir, const char *pt_dir);   /* core_v41_amp.c: ②反修目录 + ③后训练目录 */

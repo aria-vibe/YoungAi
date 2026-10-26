@@ -194,6 +194,11 @@ typedef int (*ds4_v41_moe_hook_fn)(void *ud, int il, int pos0, int n, int D, int
 void ds4_engine_v41_set_moe_hook(ds4_v41_moe_hook_fn fn, void *ud);
 /* 只在第 il 层回调(-1 = 每层)。取料的 D2H 发生在回调之前, 只要一层时不设它 = 每块白拷 39 层。 */
 void ds4_engine_v41_set_moe_hook_layer(int il);
+/* --score-ids 的出口 logits 回调(2026-10-21, 反修端到端择优): 每块前向完、logits 读回主机后回调一次, 行 [row0, row0+nrow) 的
+ * 全词表 f32 logits(未 softmax, 行主序 [nrow][vocab]); 回调返回非 0 = 这趟停车。设了回调时 out_path 可以给 NULL(不落文件);
+ * 回调只在这一块的生命期内有效, 要留的数据自己拷。CED 块 / 钩子早停的块没有 logits, 不回调。NULL = 不回调。 */
+typedef int (*ds4_v41_logits_fn)(void *ud, int row0, int nrow, const float *logits, int vocab);
+void ds4_engine_v41_set_logits_hook(ds4_v41_logits_fn fn, void *ud);
 
 #ifdef __cplusplus
 }
