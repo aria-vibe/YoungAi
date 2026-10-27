@@ -13764,3 +13764,9 @@ PPL 2.8852 对 2.8827(比值 **1.001**), Σmin **0.9695**(中位 0.981), Mean KL
   这趟是冷请求(reused=0), **没测到缓存命中时按后缀开工作区那条**; 收尾日志在 CUDA 上也打 "metal_allocated"(标签错, 数值是全部设备分配 121 GB)。
   离线: PR 版 ds4_test --server / --engine-units / --rax / --tp-allreduce 全过。生产按 serve_pick.txt 装回(restore_fit 侧车, --mem-budget-mb 110000), idle。
   spark 上留着 ~/ds4-pr6{,-base,-nogate} 与 ~/ds4-main/ds4.pr6{base,,nogate}, 没删。
+- **全量补测(用户令"所有都测试完", speed-bench/pr6_verify_spark.sh, 21:34–21:50)**: 三臂(基线 / PR 原样 / PR 去 METAL 限定)各起 ds4-server :8011(生产同参, restore_fit 侧车),
+  跑 PR 自带 tests/repro/metal_api.py 三套 = 23 条: quick(预热 + 4 个 8K 温 0 各两遍)/ questions(q1–q4 温 0 seed 1 思考档 2048)/ lifetime(7.37 万冷启 + 12 条续接 + 13.9 万预填中途断开 + 再发)。
+  **PR 对基线 23/23 逐字节同 ✓; 去限定对基线 23/23 逐字节同 ✓**。速度: 8K 冷启 6.47 / 6.48 / 6.48 s, 7.37 万冷启 56.9 / 57.7 / 57.0 s, 断开后回 idle 0.81 / 0.81 / 0.82 s, 下一条都正常。
+  ★去限定在缓存命中路上真有收益★: 续接首字 0.18 → 0.10~0.11 s, 续接解码 42.5 → 45~47 t/s(工作区按未缓存后缀开 22 行而不是 2048 行, 解码前收掉预填行) —— 建议作者去掉 METAL 限定。
+  ds4-eval q1–q4 三臂都 "cuda prefill failed"(它走 V4 session 路, 不支持 V4.1, 与 PR 无关; 带侧车的 q1–q4 由 server questions 套覆盖)。
+  Mac 完整 make test: PR 与基线都全绿(真模型套件 SKIP), PR 说的 5 个 go1b/go2b 旧失败这里没复现。生产 21:50 自动装回, idle, 侧车/预算同前。
