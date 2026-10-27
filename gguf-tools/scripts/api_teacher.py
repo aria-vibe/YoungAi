@@ -30,6 +30,7 @@ import os
 import sys
 import time
 import urllib.request
+import http.client
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from think_trace_collect import API_URL, EFFORT_PREFIX, EFFORT_BUDGET, SYS, USER, ASST, THINK, THINK_END, EOS  # noqa: E402
@@ -212,7 +213,8 @@ def collect_one(key, model, item, max_tokens, timeout, tok, b2id, id2b):
                 lp[k] = rows
             return realign(dict(item, reasoning=reasoning, content=content, finish=finish, usage=usage, model=model, effort="high",
                                 secs=round(time.time() - t0, 1), lp=lp), tok, id2b)
-        except (urllib.error.HTTPError, urllib.error.URLError, OSError, json.JSONDecodeError) as e:
+        # http.client.HTTPException(10-27 实撞): 流式读到一半上游断开抛 IncompleteRead, 它不是 OSError, 漏接就把整个 collect 进程打崩(52 道停在 46)
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError, json.JSONDecodeError, http.client.HTTPException) as e:
             msg = f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__
             if attempt == 4:
                 return dict(item, ok=False, finish=f"error:{msg}", reasoning="", content="", usage=None, lp={})

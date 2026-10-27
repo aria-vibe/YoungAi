@@ -20,6 +20,7 @@ Python 在这里是外部 API 采集(全仓零 Python 裁决的例外); 数值�
              训练器补的那个 EOS 只进统计(决策位/命中), 不当任何位置的输入, 蒸馏靶不受影响; ptrain 的"决策位 KL"均值会混进这些位(教师 p≈0), 读数按 ptfstat 的"中段"类拆。
   chunks  --hf … --raw …/graphics_raw.jsonl --out …/api_chunks4096.jsonl [--max-tok 4096] [--max-chunks 6]
              整条轨迹(思考 + </think> + 正文)切成连续 ≤max_tok 的窗, 每窗带同一个头, 当 one-hot 硬靶(10-25 晚: FP 教师失灵后段 B 不再向它蒸, 见 cmd_chunks)。
+  ids     --hf … --raw …/heldout_raw.jsonl --out-dir gguf/go-onebit/code/<留出集>   官方轨迹 → 判决尺 ids + list.txt(泛化留出尺, 见 cmd_ids)
 出错会怎样: collect 里 finish≠stop(撞 max_tokens 没收口)的条 ok=false, tail 跳过; tail 里 题+正文 太长(尾段不足 min-tail)的条丢掉并计数;
 API 429/5xx 退避重试 4 次再放弃(该条不写, 下次续跑再来)。key 文件在 .gitignore(*.key), 日志里永不打印 key。
 """
@@ -66,6 +67,13 @@ def cmd_questions(a):
             if not ln or ln.startswith("#"):
                 continue
             qs.append({"id": f"gen_{n:03d}", "src": "general", "q": ln}); n += 1
+    for spec in a.set or []:   # --set 族名=一行一题的文件(10-26 晚: 6 族等份配比的题集 mix_q_*.txt), id = 族名_NNN
+        name, path = spec.split("=", 1); n = 0
+        for ln in open(path, encoding="utf-8"):
+            ln = ln.strip()
+            if not ln or ln.startswith("#"):
+                continue
+            qs.append({"id": f"{name}_{n:03d}", "src": name, "q": ln.replace("\\n", "\n")}); n += 1
     with open(a.out, "w", encoding="utf-8") as f:
         for q in qs:
             f.write(json.dumps(q, ensure_ascii=False) + "\n")
@@ -306,7 +314,8 @@ def cmd_chunks(a):
         for r in rows:
             head = prefix + USER + r["q"] + ASST + THINK
             budget = a.max_tok - 2 - len(enc(head))      # BOS + 训练器补的 EOS
-            body = r["reasoning"] + (THINK_END + (r.get("content") or "") if r.get("ok") else "")
+            fin = r.get("ok") and not r.get("head")      # head(api_branch.py head 截的思考开头)标了 ok 只为 ptf 能配, 它没有结尾: 不接 </think>、不补 EOS
+            body = r["reasoning"] + (THINK_END + (r.get("content") or "") if fin else "")
             units = []
             for u in split_units(body):                  # 段太长按句再切, 保证单个单元放得进一窗
                 units += split_sentences(u) if len(enc(u)) > budget else [u]
@@ -332,10 +341,10 @@ def cmd_chunks(a):
                     text = head + c; ids = enc(text)
                 assert EOS not in text and ids.count(enc(THINK_END)[0]) <= 1, r["id"]
                 row = {"text": text}
-                if not (r.get("ok") and k == len(chunks) - 1):   # 训练器默认给 text 行末尾补 EOS 当靶: 只有收口轨迹的最后一窗是真结尾, 别的窗/没收口的条标 eos false
+                if not (fin and k == len(chunks) - 1):   # 训练器默认给 text 行末尾补 EOS 当靶: 只有收口轨迹的最后一窗是真结尾, 别的窗/没收口的条标 eos false
                     row["eos"] = False
                 f.write(json.dumps(row, ensure_ascii=False) + "\n"); kept += 1
-                man.append((r["id"], r["src"], "ok" if r.get("ok") else "partial", k, len(chunks), len(ids) + 2, int(THINK_END in c)))
+                man.append((r["id"], r["src"], "ok" if fin else "partial", k, len(chunks), len(ids) + 2, int(THINK_END in c)))
     with open(a.out + ".manifest.txt", "w", encoding="utf-8") as f:
         f.write("# id src ok/partial 窗号 本条窗数 整窗tok(含BOS/EOS) 含</think>+正文\n")
         for m in man:
@@ -403,11 +412,36 @@ def cmd_code(a):
     for i, why in drop: print(f"  丢 {i}: {why}")
 
 
+def cmd_ids(a):
+    """collect 的产物 → 判决尺的 ids(10-27, 泛化留出尺): 每条 ok 的官方轨迹渲染成部署同款字节 BOS + 头 + 题 + <think>思考</think>正文,
+    写 <out-dir>/<id>.ids(一行一个 id, 与 v41_judge.sh / 鹈鹕设计推理段同格式), 清单 <out-dir>/list.txt 一行 "id 全长 生成段起点"。
+    为什么: 鹈鹕一道题判不了泛化 —— 训练里一道没见过的题上, 学生对官方设计推理的逐位贴合度涨没涨(段 C 读这份清单), 才是泛化的数。
+    生成段起点 = 头 + 题 + <think> 的 token 数, 段 C 只统计它之后(题面是给定的, 不算模型写的)。不写 EOS: 尺只看到正文末位。
+    出错会怎样: 前缀单独分词与整条分词在分界处不一致(BPE 跨界合并)就停 —— 起点错一位, 分桶全是假数。"""
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(os.path.join(a.hf, "tokenizer.json"))
+    enc = lambda s: tok.encode(s, add_special_tokens=False).ids
+    bos = "<｜begin▁of▁sentence｜>"
+    os.makedirs(a.out_dir, exist_ok=True)
+    rows = [r for r in read_jsonl(a.raw) if r.get("ok")]
+    with open(os.path.join(a.out_dir, "list.txt"), "w", encoding="utf-8") as lst:
+        for r in rows:
+            pre = bos + SYS + EFFORT_PREFIX.format(budget=EFFORT_BUDGET[a.effort]) + USER + r["q"] + ASST + THINK
+            ids, pid = enc(pre + r["reasoning"] + THINK_END + r["content"]), enc(pre)
+            if ids[:len(pid)] != pid:
+                sys.exit(f"★{r['id']}: 题面前缀与整条分词在分界处不一致, 停★")
+            with open(os.path.join(a.out_dir, f"{r['id']}.ids"), "w") as f:
+                f.write("\n".join(map(str, ids)) + "\n")
+            lst.write(f"{r['id']} {len(ids)} {len(pid)}\n")
+            print(f"  {r['id']}: {len(ids)} 位, 生成段从 {len(pid)} 起")
+    print(f"ids: {len(rows)} 条 → {a.out_dir}/list.txt")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sp = ap.add_subparsers(dest="cmd", required=True)
     q = sp.add_parser("questions"); q.add_argument("--humaneval"); q.add_argument("--n-code", type=int, default=100)
-    q.add_argument("--exclude", nargs="*"); q.add_argument("--general"); q.add_argument("--out", required=True)
+    q.add_argument("--exclude", nargs="*"); q.add_argument("--general"); q.add_argument("--set", nargs="*"); q.add_argument("--out", required=True)
     c = sp.add_parser("collect"); c.add_argument("--key", required=True); c.add_argument("--questions", required=True); c.add_argument("--out", required=True)
     c.add_argument("--model", default="deepseek-flash"); c.add_argument("--max-tokens", type=int, default=32768)
     c.add_argument("--jobs", type=int, default=4); c.add_argument("--limit", type=int, default=0); c.add_argument("--timeout", type=int, default=1800)
@@ -420,8 +454,10 @@ def main():
     k.add_argument("--exclude-ids", nargs="*"); k.add_argument("--hf")
     h = sp.add_parser("chunks"); h.add_argument("--hf", required=True); h.add_argument("--raw", required=True); h.add_argument("--out", required=True)
     h.add_argument("--max-tok", type=int, default=4096); h.add_argument("--max-chunks", type=int, default=6); h.add_argument("--effort", default="high", choices=list(EFFORT_BUDGET))
+    d = sp.add_parser("ids"); d.add_argument("--hf", required=True); d.add_argument("--raw", required=True); d.add_argument("--out-dir", required=True)
+    d.add_argument("--effort", default="high", choices=list(EFFORT_BUDGET))
     a = ap.parse_args()
-    {"questions": cmd_questions, "collect": cmd_collect, "tail": cmd_tail, "mid": cmd_mid, "code": cmd_code, "chunks": cmd_chunks}[a.cmd](a)
+    {"questions": cmd_questions, "collect": cmd_collect, "tail": cmd_tail, "mid": cmd_mid, "code": cmd_code, "chunks": cmd_chunks, "ids": cmd_ids}[a.cmd](a)
 
 
 if __name__ == "__main__":
