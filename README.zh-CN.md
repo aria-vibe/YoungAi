@@ -1,3 +1,13 @@
+> **开发理念**
+>
+> 天下没有免费的午餐。量化省下的体积，一定会在别处付出代价。
+>
+> 我采用平权量化，目的是让每一个个人、每一个行业、每一个国家拿到的都是同一个一致的底座；
+> 个性化的能力通过外挂实现（侧车、后训练文件），谁需要谁挂。
+> 如果单纯为了指标好看而伤了边际能力，那不是我想要的。
+>
+> 下一步的目标：实现自进化还原。
+
 <p align="center">
   <img src="web/logo.jpg" width="96" alt="YoungAi logo">
 </p>
@@ -11,11 +21,20 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/fodelf/YoungAi"><b>GitHub 仓库 · fodelf/YoungAi</b></a> ·
   <a href="https://fodelf.github.io/YoungAi/"><b>项目网站 · 使用指南</b></a> ·
   <a href="https://github.com/fodelf/YoungAi/blob/restructure/README.md">English</a> · <b>中文</b> ·
   <a href="https://huggingface.co/wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017">Hugging Face</a> ·
   <a href="https://github.com/fodelf/YoungAi/blob/restructure/docs/TECHNICAL.zh-CN.md">技术细节</a>
 </p>
+
+同一句提示"创建一个HTML，内容是SVG绘制一个鹈鹕骑自行车的2D动画"，同一个 agent 流程（dsh）：
+
+| 官方 DeepSeek V4.1 Flash（510 GB 原件，官方 API） | 本项目（113.6 GB 平权量化 + 还原侧车，本机） |
+|:---:|:---:|
+| ![官方实现](docs/img/pelican-official.png) | ![本项目实现](docs/img/pelican-local.png) |
+
+右图是本机第一稿渲染后、模型自己看图修改中的一帧，不是挑出来的终稿。差距还在：喉囊画成了圆球，喙短，脖子没有立起来。
 
 ![YoungAi 工作台：助理在全网找最便宜的 DGX Spark](docs/img/studio-agent.png)
 
@@ -135,6 +154,7 @@ Mac 的数经 `ds4-server` 量，两趟取好的一趟。两边提示不同，�
 **DGX Spark**（Linux aarch64 + CUDA 13 运行库，SSD 空闲约 320 GB）。上网工具要火狐，Spark 上的 Ubuntu 自带。
 
 ```sh
+# YoungAi —— GitHub 仓库 fodelf/YoungAi
 git clone https://github.com/fodelf/YoungAi.git ~/ds4-main && cd ~/ds4-main
 make cuda-spark
 ./ds4-train --host 0.0.0.0 --port 8000      # 浏览器打开 http://主机:8000/
@@ -152,6 +172,7 @@ make cuda-spark
 **Mac**（Apple Silicon，128 GB 内存，SSD 空闲约 325 GB）：直接起模型服务。工作台的"下载""加载"按钮只在 Spark 上跑过。
 
 ```sh
+# YoungAi —— GitHub 仓库 fodelf/YoungAi
 git clone https://github.com/fodelf/YoungAi.git ~/ds4-main && cd ~/ds4-main
 make                                                            # Metal 版
 bash gguf-tools/scripts/hf_install.sh download --dir ~/youngai   # 约 317 GB，断点续传
@@ -220,7 +241,7 @@ bash install.sh --posttrain          # 再挂后训练文件（配编程侧车�
 
 ## 作者 · 致谢 · 许可证
 
-吴文周 · 310066827@qq.com。欢迎来信交流、反馈复现结果或谈合作；Bug 和 PR 提到 [GitHub](https://github.com/fodelf/YoungAi)。
+吴文周 · 310066827@qq.com。欢迎来信交流、反馈复现结果或谈合作；Bug 和 PR 提到 [GitHub 仓库 · fodelf/YoungAi](https://github.com/fodelf/YoungAi)。
 
 本项目起步于 [antirez/ds4](https://github.com/antirez/ds4)（DwarfStar，Salvatore Sanfilippo 为 DeepSeek V4 写的推理引擎）
 的分叉；GGUF、q4_K 等布局和大量核经验来自 [llama.cpp 与 GGML](https://github.com/ggml-org/llama.cpp)，GGML 的版权声明

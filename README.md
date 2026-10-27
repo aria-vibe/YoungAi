@@ -21,6 +21,16 @@ tags:
 pipeline_tag: text-generation
 ---
 
+> **Why it is built this way**
+>
+> There is no free lunch. Whatever size quantization saves is paid for somewhere else.
+>
+> I quantize every domain with equal weight so that every person, every industry and every country starts from the same,
+> consistent base; specialised abilities are added as plug-ins (sidecars, post-training files), by whoever needs them.
+> Making the numbers look good at the cost of the model's marginal abilities is not what I want.
+>
+> Next goal: self-evolving restoration.
+
 <p align="center">
   <img src="web/logo.jpg" width="96" alt="YoungAi logo">
 </p>
@@ -34,11 +44,21 @@ pipeline_tag: text-generation
 </p>
 
 <p align="center">
+  <a href="https://github.com/fodelf/YoungAi"><b>GitHub repository · fodelf/YoungAi</b></a> ·
   <a href="https://fodelf.github.io/YoungAi/"><b>Website · user guide</b></a> ·
   <b>English</b> · <a href="https://github.com/fodelf/YoungAi/blob/restructure/README.zh-CN.md">中文</a> ·
   <a href="https://huggingface.co/wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017">Hugging Face</a> ·
   <a href="https://github.com/fodelf/YoungAi/blob/restructure/docs/TECHNICAL.md">Technical notes</a>
 </p>
+
+Same prompt ("create an HTML page with a 2D SVG animation of a pelican riding a bicycle"), same agent flow (dsh):
+
+| Official DeepSeek V4.1 Flash (510 GB original, official API) | This project (113.6 GB equal-weight quantization + restore sidecar, local) |
+|:---:|:---:|
+| ![Official](docs/img/pelican-official.png) | ![This project](docs/img/pelican-local.png) |
+
+The right image is a frame from the local run while the model reviews its own first draft, not a hand-picked final. The gap
+is still visible: the pouch comes out as a round ball, the bill is short, and the neck does not stand up.
 
 ![YoungAi Studio: the assistant hunting for the cheapest DGX Spark](docs/img/studio-agent-en.png)
 
@@ -177,6 +197,7 @@ recognition also runs on the machine's GPU, so the audio never leaves it.
 Ubuntu on the Spark ships.
 
 ```sh
+# YoungAi — GitHub repository fodelf/YoungAi
 git clone https://github.com/fodelf/YoungAi.git ~/ds4-main && cd ~/ds4-main
 make cuda-spark
 ./ds4-train --host 0.0.0.0 --port 8000      # open http://<host>:8000/
@@ -197,6 +218,7 @@ How every tab and every tool works, and what happens when something goes wrong: 
 *Load* buttons have only been run on the Spark.
 
 ```sh
+# YoungAi — GitHub repository fodelf/YoungAi
 git clone https://github.com/fodelf/YoungAi.git ~/ds4-main && cd ~/ds4-main
 make                                                            # Metal build
 bash gguf-tools/scripts/hf_install.sh download --dir ~/youngai   # ~317 GB, resumable
@@ -279,7 +301,7 @@ your browser), and `/api/phone/*` is a plain REST API that the page, the model a
 ## Author · acknowledgements · license
 
 Wenzhou Wu (吴文周) · 310066827@qq.com. Questions, reproduction reports and collaboration are welcome; bugs and pull
-requests go to [GitHub](https://github.com/fodelf/YoungAi).
+requests go to [GitHub repository · fodelf/YoungAi](https://github.com/fodelf/YoungAi).
 
 YoungAi started as a fork of [antirez/ds4](https://github.com/antirez/ds4) (DwarfStar, Salvatore Sanfilippo's DeepSeek V4
 engine). GGUF, layouts such as q4_K and much kernel know-how come from [llama.cpp and GGML](https://github.com/ggml-org/llama.cpp);
