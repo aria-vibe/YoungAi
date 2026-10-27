@@ -13744,3 +13744,7 @@ PPL 2.8852 对 2.8827(比值 **1.001**), Σmin **0.9695**(中位 0.981), Mean KL
   **用户判: "客观指标可能好了, 实际效果好像没有"** —— 计划位的偏差从 0.00 对 0.88 这种量级, 平均指标涨 1 pp 推不过阈值; 还没量 v6 在探针位上动了多少(下一步该先量这个, 别再加长训)。
 - **收尾(用户令)**: 结束所有任务; 现役侧车 = v6(restore-B2plan-v6/ckpt_e01 并入, v4b 在 amp_prev_10271800); README 中英顶部写开发理念(天下没有免费的午餐 / 平权量化一致底座 / 个性化走外挂 /
   不为指标伤边际能力 / 下一步自进化还原)+ 官方与本机同题鹈鹕对比 + 仓库链接加 fodelf/YoungAi 标题; make test 全过后按件提交(f85712bd … cb54fe0e)。
+- **发布(10-27 晚, 用户令)**: git restructure 推到 649127c6(GitHub 先 403"要验证邮箱", 用户验证后推上)。HF wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017:
+  新目录 DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-restore_fit_n15360-engine/ = 还原侧车 段 A(gr 38 + rb 27)+ 段 B v6(amp 40)+ 清洗过的 manifest(去本机绝对路径、去历次段 B 记录只留 v6),
+  106 个文件远端逐个同大小(commit cd545d07; Mac 直传撞 xet 网络错, 改 spark 走 17897 隧道); README 中英 + 两张鹈鹕图走 hf_publish_spark.sh docs(README_ASSETS 加了两张图)。
+  ★install.sh 的 sidecar_of 表没加 restore, 用户用 --domain 下不到这个侧车★(要的话另改 install.sh)。
