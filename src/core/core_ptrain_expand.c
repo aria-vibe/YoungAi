@@ -94,9 +94,9 @@ bool pt_expand(ds4_engine *e, const pt_cfg *c, const pt_data *d, const char *cac
             for (char *ln = strtok_r(out[j] ? out[j] : (char *)"", "\n", &sv); ln && ng < N && ng < 64; ln = strtok_r(NULL, "\n", &sv)) {
                 char *p = ln; while (*p == ' ' || *p == '\t' || *p == '\r') p++;
                 if (*p != '{') continue;   /* 不是 JSON 行(模型的小标题/解释)直接跳 */
-                char *sys, *ctx, *q, *a, *txt; const char *err;
+                char *sys, *ctx, *q, *a, *txt, *pfx; const char *err;
                 int eos = 1;
-                if (!pt_parse_line(p, &sys, &ctx, &q, &a, &txt, &eos, &err)) { nbad++; continue; }
+                if (!pt_parse_line(p, &sys, &ctx, &q, &a, &txt, &pfx, &eos, &err)) { nbad++; continue; }
                 bool keep_row = !txt[0] && q[0] && a[0];
                 if (keep_row && !strcmp(q, s->q)) { nsame++; keep_row = false; }
                 for (uint32_t x = 0; keep_row && x < ng; x++) if (!strcmp(gq[x], q)) { ndup++; keep_row = false; }
@@ -107,7 +107,7 @@ bool pt_expand(ds4_engine *e, const pt_cfg *c, const pt_data *d, const char *cac
                     fputs(b.ptr ? b.ptr : "", f); ds4_buf_free(&b);
                     gq[ng++] = strdup(q); nrow++;
                 }
-                free(sys); free(ctx); free(q); free(a); free(txt);
+                free(sys); free(ctx); free(q); free(a); free(txt); free(pfx);
             }
             for (uint32_t x = 0; x < ng; x++) free(gq[x]);
             if (!ng) nzero++;

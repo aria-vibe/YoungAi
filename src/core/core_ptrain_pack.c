@@ -192,7 +192,7 @@ bool pt_pack_step(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *co
     ds4_gpu_tensor *glog[PT_PACK_MAX];
     memset(glog, 0, sizeof glog);
     for (uint32_t i = 0; ok && i < nb; i++) {
-        ok = pt_loss_rows(c, r, B->logits, pk->r0[i] + ss[i]->sa0 - 1u, ss[i], 0u, &loss_each[i], &ntok_each[i], &glog[i]);
+        ok = pt_loss_rows(c, r, B->logits, pk->r0[i] + ss[i]->sa0 - 1u + ss[i]->l0, ss[i], ss[i]->l0, &loss_each[i], &ntok_each[i], &glog[i]);   /* 头 l0 位只当上下文 */
         r->dec_slot[i] = r->dec_last;
     }
     const double q2 = pt_tick(c);
@@ -200,7 +200,7 @@ bool pt_pack_step(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *co
     if (ok && grad) {   /* 出口: 各题答案行的 g_xn = glog·W_head(其余行 0) → RMSNorm → hc_pre, 整批 R 行; 再逐层往下(按题分段的在层里) */
         ok = ds4_gpu_tensor_fill_f32(r->gxn, 0.f, (uint64_t)R * E);
         for (uint32_t i = 0; ok && i < nb; i++) {
-            const uint32_t m = ss[i]->m, row = pk->r0[i] + ss[i]->sa0 - 1u;
+            const uint32_t m = ss[i]->m - ss[i]->l0, row = pk->r0[i] + ss[i]->sa0 - 1u + ss[i]->l0;
             ds4_gpu_tensor *gv = pt_rows(r->gxn, row, m, E);
             ok = gv && ds4_gpu_bwd_matmul_t_tensor(gv, mdl->map, mdl->size, e->weights.output->type, e->weights.output->abs_offset, E, V, glog[i], m, 0);
             if (gv) ds4_gpu_tensor_free(gv);

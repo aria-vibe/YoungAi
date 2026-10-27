@@ -177,13 +177,22 @@ static void pt_doc_slot(pt_data *d) {
     d->docids[d->ndoc] = NULL; d->docn[d->ndoc] = 0;
 }
 
-static bool pt_add_text(ds4_engine *e, const pt_cfg *c, pt_data *d, int src, const char *txt, int eos) {
+/* ★"prefix" 行(10-26 晚, 分支续写料)★: 序列 = BOS + prefix + text(+EOS), prefix 的 token 只当上下文、不进损失(pt_sample.l0), 落在 prefix 里的段不出样本。
+ * 为什么: 学生自己生成到两万位后走进官方从没去过的区域(过度核算 / 绕圈), 官方轨迹上的靶教不了它从那里怎么回来; 让官方 API 从学生的前缀往下续写,
+ *   前缀是学生的(只给上下文, 零梯度), 靶 100% 是原件的分布 —— 09-30 铁律禁的是"自吐当靶", 这里自吐只是提问的方式。
+ * prefix 与 text 各自分词再拼: 分界正好是学生停笔 / 官方接笔的那个 token 边界(API 续写就是从这个前缀 token 串起的), 拼起来再切会在边界合并出别的 token。 */
+static bool pt_add_text(ds4_engine *e, const pt_cfg *c, pt_data *d, int src, const char *pfxtxt, const char *txt, int eos) {
     const uint32_t ci = pt_chunk_of(d, "", 0, 1);
     const int eval = src == 2 ? 2 : (src == 0 && c->evalf[0]) ? 0 : pt_is_eval(txt);   /* 给了 eval= 时料不留出(同 pt_add_sample) */
     ds4_tokens at = {0};
     /* 认特殊 token 的切分(10-22): 原文段里的 <think> / </think> / <｜end▁of▁sentence｜> 要成为它们的 id, 思考轨迹尾段才能把 </think> 这个决策位放进 KL;
      * 纯 BPE 会把 "</think>" 切成几个普通片。不含这些字串的原文两条路逐 token 同(只有一个 span, 同一个 BPE) */
-    ds4_tokenize_rendered_chat(e, txt, &at);
+    uint32_t np = 0;
+    if (pfxtxt[0]) { ds4_tokenize_rendered_chat(e, pfxtxt, &at); np = (uint32_t)at.len; }
+    ds4_tokens tt = {0};
+    ds4_tokenize_rendered_chat(e, txt, &tt);
+    for (int i = 0; i < tt.len; i++) ds4_tokens_push(&at, tt.v[i]);
+    ds4_tokens_free(&tt);
     if (eos) ds4_tokens_push(&at, ds4_token_eos(e));
     const bool pf = c->ctxlen > c->maxlen;
     const uint32_t T = (uint32_t)at.len, S = pf ? (c->maxlen - 2u) / pt_pfx_align() * pt_pfx_align() : c->maxlen - 1u, Wc = c->ctxlen - 1u;
@@ -202,11 +211,13 @@ static bool pt_add_text(ds4_engine *e, const pt_cfg *c, pt_data *d, int src, con
         /* xt: 非末段多带 1 个"只当目标"的 token(原文第 en 个, 存在 sids[sn], 不进前向): 它的 logits 是本段尾窗末行, 下一段的前缀正好到它之前 ——
          * 不带的话段界那一位谁都不当靶(每 S 位丢 1 个, 10-25 晚补上)。sn 仍是输入长度, 接力判据(下一段前缀 == 本段 sn)不变 */
         const uint32_t xt = pf && en < T ? 1u : 0u, st0 = !pf ? off : en > Wc ? en - Wc : 0u, m = en - off + xt;
+        if (en + xt <= np) { off = pf ? (k + 1u) * S : en; continue; }   /* 整段都在 prefix 里: 没有一位当靶, 不出样本(与 doc_tail 跳段同理, 下一段从头预填) */
         d->s = realloc(d->s, (d->ns + 1) * sizeof *d->s);
         pt_sample *s = &d->s[d->ns++];
         memset(s, 0, sizeof *s);
         s->chunk = ci; s->eval = eval; s->raw = 1; s->doc = d->ndoc; s->q = strdup(""); s->a = strdup(""); s->src = src;
         s->sn = en - st0 + 1u; s->sa0 = off - st0 + 1u; s->m = m;
+        s->l0 = np > off ? np - off : 0u;   /* 本段靶里落在 prefix 的头几位: 只当上下文(上面保证了 l0 ≤ m−1, 至少 1 位进损失) */
         s->sids = xmalloc((size_t)(s->sn + xt) * 4);
         s->sids[0] = e->vocab.bos_id;
         memcpy(s->sids + 1, at.v + st0, (size_t)(en - st0 + xt) * 4);
@@ -265,10 +276,10 @@ static bool pt_add_sample(ds4_engine *e, const pt_cfg *c, pt_data *d, int src, c
 
 /* 一行 jsonl → system/context/user/assistant 四串(malloc; 没有的给 ""), 或 text 一串(*txt 非空时另四串都是 ""); 失败时 *err 指向原因(静态串)。
  * 全仓唯一的料行解析器: 扩展(core_ptrain_expand.c)收模型写的行也走它 —— 不是合法料行的就不是料 */
-bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, char **txt, int *eos, const char **err) {
+bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, char **txt, char **pfx, int *eos, const char **err) {
     *eos = 1;
     const char *p = ln; char *key = NULL, *role = NULL, *content = NULL;
-    *sys = *ctx = *q = *a = *txt = NULL; *err = "不是 JSON 对象";
+    *sys = *ctx = *q = *a = *txt = *pfx = NULL; *err = "不是 JSON 对象";
     json_ws(&p);
     if (*p != '{') return false;
     p++;
@@ -287,6 +298,8 @@ bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, c
             bool b = true;
             if (!json_bool(&p, &b)) { free(key); *err = "eos 要是 true/false"; return false; }
             *eos = b ? 1 : 0;
+        } else if (!strcmp(key, "prefix")) {   /* text 行可选: 排在 text 前、只当上下文的原文(分支续写料, 见 pt_add_text) */
+            if (!json_string(&p, pfx)) { free(key); *err = "prefix 要是字符串"; return false; }
         } else if (!strcmp(key, "messages")) {
             json_ws(&p);
             if (*p != '[') { free(key); *err = "messages 要是数组"; return false; }
@@ -318,7 +331,7 @@ bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, c
                 json_ws(&p);
                 if (*p == ',') p++;
             }
-        } else { free(key); *err = "只认 messages / context / text(+eos) 这几个字段(reward/mode/split 10-10 起不收)"; return false; }
+        } else { free(key); *err = "只认 messages / context / text(+eos, +prefix) 这几个字段(reward/mode/split 10-10 起不收)"; return false; }
         free(key);
         json_ws(&p);
         if (*p == ',') p++;
@@ -328,6 +341,8 @@ bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, c
     if (!*sys) *sys = strdup("");
     if (!*ctx) *ctx = strdup("");
     if (!*txt && !*eos) { *err = "eos 只给 text 行(问答的答案恒以 EOS 收尾)"; return false; }
+    if (!*txt && *pfx) { *err = "prefix 只给 text 行(它是 text 前面只当上下文的原文)"; return false; }
+    if (!*pfx) *pfx = strdup("");
     if (*txt) {   /* 原文行: 不许再带 messages/context(一行只能是一种料, 混着写说不清目标是什么) */
         if (*q || *a || (*ctx)[0]) { *err = "text 行不能再带 messages / context"; return false; }
         pt_rstrip(*txt);
@@ -343,7 +358,7 @@ bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, c
 }
 
 /* 读一份 jsonl(src 0 = data, 1 = hold, 2 = eval) */
-static bool pt_load_file(ds4_engine *e, const pt_cfg *c, pt_data *d, const char *path, int src, uint32_t *skipped) {
+static bool pt_load_file(ds4_engine *e, const pt_cfg *c, pt_data *d, const char *path, int src, uint32_t *skipped, uint32_t *npfx) {
     char *b = pt_slurp(path);
     if (!b) { fprintf(stderr, "ds4: --ptrain 读不了料 %s\n", path); return false; }
     uint32_t lineno = 0, n0 = d->ns;
@@ -354,12 +369,12 @@ static bool pt_load_file(ds4_engine *e, const pt_cfg *c, pt_data *d, const char 
         lineno++;
         const char *q0 = p; while (*q0 == ' ' || *q0 == '\t' || *q0 == '\r') q0++;
         if (*q0) {
-            char *sys, *ctx, *q, *a, *txt; const char *err; int eos = 1;
-            if (!pt_parse_line(p, &sys, &ctx, &q, &a, &txt, &eos, &err)) { fprintf(stderr, "ds4: --ptrain %s 第 %u 行: %s\n", path, lineno, err); ok = false; }
+            char *sys, *ctx, *q, *a, *txt, *pfx; const char *err; int eos = 1;
+            if (!pt_parse_line(p, &sys, &ctx, &q, &a, &txt, &pfx, &eos, &err)) { fprintf(stderr, "ds4: --ptrain %s 第 %u 行: %s\n", path, lineno, err); ok = false; }
             else if (src == 1 && (ctx[0] || txt[0])) { fprintf(stderr, "ds4: --ptrain %s 第 %u 行: 保持料只收不带 context 的问答(教师 = 部署态自己)\n", path, lineno); ok = false; }
-            else if (txt[0]) ok = pt_add_text(e, c, d, src, txt, eos);
+            else if (txt[0]) { ok = pt_add_text(e, c, d, src, pfx, txt, eos); if (pfx[0]) (*npfx)++; }
             else ok = pt_add_sample(e, c, d, src, sys[0] ? sys : NULL, ctx, q, a, skipped);
-            free(sys); free(ctx); free(q); free(a); free(txt);
+            free(sys); free(ctx); free(q); free(a); free(txt); free(pfx);
         }
         p = nl ? nl + 1 : NULL;
     }
@@ -370,20 +385,25 @@ static bool pt_load_file(ds4_engine *e, const pt_cfg *c, pt_data *d, const char 
 
 bool pt_data_load(ds4_engine *e, const pt_cfg *c, pt_data *d) {
     memset(d, 0, sizeof *d);
-    uint32_t skipped = 0;
-    if (!pt_load_file(e, c, d, c->data, 0, &skipped)) return false;
+    uint32_t skipped = 0, npfx = 0;
+    if (!pt_load_file(e, c, d, c->data, 0, &skipped, &npfx)) return false;
     uint32_t nexp = 0;
     if (c->expand) {   /* 多形式扩展: 训练题改写成 N 种问法(core_ptrain_expand.c), 当 src 0 装进来、全标训练 —— 留出题不扩展(扩展了就是把留出的措辞教给它) */
         char cache[1100]; snprintf(cache, sizeof cache, "%s.expand%u.jsonl", c->data, c->expand);
         if (!pt_expand(e, c, d, cache)) return false;
         const uint32_t n0 = d->ns;
-        if (!pt_load_file(e, c, d, cache, 0, &skipped)) return false;
+        if (!pt_load_file(e, c, d, cache, 0, &skipped, &npfx)) return false;
         for (uint32_t i = n0; i < d->ns; i++) d->s[i].eval = 0;
         nexp = d->ns - n0;
     }
-    if (c->hold[0]) { if (!pt_load_file(e, c, d, c->hold, 1, &skipped)) return false; }
+    if (c->hold[0]) { if (!pt_load_file(e, c, d, c->hold, 1, &skipped, &npfx)) return false; }
     else fprintf(stderr, "ds4: ★[ptrain] 没给 hold=(保持料): ③ 在通用问题上没有东西钉着, 10-01 实撞局部性崩 —— 只在故意对照时这么跑★\n");
-    if (c->evalf[0] && !pt_load_file(e, c, d, c->evalf, 2, &skipped)) return false;
+    if (c->evalf[0] && !pt_load_file(e, c, d, c->evalf, 2, &skipped, &npfx)) return false;
+    if (npfx) {   /* 分支续写料的账: 多少行带 prefix、prefix 位占多少(只当上下文)、靶位多少 —— 看一眼就知道这批料的梯度有多少真落在"从学生前缀往下走" */
+        uint64_t ctxt = 0, tgt = 0; uint32_t nsp = 0;
+        for (uint32_t i = 0; i < d->ns; i++) if (d->s[i].l0) { nsp++; ctxt += d->s[i].l0; tgt += d->s[i].m - d->s[i].l0; }
+        fprintf(stderr, "ds4: [ptrain] 带 prefix 的 text 行 %u: 跨分界的段 %u(前缀位 %llu 只当上下文 / 靶位 %llu)\n", npfx, nsp, (unsigned long long)ctxt, (unsigned long long)tgt);
+    }
     pt_data_lcp(d);
     if (c->eval_n) {   /* 料的留出段(eval 1, src 0)按篇等间隔留, 约 eval_n 段: 第 j 篇留下当且仅当 ⌊(j+1)·N/nv⌋ > ⌊j·N/nv⌋(按段数比例抽篇, 散在全料)。
                         * 整篇留不按段抽: 前缀形态按篇接力(pt_run.cont_s), 抽散的段每段都要从 0 重新预填前缀(18:4x 那趟 649 段 43 分钟没评完) */

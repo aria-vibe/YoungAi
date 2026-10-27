@@ -143,15 +143,17 @@ bool pt_step_sample(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *
      * 损失只算尾窗里的目标: 第一个进损失的目标 token a0 = max(sa0, pfx+1), 表从第 off = a0−sa0 位起, 它的 logits 行 = a0−1−pfx。 */
     /* 前缀尽量推到第一个目标前(sa0−1 向下对齐): 尾窗只放要算损失的行; 但尾窗不得超 cap, 所以下界 sn−cap(向上对齐) —— 对话题(sa0 小)走的是下界。
      * 对齐粒度 pt_pfx_align()(最大压缩比): 前缀/尾窗的块界落在组界上, 见 core_ptrain.h */
+    /* 第一个要算损失的目标 = sa0 + l0(l0 = 只当上下文的头几位, 分支续写料的学生前缀, pt_sample.l0; 老料 0) */
     uint32_t pfx = 0, n = s->sn;
+    const uint32_t f0 = s->sa0 + s->l0;
     if (s->sn > cap) {
-        const uint32_t A = pt_pfx_align(), lo = (s->sn - cap + A - 1u) / A * A, hi = (s->sa0 - 1u) / A * A;
+        const uint32_t A = pt_pfx_align(), lo = (s->sn - cap + A - 1u) / A * A, hi = (f0 - 1u) / A * A;
         pfx = hi > lo ? hi : lo;
         n = s->sn - pfx;
     }
     r->pfx = pfx;
-    const uint32_t a0 = s->sa0 > pfx + 1u ? s->sa0 : pfx + 1u;
-    if (a0 >= s->sn) return true;   /* 答案全落在前缀里(不该发生: one-hot 的 text 行 sa0 = 1) */
+    const uint32_t a0 = f0 > pfx + 1u ? f0 : pfx + 1u;
+    if (a0 > s->sa0 + s->m - 1u) return true;   /* 答案全落在前缀里(不该发生: one-hot 的 text 行 sa0 = 1; 末位可以是 sids[sn] 那个只当目标的 token) */
     const uint32_t off = a0 - s->sa0, m = s->m - off, r0 = a0 - 1u - pfx;
     const double q0 = pt_tick(c);
     /* ★按篇接力(pt_run.cont_s)★: 上一道刚好是这道的前缀(整段 [0, pfx) 逐 id 同, 状态里也正好 pfx 个位置)⇒ 不清状态、不预填, 直接接着算尾窗。

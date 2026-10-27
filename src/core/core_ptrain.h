@@ -85,6 +85,8 @@ typedef struct {
     int32_t *dids; uint32_t dn;     /* 步 2 的教师提示(不带材料的题才有: 这条问答当示范放进上下文; 带材料的题步 2 直接用 tids 的提示段) */
     uint64_t fpkey;                 /* FP 教师表的键(10-26): 0 = 自己的 tids 整条; 前缀形态的原文段(tids 是整篇的前缀) = 整篇序列 BOS+原文(+EOS) 的 FNV ——
                                      * 一篇只导一条教师序列、打一次表, 各段按"表序列以 tids 开头"对上、取自己那 m 行(core_ptrain_fp.c); 按段的窗去重会把一篇算 doc_tail 遍 */
+    uint32_t l0;                    /* 答案位里开头几位只当上下文、不进损失(10-26 晚, 分支续写料: text 行带 "prefix" = 学生自己吐的思考前缀, 靶只是官方从那里续写的部分)。
+                                     * 这几位在前向里(有 logits 行), 表里也有(one-hot 占位), 只是 pt_loss_rows 从第 l0 位起算 —— 老料全 0, 逐位不变 */
 } pt_sample;
 
 typedef struct {
@@ -107,8 +109,9 @@ bool pt_expand(ds4_engine *e, const pt_cfg *c, const pt_data *d, const char *cac
 
 /* core_ptrain_data.c */
 bool pt_cfg_load(pt_cfg *c, const char *path);
-bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, char **txt, int *eos, const char **err);   /* 料行解析(唯一一份);
-                                    * eos: text 行的 "eos" 字段(缺省 1 = 末尾补 EOS 当目标; false = 原文没写完, 不补 —— 撞长度上限的轨迹末尾补 EOS 是假靶) */
+bool pt_parse_line(const char *ln, char **sys, char **ctx, char **q, char **a, char **txt, char **pfx, int *eos, const char **err);   /* 料行解析(唯一一份);
+                                    * eos: text 行的 "eos" 字段(缺省 1 = 末尾补 EOS 当目标; false = 原文没写完, 不补 —— 撞长度上限的轨迹末尾补 EOS 是假靶)
+                                    * pfx: text 行可选的 "prefix"(没有给 ""): 排在 text 前面、只当上下文不当靶的原文(分支续写料的学生前缀, 见 pt_sample.l0) */
 bool pt_data_load(ds4_engine *e, const pt_cfg *c, pt_data *d);
 /* 前缀形态的块界对齐粒度 = max(2, 各层压缩比)(层表里读; V4.1 层表压缩比只有 0/1/2, 所以就是"取偶"): 前缀长/段界都取它的倍数,
  * 组界不跨前缀/尾窗(尾窗压缩器反传只对本窗自己的组求导, core_ptrain_layer.c pt_compress_bwd 的 pg0 = pfx/ratio)。 */
