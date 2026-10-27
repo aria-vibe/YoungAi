@@ -140,6 +140,48 @@ def decision_table(name, R, ids, dec):
         print(line)
 
 
+CONF = [("p>0.9", 0.0, 0.10536), ("p.5-.9", 0.10536, 0.69315), ("p<0.5", 0.69315, 1e30)]   # 按 FP 给实际下一位的 p 切: -ln 0.9 / -ln 0.5
+
+
+def conf_table(name, R, frm, n_ids):
+    """按 FP 对实际下一位的置信度分桶(10-26 晚): 总 Same top 被 "FP 自己也在多选" 的位撑着(设计段一半位 p<0.5),
+    那一桶的错不是细节错; 细节错 = FP 笃定(p>0.9 只有一种写法)或有倾向(0.5~0.9)时学生选错 —— 判 ③ 对细节有没有用只看前两桶。"""
+    B = {k: [0, 0.0, 0, 0] for k, _, _ in CONF}   # n, Σkld, Σsame, Σstu命中
+    for p, r in enumerate(R):
+        if p < frm or p + 1 >= n_ids or r[8] < 0: continue
+        for k, lo, hi in CONF:
+            if lo <= r[8] < hi: b = B[k]; b[0] += 1; b[1] += r[1]; b[2] += r[3]; b[3] += r[5]; break
+    n_all = sum(b[0] for b in B.values()) or 1
+    print(f"== {name} 按 FP 置信度: 桶 / n / 占比 / KLD / Same top / 错 top-1")
+    for k, _, _ in CONF:
+        b = B[k]
+        if b[0]: print(f"  conf {k:7s} {b[0]:7d} {100*b[0]/n_all:5.1f}% {b[1]/b[0]:8.4f} {100*b[2]/b[0]:6.2f}% {100 - 100*b[2]/b[0]:6.2f}%")
+
+
+def agg_list(a, tok):
+    """--list 模式(10-27, 泛化留出尺): 清单一行 "id 全长 生成段起点"(think_trace_collect.py ids 的 list.txt), 每个臂给一个带 {id} {n} 的 rows 路径模板;
+    把所有段的生成段合成一张表 —— 一道题几千位, 单题的 Same top 抖得厉害, 合起来才看得出侧车在没见过的题上涨没涨。
+    每段先过对齐自检(同主模式), 不过就停。"""
+    segs = [ln.split() for ln in open(a.list) if ln.strip()]
+    for name, pat in [(x.split("=", 1)[0], x.split("=", 1)[1]) for x in a.arms]:
+        T = [0, 0.0, 0]; C = {k: [0, 0.0, 0] for k, _, _ in CONF}; L = {k: [0, 0.0, 0] for k in CLASSES}
+        for sid, n, frm in segs:
+            ids = [int(x) for x in open(os.path.join(a.ids_dir, f"{sid}.ids")).read().split()]
+            R = load_rows(pat.replace("{id}", sid).replace("{n}", n))
+            chk = [(r[4] == 1) == (r[6] == ids[p + 1]) for p, r in enumerate(R) if p + 1 < len(ids)]
+            if sum(chk) / max(1, len(chk)) < 0.99: print(f"★{name} {sid}: 对齐自检不过, 停★"); return 2
+            for p, r in enumerate(R):
+                if p < int(frm) or p + 1 >= len(ids) or r[8] < 0: continue
+                for b in (T, L[tok_class(tok.decode([ids[p + 1]]))]): b[0] += 1; b[1] += r[1]; b[2] += r[3]
+                for k, lo, hi in CONF:
+                    if lo <= r[8] < hi: b = C[k]; b[0] += 1; b[1] += r[1]; b[2] += r[3]; break
+        f = lambda b: f"n {b[0]} Same {100*b[2]/max(1,b[0]):.2f}% KLD {b[1]/max(1,b[0]):.4f}"
+        print(f"== {name} 留出 {len(segs)} 段合计: {f(T)}")
+        print("  conf " + " | ".join(f"{k} 错 {100 - 100*C[k][2]/max(1,C[k][0]):.2f}% (n {C[k][0]})" for k, _, _ in CONF))
+        print("  类   " + " | ".join(f"{k} Same {100*L[k][2]/max(1,L[k][0]):.2f}% (n {L[k][0]})" for k in ("digit", "word", "punct")))
+    return 0
+
+
 def load_rows(path):
     """.rows 一行: 位置 kld Σmin same ref命中 stu命中 ref_argmax stu_argmax [ref_nll stu_nll [set质量ref set质量stu]](anchor_metrics --row-out)"""
     R = []
@@ -156,6 +198,9 @@ def main():
     ap.add_argument("--regions"); ap.add_argument("--html"); ap.add_argument("--out")
     ap.add_argument("--decisions", help="<ids>.decisions: 按决策位再出一张表(要 .rows 带第 9/10 列)")
     ap.add_argument("--close-set", help="只造料: 把词表里 '</' 开头的 token id 写到这个文件(anchor_metrics --set)")
+    ap.add_argument("--conf", action="store_true", help="再出一张按 FP 置信度分桶的表(要 .rows 带第 9 列; 判细节只看 p>0.9 与 0.5~0.9 两桶)")
+    ap.add_argument("--list", help="多段合计模式: 清单(id 全长 生成段起点), 臂写成 名=带 {id} {n} 的 rows 模板; 配 --ids-dir")
+    ap.add_argument("--ids-dir", help="--list 的 ids 目录(<id>.ids)")
     ap.add_argument("arms", nargs="*", help="名=rows 路径")
     a = ap.parse_args()
     tok = Tokenizer.from_file(os.path.join(a.hf, "tokenizer.json"))
@@ -165,6 +210,9 @@ def main():
     if a.html:
         if not a.out: print("★--html 要配 --out★"); return 2
         return build_html(tok, a.html, a.out)
+    if a.list:
+        if not a.ids_dir or not a.arms: print("★--list 要配 --ids-dir 与至少一个 臂名=rows 模板★"); return 2
+        return agg_list(a, tok)
     if not a.ids or not a.arms: print("★要 --ids 与至少一个 臂名=rows★"); return 2
     ids = [int(x) for x in open(a.ids).read().split()]
     regs = dec = None
@@ -201,6 +249,9 @@ def main():
         if dec:
             if len(R[0]) < 10: print(f"★{name}: .rows 没有第 9/10 列(目标 NLL), 要新 anchor_metrics 重出★"); return 2
             decision_table(name, R, ids, dec)
+        if a.conf:
+            if len(R[0]) < 10: print(f"★{name}: .rows 没有第 9 列(FP 目标 NLL), 要新 anchor_metrics 重出★"); return 2
+            conf_table(name, R, a.frm, len(ids))
     if len(arms) > 1:
         a0 = tables[arms[0][0]]
         for name, _ in arms[1:]:
