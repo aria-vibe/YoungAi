@@ -13748,3 +13748,19 @@ PPL 2.8852 对 2.8827(比值 **1.001**), Σmin **0.9695**(中位 0.981), Mean KL
   新目录 DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-restore_fit_n15360-engine/ = 还原侧车 段 A(gr 38 + rb 27)+ 段 B v6(amp 40)+ 清洗过的 manifest(去本机绝对路径、去历次段 B 记录只留 v6),
   106 个文件远端逐个同大小(commit cd545d07; Mac 直传撞 xet 网络错, 改 spark 走 17897 隧道); README 中英 + 两张鹈鹕图走 hf_publish_spark.sh docs(README_ASSETS 加了两张图)。
   ★install.sh 的 sidecar_of 表没加 restore, 用户用 --domain 下不到这个侧车★(要的话另改 install.sh)。
+
+## 10-27 晚 · 外部 PR #6(aria-vibe, Metal 正确性 + 请求缓冲生命周期)审查 + spark CUDA 验证
+
+- **审查(16 GB Mac 离线)**: 基线 8bf93945 装上它的测试 = 24 处失败, 全是真 bug —— 上传乱序(GPU 还没跑, 主机写把排队读者的输入盖了, got 9 ref 1)、
+  Q4_K 验证批 ≠ 单行(6e-4, 舍 bf16 后 0.03)、因果注意力批 ≠ 单行; PR 分支 --metal-tensor-lifetime / --metal-v41-memory / --metal-v41 / --metal-kernels / --server / linecount 全过。
+  合不得的点(已英文评论到 PR, 带致谢): ① 它自己的 JSON 里 8K 温 0 **不投机**输出也变了(chinese-1 7b9e2b19→5c4f2117), 没定位哪块缓冲被盖、没过 caliper;
+  ② Q4_K 修法把 8 行共享权重核 _w2.._w8 废了, 验证批读 1+k 遍权重; ③ 候选开投机 8K 冷预填 17.1/17.4 s 对不投机 12.3/13.1 s(+35%)没解释;
+  ④ tensor_write 批内改排队拷贝 + 每写新建 MTLBuffer, 语义全局变; ⑤ 核里抄了主机分段常量 32/32; ⑥ 它的 M5 Max 基线不投机只有 8.3 t/s(PR #3 同机 35–42), 速度数不可比。
+  建议拆: 生命周期/内存/取消一份(可收) + 数值一致性一份(补根因 + caliper + 同条件速度)。
+- **spark CUDA(停生产子进程跑, 用户令)**: 三份 ds4 —— 基线 8bf93945 / PR 原样 / PR 去掉 core_v41_api.c 三处 METAL 限定(让按后缀开工作区 + 解码前收缩在 CUDA 上生效);
+  尺 speed-bench/kernel_ab_spark.sh(1017 + 编程侧车, req.ids 9210 token, 温 0 贪心 + 投机 512 token):
+  基线 vs PR **逐字节同 ✓**(1751 B), 39.92 / 40.37 t/s; 基线 vs 去限定 **逐字节同 ✓**, 40.32 / 40.09 t/s, 接受直方图同量级(1.43/5)。
+  去限定版确实走了新路径: "decode buffers: 9 rows, released 428.3 MiB backend scratch"; 预填 8.1 s 对基线 7.7 s(单趟, 未复测)。
+  这趟是冷请求(reused=0), **没测到缓存命中时按后缀开工作区那条**; 收尾日志在 CUDA 上也打 "metal_allocated"(标签错, 数值是全部设备分配 121 GB)。
+  离线: PR 版 ds4_test --server / --engine-units / --rax / --tp-allreduce 全过。生产按 serve_pick.txt 装回(restore_fit 侧车, --mem-budget-mb 110000), idle。
+  spark 上留着 ~/ds4-pr6{,-base,-nogate} 与 ~/ds4-main/ds4.pr6{base,,nogate}, 没删。
