@@ -6,12 +6,14 @@
 # patch 里定死: maxTokens 65536(= 官方思考模式默认上限, 也是我们助理的上限; dsh 默认 256000, 本地进环会跑两小时) /
 #   models 只列 deepseek-flash 且不带 systemPromptUpdate / toolUpdate(官方默认条目带, ds4-server 不认中途 system 与 tool_addition 块; 两臂都去掉才可比) /
 #   审批 never(headless 没人点"允许"; 沙盒仍是 dsh 默认的 workspace-write: 只能写本次的工作目录); 权限插件要一个对得上的预设, 否则它不启动(10-23 实撞 "match no preset")。
-# 用法: tests/asst/dsh_compare.sh official|local "请求" [标签(默认时间戳)]
+# 用法: tests/asst/dsh_compare.sh official|local "请求" [标签(默认时间戳)] [抓包目录]
+#   第 4 个参数(10-26 晚, 只对 official 臂): 起本机代理 tests/asst/dsh_capture_proxy.py, dsh 发出的每轮请求体 + 上游响应原样落到该目录
+#   (req_NNN.json / resp_NNN.sse) —— agent 多轮料的源头(api_agent.py resample 在同一前缀上重采拿 top-20)。
 # 产物: gguf/dsh/runs/<臂>-<标签>/ws/ = dsh 的工作目录(跑时在 /tmp/project.XXXXXX, 跑完挪回; 模型写的文件都在这); 上一层 events.jsonl(--json 事件流) + stderr.log + patch.yml + request.txt; 结束打印用时与 ws/ 文件清单。
 # key: 官方臂读 gguf-tools/data/posttrain/deepseek_api.key(.gitignore 的 *.key), 只经子进程环境交给 dsh, 不打印、不落盘到产物目录。
 # 出错会怎样: 隧道起不来 → 本地臂直接退(不回退到官方); dsh 报 MISSING_CREDENTIAL = key 文件没读到; 报 404 /v1/messages = 隧道连到了别的端口。
 set -uo pipefail
-ARM="${1:?official|local}"; MSG="${2:?请求}"; TAG="${3:-$(date +%m%d-%H%M%S)}"
+ARM="${1:?official|local}"; MSG="${2:?请求}"; TAG="${3:-$(date +%m%d-%H%M%S)}"; CAPTURE="${4:-}"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 DSH="$ROOT/gguf/dsh/node_modules/.bin/dsh"
 [ -x "$DSH" ] || { echo "dsh 没装: cd gguf/dsh && npm install @deepseek-ai/dsh@0.2.1-rc.2"; exit 1; }
@@ -25,10 +27,18 @@ RUN="$ROOT/gguf/dsh/runs/$ARM-$TAG"; mkdir -p "$RUN"
 WS="$(mktemp -d /tmp/project.XXXXXX)" || { echo "建不了工作目录"; exit 1; }
 git -C "$WS" init -q
 TUNNEL_PORT=18431
+PROXY_PID=""
 case "$ARM" in
   official)
     BASE="https://api.deepseek.com/anthropic"
-    KEY="$(cat "$ROOT/gguf-tools/data/posttrain/deepseek_api.key")" || { echo "读不到官方 key"; exit 1; } ;;
+    KEY="$(cat "$ROOT/gguf-tools/data/posttrain/deepseek_api.key")" || { echo "读不到官方 key"; exit 1; }
+    if [ -n "$CAPTURE" ]; then   # 抓包代理夹在 dsh 与官方之间; 端口按标签散开, 几趟并行各用各的
+      CPORT=$((19000 + $(printf '%s' "$TAG" | cksum | cut -d' ' -f1) % 900))
+      python3 "$ROOT/tests/asst/dsh_capture_proxy.py" --port "$CPORT" --upstream "$BASE" --dir "$CAPTURE" 2>> "$RUN/capture.log" &
+      PROXY_PID=$!; sleep 1
+      kill -0 "$PROXY_PID" 2>/dev/null || { echo "抓包代理没起来, 看 $RUN/capture.log"; exit 1; }
+      BASE="http://127.0.0.1:$CPORT"
+    fi ;;
   local)
     if ! nc -z 127.0.0.1 $TUNNEL_PORT 2>/dev/null; then
       ssh -f -N -o ExitOnForwardFailure=yes -L $TUNNEL_PORT:127.0.0.1:8001 spark || { echo "到 spark:8001 的隧道起不来"; exit 1; }
@@ -62,6 +72,7 @@ T0=$(date +%s)
 ( cd "$WS" && DEEPSEEK_API_KEY="$KEY" NO_PROXY="127.0.0.1,localhost" no_proxy="127.0.0.1,localhost" \
     "$DSH" --profile headless --patch "$RUN/patch.yml" --json "$MSG" > "$RUN/events.jsonl" 2> "$RUN/stderr.log" )
 RC=$?
+[ -z "$PROXY_PID" ] || { kill "$PROXY_PID" 2>/dev/null; wait "$PROXY_PID" 2>/dev/null; echo "抓包 $(ls "$CAPTURE"/req_*.json 2>/dev/null | wc -l | tr -d ' ') 轮 → $CAPTURE"; }
 mv "$WS" "$RUN/ws" || echo "工作目录没挪回来, 还在 $WS"
 WS="$RUN/ws"
 # 用时落盘给记分卡(tests/asst/dsh_scorecard.py)读: 事件流里没有时间戳, 不写这一行, 10-23 那几趟的用时就只剩 fable5 里的手抄数
