@@ -25,6 +25,43 @@ void server_close_resources(server *s) {
     memset(s, 0, sizeof(*s));
 }
 
+/* --render-anthropic <清单>(2026-10-26 晚, agent 多轮料): 清单一行 "请求体.json<TAB>输出前缀", 每个请求体按 /v1/messages 同一条解析 + 渲染
+ * (parse_anthropic_request → render_chat_prompt_text → ds4_tokenize_rendered_chat), 写 <前缀>.txt(渲染文本)与 <前缀>.ids(一行 id 串), 不起服。
+ * 为什么: ③ 的 agent 料要让训练序列 = 部署时学生真看见的那串字节(10-24 教训: 训练格式 ≠ 判决格式, 收益不兑现); 请求体末尾带 assistant 消息时
+ * 渲染的是整轮(<think>思考</think>正文 + DSML 工具调用 + <｜end▁of▁sentence｜>), 它以不带 assistant 的渲染为字节前缀 —— 两份相减就是靶文本。
+ * 出错会怎样: 任一行解析失败整批 rc 1 并打行号与原因(不跳过: 少一轮料看着像"没学会")。 */
+static int render_batch(server *s, const server_config *cfg) {
+    FILE *lf = fopen(cfg->render_list, "r");
+    if (!lf) { fprintf(stderr, "ds4-server: 渲染清单 %s 打不开\n", cfg->render_list); return 1; }
+    char line[4096]; int n = 0, rc = 0;
+    while (rc == 0 && fgets(line, sizeof line, lf)) {
+        char *tab = strchr(line, '\t'); char *nl = strchr(line, '\n'); if (nl) *nl = 0;
+        if (!tab) { if (line[0]) { fprintf(stderr, "ds4-server: 清单第 %d 行缺 TAB\n", n + 1); rc = 1; } continue; }
+        *tab = 0; const char *in = line, *out = tab + 1; n++;
+        FILE *f = fopen(in, "rb");
+        if (!f) { fprintf(stderr, "ds4-server: 请求体 %s 打不开\n", in); rc = 1; break; }
+        fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
+        char *body = xmalloc((size_t)sz + 1); body[sz] = 0;
+        if (sz > 0 && fread(body, 1, (size_t)sz, f) != (size_t)sz) { fclose(f); free(body); fprintf(stderr, "ds4-server: %s 读不全\n", in); rc = 1; break; }
+        fclose(f);
+        request r; memset(&r, 0, sizeof r); char err[256] = "";
+        if (!parse_anthropic_request(s->engine, s, body, s->default_tokens, cfg->ctx_size, &r, err, sizeof err)) {
+            fprintf(stderr, "ds4-server: 第 %d 个请求体 %s 解析失败: %s\n", n, in, err); free(body); rc = 1; break;
+        }
+        char p[1200]; snprintf(p, sizeof p, "%s.txt", out);
+        FILE *o = fopen(p, "wb"); bool ok = o && fputs(r.prompt_text ? r.prompt_text : "", o) >= 0; if (o) fclose(o);
+        snprintf(p, sizeof p, "%s.ids", out);
+        o = ok ? fopen(p, "w") : NULL; ok = o != NULL;
+        for (int i = 0; ok && i < r.prompt.len; i++) ok = fprintf(o, i ? " %d" : "%d", r.prompt.v[i]) > 0;
+        if (o) { fputc('\n', o); fclose(o); }
+        if (!ok) { fprintf(stderr, "ds4-server: 写不了 %s.*\n", out); rc = 1; }
+        request_free(&r); free(body);
+    }
+    fclose(lf);
+    if (rc == 0) fprintf(stderr, "ds4-server: 渲染 %d 个请求体 → <前缀>.txt/.ids\n", n);
+    return rc;
+}
+
 #ifndef DS4_SERVER_TEST
 int main(int argc, char **argv) {
     signal(SIGPIPE, SIG_IGN);
@@ -42,6 +79,19 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    if (cfg.render_list) {   /* 只渲染不起服(render_batch): 词表级引擎, 不加实例锁不碰 GPU, 服务开着也能跑 */
+        cfg.engine.tokenizer_only = true;
+        ds4_engine *te = NULL;
+        if (ds4_engine_open(&te, &cfg.engine) != 0) return 1;
+        server s; memset(&s, 0, sizeof s);
+        s.engine = te; s.default_tokens = cfg.default_tokens;
+        cfg.ctx_size = ds4_engine_is_v41(te) ? ds4_engine_v41_ctx() : cfg.ctx_size;
+        pthread_mutex_init(&s.mu, NULL); pthread_cond_init(&s.cv, NULL); pthread_cond_init(&s.clients_cv, NULL);
+        pthread_mutex_init(&s.tool_mu, NULL); pthread_mutex_init(&s.trace_mu, NULL);
+        const int rc = render_batch(&s, &cfg);
+        server_close_resources(&s);
+        return rc;
+    }
     ds4_engine *engine = NULL;
     if (ds4_engine_open(&engine, &cfg.engine) != 0) return 1;
 

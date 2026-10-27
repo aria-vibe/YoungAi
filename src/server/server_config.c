@@ -382,6 +382,8 @@ server_config parse_options(int argc, char **argv) {
             c.enable_cors = true;
         } else if (!strcmp(arg, "--trace")) {
             c.trace_path = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--render-anthropic")) {
+            c.render_list = need_arg(&i, argc, argv, arg);   /* 渲染清单(一行 "请求体.json<TAB>输出前缀"), 见 server_main.c render_batch */
         } else if (!strcmp(arg, "--asr")) {
             c.asr_dir = need_arg(&i, argc, argv, arg);   /* 语音识别模型目录(server_asr.c, 2026-10-14) */
         } else if (!strcmp(arg, "--kv-disk-dir")) {

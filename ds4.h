@@ -139,6 +139,7 @@ typedef struct {
     bool warm_weights;
     bool quality;
     bool inspect_only;
+    bool tokenizer_only;   /* 只开词表(2026-10-26, ds4-server --render-anthropic): 不加 /tmp/ds4.lock 实例锁、不映射权重、不碰 GPU, 服务开着也能跑; 只许分词/渲染 */
     bool load_slice;
     uint32_t load_layer_start;
     uint32_t load_layer_end;

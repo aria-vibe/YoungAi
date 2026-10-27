@@ -462,6 +462,7 @@ typedef struct {
     int default_tokens;
     const char *chdir_path;
     const char *trace_path;
+    const char *render_list;   /* --render-anthropic <清单>: 不起服, 把清单里每个 Anthropic 请求体按部署同一套渲染成提示文本 + ids 就退出(server_main.c render_batch) */
     const char *asr_dir;       /* --asr: 语音识别模型目录(model.safetensors + config.json + tokenizer.json) */
     const char *kv_disk_dir;
     uint64_t kv_disk_space_mb;

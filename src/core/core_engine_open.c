@@ -25,6 +25,13 @@ int ds4_engine_open(ds4_engine **out, const ds4_engine_options *opt) {
         e->directional_steering_ffn_scale = opt->directional_steering_ffn;
     }
     if (opt->n_threads > 0) g_requested_threads = (uint32_t)opt->n_threads;
+    if (opt->tokenizer_only) {   /* 只开词表(ds4.h tokenizer_only): 与 ds4_dump_text_tokenization 同一条路, 不加锁不映射权重 —— 渲染/分词不是"第二个大模型进程" */
+        model_open(&e->model, opt->model_path, false, false);
+        vocab_load(&e->vocab, &e->model);
+        config_validate_model(&e->model);   /* 读元数据(上下文长度 / V4.1 代际), 渲染要 <｜System｜> 代际与 ctx */
+        *out = e;
+        return 0;
+    }
     ds4_acquire_instance_lock();
 
     bool load_slice = opt->load_slice;
