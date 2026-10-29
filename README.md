@@ -57,8 +57,9 @@ Same prompt ("create an HTML page with a 2D SVG animation of a pelican riding a 
 |:---:|:---:|
 | ![Official](docs/img/pelican-official.png) | ![This project](docs/img/pelican-local.png) |
 
-The right image is a frame from the local run while the model reviews its own first draft, not a hand-picked final. The gap
-is still visible: the pouch comes out as a round ball, the bill is short, and the neck does not stand up.
+The right image is the local run's final page, one run, not hand-picked: the model wrote it, looked at its own screenshot,
+fixed what it saw and stopped by itself after 72 tool calls (38 minutes). The long bill and the pouch hanging along it are
+there now; the gap is still visible: the neck does not stand up, the pouch is small, and the body reads more like a duck.
 
 ![YoungAi Studio: the assistant hunting for the cheapest DGX Spark](docs/img/studio-agent-en.png)
 
@@ -68,18 +69,20 @@ Spark, Metal on the Mac, one Makefile, no third-party libraries linked.
 
 ## The model
 
-A 113.6 GB base plus a 41 MB sidecar and a 101 MB post-training file picks the same next token as the 510 GB original
-weights (Same top) **84.8%** of the time:
+A 113.6 GB base plus a 145 MB restore sidecar picks the same next token as the 510 GB original weights (Same top)
+**85.0%** of the time on code:
 
 | | Size | Code | General English |
 |---|---:|---:|---:|
 | ① base | 113.6 GB | 78.4% | 76.8% |
 | ① + ② code sidecar | + 41 MB | 82.0% | 79.7% |
-| **① + ② + ③ post-training** | **+ 101 MB** | **84.8%** | **82.4%** |
+| ① + ② + ③ post-training | + 101 MB | 84.8% | 82.4% |
+| **① + restore sidecar (default on the Spark)** | **+ 145 MB** | **85.0%** | **82.0%** |
 
 "Same" means that on the same text, our model and the original rank the same token first. Code is 15,360 held-out tokens
-across 30 languages; general English is WikiText-2. Mean KL falls with it: code 0.446 → 0.318 → 0.230, general English
-0.803 → 0.673 → 0.574.
+across 30 languages; general English is WikiText-2. Mean KL by row: code 0.446 → 0.318 → 0.230 → 0.230, general English
+0.803 → 0.673 → 0.574 → 0.586. Against ② + ③ the restore sidecar is ahead on code Same top and level on code KL; on general
+English it is 0.4 points lower (2 of 512 tokens), above the 80% floor we hold it to.
 
 **Three things get 113.6 GB this far:**
 
@@ -98,8 +101,13 @@ across 30 languages; general English is WikiText-2. Mean KL falls with it: code 
    quantization left behind: the extra question marks in decision questions drop from 2× the original's to 1.2–1.3×, and
    thinking that would not stop now stops, slightly too eagerly (see [Limits](#limits)).
 
-There is more room in post-training. This file used about 600 samples of under 1,000 tokens each; the amount of data, the
-length and the rank have not been pushed yet.
+**The restore sidecar** puts both pieces in one directory: gains and router biases like ② (40 MB), a rank-64 correction
+like ③ (105 MB). Its correction then keeps learning from the official API in rounds. Each round the API writes fresh
+source files, the sidecar trains on them once, and the round is kept only if code KL drops by more than 2 standard
+errors on half of the code ruler; the other half only reports. The last round trained on full reasoning traces,
+including where the original stops thinking and stops answering, and was kept without that gate: it costs 1% code KL and
+the pelican run above stopped by itself. 29 rounds so far, 8 kept. No training text shares a 16-token stretch with either
+ruler, apart from two lines of Dockerfile boilerplate. Pass the directory to `ds4-server --zchain`.
 
 Context is 1M tokens; the full KV cache is 0.89 GB. Method and full tables: [technical notes §5](docs/TECHNICAL.md#5-results);
 how the post-training file is made: [§4.3](docs/TECHNICAL.md#43-the-post-training-file).

@@ -646,6 +646,21 @@ At 512 positions one position is 0.2 pp: these rows read as "no regression", not
 Adding the post-training file published with the base: code 84.77%, WikiText-2 82.42%. The three-row comparison with
 the same ruler, measured in the same period, is at the end of §4.3.
 
+**The restore sidecar** (repository directory `DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-restore_fit_n15360-engine`,
+145 MB, passed to `ds4-server --zchain`): gains + router biases (40 MB) and a rank-64 correction (105 MB) in one directory.
+The correction then keeps learning from the official API in rounds: the API writes fresh source files, the sidecar trains
+on them once, and a round is kept only if code KL drops by more than 2 standard errors on windows 1 and 3 of every
+language; windows 2 and 4 only report. The last round trained on full reasoning traces and was kept without that gate.
+Same ruler:
+
+| | Same top-1 | Σmin (median / p5) | Mean KL | PPL ratio |
+|---|---:|---|---:|---:|
+| Code judge slice, 15,360 | **85.04%** | 0.834 (0.902 / 0.475) | 0.230 | 1.098 |
+| WikiText-2, 512 | 82.03% | 0.777 (0.944 / 0.075) | 0.586 | 1.276 |
+
+All of its training text is generated fresh by the official API. A 16-gram fingerprint check against both rulers: 24 of
+25 data files have zero hits; the one left hits two lines of Dockerfile boilerplate.
+
 **Against the previous base.** The same recipe on the previous release of the weights gave per-domain
 gains of +2.84 (finance), +3.65 (code), +3.46 (law), +3.74 (medicine) and +3.28 pp (science); this base
 gives +2.58, +3.67, +3.25, +3.75 and +3.37. The bare base reads lower on WikiText-2 (76.8% vs 78.5%), but
