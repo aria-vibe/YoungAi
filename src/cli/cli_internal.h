@@ -36,6 +36,7 @@ typedef struct {
     const char *dump_logits_path;
     const char *score_ids_path;   /* --score-ids: teacher-forced 逐位打分(公开对拍) */
     const char *ptrain_spec;      /* --ptrain <配置>: 后训练 ③ 第八版(上下文蒸馏, core_ptrain.c) */
+    const char *restoreb_spec;    /* --restore-b <配置>: 反修段 B 的还原训练(缺口加权, core_restoreb.c) */
     const char *draft_train_spec; /* --draft-train <配置>: 草稿器蒸馏(三塔改盯部署底座, core_draft_kd.c) */
     const char *gen_ids_path;     /* --gen-ids: 把文件里的 token id 当提示续写(真实请求复现: 文本重新分词拼不回原序列) */
     const char *gen_jobs_path;    /* --gen-jobs: 合批出题(cli_gen_jobs.c): 清单每行 提示文件\t输出文件\t种子\t上限, 随空随补 8 路一起解码 */

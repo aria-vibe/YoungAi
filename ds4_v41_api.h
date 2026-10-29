@@ -78,6 +78,9 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
  * 反传训练 ③ 的低秩放大器 → 落 amp_Lnn.bin + base.fnv(引擎 --posttrain 直接挂)。配置是 key=value 文本, 字段见 core_ptrain_data.c。
  * 只接 --zchain ②, 不接 --posttrain(起点恒为 ①+②)。返回 0 = 落盘成功。 */
 int ds4_engine_ptrain(ds4_engine *e, const char *spec);
+/* --restore-b <配置>(2026-10-28, 反修段 B 的还原训练; src/core/core_restoreb.c): 靶 = 官方 API 逐位 top-20, 只在量化丢掉能量的缺口位
+ * (第 0 步逐位 KL 的 rb_gap 分位以上)出梯度; 起点 rb_init 可扩秩。借 ③ 的装料/反传/落盘件, ③ 本身不动。返回 0 = 落盘成功。 */
+int ds4_engine_restoreb(ds4_engine *e, const char *spec);
 /* --draft-train <配置>(2026-10-07, 草稿器蒸馏; src/core/core_draft_kd*.c): 让 DSpark 三塔改盯部署底座 —— 教师强制走底座自己采样的真实请求续写,
  * 块内各位对底座同位置分布做 KL, 反传训三塔 MoE 出口的低秩件 + 出口对齐件; 落 tower_Tn.bin + exit.dspa + base.fnv, 引擎 --draft-amp <目录> 直接挂。
  * 底座/塔原权重/头全冻结, 验证侧不动 ⇒ 只动接受率。配置是 key=value 文本(字段见 core_draft_kd.c)。返回 0 = 落盘成功。 */

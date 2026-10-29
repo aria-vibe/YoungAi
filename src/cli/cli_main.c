@@ -201,6 +201,9 @@ int main(int argc, char **argv) {
         /* --v41-prof 对训练路也要生效: 前向里的逐层探针(如每层逐专家 token 数落 /tmp/v41_route_*.txt)认的是同一个全局开关 */
         ds4_engine_v41_set_prof(cfg.gen.v41_prof);
         rc = ds4_engine_ptrain(engine, cfg.gen.ptrain_spec);
+    } else if (cfg.gen.restoreb_spec) {
+        ds4_engine_v41_set_prof(cfg.gen.v41_prof);
+        rc = ds4_engine_restoreb(engine, cfg.gen.restoreb_spec);
     } else if (cfg.gen.draft_train_spec) {
         ds4_engine_v41_set_prof(cfg.gen.v41_prof);
         rc = ds4_engine_draft_train(engine, cfg.gen.draft_train_spec);
