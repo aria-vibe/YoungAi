@@ -20,7 +20,10 @@ Python 在这里是外部 API 采集(全仓零 Python 裁决的例外); 数值�
              训练器补的那个 EOS 只进统计(决策位/命中), 不当任何位置的输入, 蒸馏靶不受影响; ptrain 的"决策位 KL"均值会混进这些位(教师 p≈0), 读数按 ptfstat 的"中段"类拆。
   chunks  --hf … --raw …/graphics_raw.jsonl --out …/api_chunks4096.jsonl [--max-tok 4096] [--max-chunks 6]
              整条轨迹(思考 + </think> + 正文)切成连续 ≤max_tok 的窗, 每窗带同一个头, 当 one-hot 硬靶(10-25 晚: FP 教师失灵后段 B 不再向它蒸, 见 cmd_chunks)。
+             --head-prefix(10-28): 头(系统 effort + 题)写进 prefix 字段只当上下文, 不进损失 —— 向 FP 教师蒸时头里那几十位 FP 有尖峰(fable5 10-25), 不能当靶。
   ids     --hf … --raw …/heldout_raw.jsonl --out-dir gguf/go-onebit/code/<留出集>   官方轨迹 → 判决尺 ids + list.txt(泛化留出尺, 见 cmd_ids)
+             --cap N --pack M(10-28 判决门): 每条只要前 N 位, 依次装进 ≤M 位的包 pack_NNN.ids, 清单 packs.txt(包名 全长 各条生成段 起:止,…) ——
+             一包一趟判决, 少装几次模型; 教师锚按包缓存。
 出错会怎样: collect 里 finish≠stop(撞 max_tokens 没收口)的条 ok=false, tail 跳过; tail 里 题+正文 太长(尾段不足 min-tail)的条丢掉并计数;
 API 429/5xx 退避重试 4 次再放弃(该条不写, 下次续跑再来)。key 文件在 .gitignore(*.key), 日志里永不打印 key。
 """
@@ -308,14 +311,15 @@ def cmd_chunks(a):
     tok = Tokenizer.from_file(os.path.join(a.hf, "tokenizer.json"))
     enc = lambda s: tok.encode(s, add_special_tokens=False).ids
     prefix = SYS + EFFORT_PREFIX.format(budget=EFFORT_BUDGET[a.effort])
-    rows = [r for r in read_jsonl(a.raw) if r.get("reasoning")]
+    rows = [r for r in read_jsonl(a.raw) if r.get("reasoning") or (r.get("think") is False and r.get("content"))]
     kept, man, ntrace = 0, [], 0
     with open(a.out, "w", encoding="utf-8") as f:
         for r in rows:
-            head = prefix + USER + r["q"] + ASST + THINK
+            nothink = r.get("think") is False   # 关思考采的条(api_teacher.py collect --no-think): 部署的非思考模板 = <｜User｜>题<｜Assistant｜></think> 后直接正文, 没有 effort 系统行
+            head = USER + r["q"] + ASST + THINK_END if nothink else prefix + USER + r["q"] + ASST + THINK
             budget = a.max_tok - 2 - len(enc(head))      # BOS + 训练器补的 EOS
             fin = r.get("ok") and not r.get("head")      # head(api_branch.py head 截的思考开头)标了 ok 只为 ptf 能配, 它没有结尾: 不接 </think>、不补 EOS
-            body = r["reasoning"] + (THINK_END + (r.get("content") or "") if fin else "")
+            body = (r.get("content") or "") if nothink else r["reasoning"] + (THINK_END + (r.get("content") or "") if fin else "")
             units = []
             for u in split_units(body):                  # 段太长按句再切, 保证单个单元放得进一窗
                 units += split_sentences(u) if len(enc(u)) > budget else [u]
@@ -340,8 +344,9 @@ def cmd_chunks(a):
                     c = "".join(ss[:-1]) if len(ss) > 1 else c[: int(len(c) * 0.9)]
                     text = head + c; ids = enc(text)
                 assert EOS not in text and ids.count(enc(THINK_END)[0]) <= 1, r["id"]
-                row = {"text": text}
-                if not (fin and k == len(chunks) - 1):   # 训练器默认给 text 行末尾补 EOS 当靶: 只有收口轨迹的最后一窗是真结尾, 别的窗/没收口的条标 eos false
+                row = {"prefix": head, "text": c} if a.head_prefix else {"text": text}   # prefix 与 text 训练器各自分词再拼; 头以 <think> 特殊 token 收尾, 分界不会合并
+                # 训练器默认给 text 行末尾补 EOS 当靶: 只有收口轨迹的最后一窗是真结尾, 别的窗/没收口的条/正文被截的条(api_branch.py evalcut 的 content_cut)标 eos false
+                if not (fin and k == len(chunks) - 1) or r.get("content_cut"):
                     row["eos"] = False
                 f.write(json.dumps(row, ensure_ascii=False) + "\n"); kept += 1
                 man.append((r["id"], r["src"], "ok" if fin else "partial", k, len(chunks), len(ids) + 2, int(THINK_END in c)))
@@ -424,17 +429,28 @@ def cmd_ids(a):
     bos = "<｜begin▁of▁sentence｜>"
     os.makedirs(a.out_dir, exist_ok=True)
     rows = [r for r in read_jsonl(a.raw) if r.get("ok")]
-    with open(os.path.join(a.out_dir, "list.txt"), "w", encoding="utf-8") as lst:
+    packs = []   # --pack: [[ids], ["起:止", …]]; 后一条接在前一条后面(各自带 BOS), 前一条只是多出来的上下文, 教师学生看到的一样
+    with open(os.path.join(a.out_dir, "packs.txt" if a.pack else "list.txt"), "w", encoding="utf-8") as lst:
         for r in rows:
             pre = bos + SYS + EFFORT_PREFIX.format(budget=EFFORT_BUDGET[a.effort]) + USER + r["q"] + ASST + THINK
             ids, pid = enc(pre + r["reasoning"] + THINK_END + r["content"]), enc(pre)
             if ids[:len(pid)] != pid:
                 sys.exit(f"★{r['id']}: 题面前缀与整条分词在分界处不一致, 停★")
+            if a.cap: ids = ids[:a.cap]
+            if len(ids) <= len(pid): print(f"  {r['id']}: 截到 {a.cap} 位只剩题面, 跳过"); continue
+            if a.pack:
+                if not packs or len(packs[-1][0]) + len(ids) > a.pack: packs.append([[], []])
+                p = packs[-1]; p[1].append(f"{len(p[0]) + len(pid)}:{len(p[0]) + len(ids)}"); p[0].extend(ids)
+                print(f"  {r['id']}: {len(ids)} 位(生成段 {len(ids) - len(pid)})→ pack_{len(packs) - 1:03d}"); continue
             with open(os.path.join(a.out_dir, f"{r['id']}.ids"), "w") as f:
                 f.write("\n".join(map(str, ids)) + "\n")
             lst.write(f"{r['id']} {len(ids)} {len(pid)}\n")
             print(f"  {r['id']}: {len(ids)} 位, 生成段从 {len(pid)} 起")
-    print(f"ids: {len(rows)} 条 → {a.out_dir}/list.txt")
+        for k, (ids, rg) in enumerate(packs):
+            with open(os.path.join(a.out_dir, f"pack_{k:03d}.ids"), "w") as f:
+                f.write("\n".join(map(str, ids)) + "\n")
+            lst.write(f"pack_{k:03d} {len(ids)} {','.join(rg)}\n")
+    print(f"ids: {len(rows)} 条 → {a.out_dir}/{'packs.txt(' + str(len(packs)) + ' 包)' if a.pack else 'list.txt'}")
 
 
 def main():
@@ -454,8 +470,9 @@ def main():
     k.add_argument("--exclude-ids", nargs="*"); k.add_argument("--hf")
     h = sp.add_parser("chunks"); h.add_argument("--hf", required=True); h.add_argument("--raw", required=True); h.add_argument("--out", required=True)
     h.add_argument("--max-tok", type=int, default=4096); h.add_argument("--max-chunks", type=int, default=6); h.add_argument("--effort", default="high", choices=list(EFFORT_BUDGET))
+    h.add_argument("--head-prefix", action="store_true")
     d = sp.add_parser("ids"); d.add_argument("--hf", required=True); d.add_argument("--raw", required=True); d.add_argument("--out-dir", required=True)
-    d.add_argument("--effort", default="high", choices=list(EFFORT_BUDGET))
+    d.add_argument("--effort", default="high", choices=list(EFFORT_BUDGET)); d.add_argument("--cap", type=int, default=0); d.add_argument("--pack", type=int, default=0)
     a = ap.parse_args()
     {"questions": cmd_questions, "collect": cmd_collect, "tail": cmd_tail, "mid": cmd_mid, "code": cmd_code, "chunks": cmd_chunks, "ids": cmd_ids}[a.cmd](a)
 

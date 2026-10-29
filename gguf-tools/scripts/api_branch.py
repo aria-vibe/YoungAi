@@ -166,6 +166,30 @@ def cmd_head(a):
     print(f"head: {n} 条 × 思考前 {a.n} 位 → {a.out}(跳过 {skip} 条: lp 里有不认识的 id)")
 
 
+def cmd_evalcut(a):
+    """留出集官方轨迹 → 评估用的两段(10-28 自进化): 每条出 id#h(思考前 --head 位, 同 cmd_head)与 id#t(思考末 --tail 位 + </think> + 正文前 --content 位)。
+    为什么: 整条轨迹当训练器 eval= 时, 18 篇 27 万位 + ctxlen 前缀预填, 第 0 步评估一次 ~18 分钟, 一轮装不下(10-28 第一轮轮末评估撞 40 分钟训练超时, ckpt 没落盘)。
+    两段各管一件: 开头 = 计划(画成什么样定在这), 末尾 = 决策位(</think>)与终止位(正文写得下就带 EOS); 中段细节由编程判决份的置信度分桶量。
+    lp 按 token 同步截, api_teacher.py ptf 照常按块配 —— 不需要本地 FP 教师。正文被截的条标 content_cut, chunks 不给它补 EOS(补在正文中间 = 教它写到一半就停)。"""
+    _, b2id = hf_byte_table(a.hf); id2b = {i: b for b, i in b2id.items()}; n = skip = 0
+    with open(a.out, "w", encoding="utf-8") as f:
+        for r in (json.loads(l) for l in open(a.raw, encoding="utf-8") if l.strip()):
+            if not (r.get("ok") and r.get("lp")): continue
+            rr, cc = r["lp"]["reasoning_content"], r["lp"]["content"]
+            if any(x[0] not in id2b for x in rr + cc): skip += 1; continue
+            txt, cut = prefix_text([x[0] for x in rr], min(a.head, len(rr)), id2b)
+            f.write(json.dumps({"id": f"{r['id']}#h{a.head}", "q": r["q"], "src": r.get("src", "api"), "reasoning": txt, "content": "", "ok": True, "head": True,
+                                "finish": "length", "lp": {"reasoning_content": rr[:cut], "content": []}}, ensure_ascii=False) + "\n")
+            s0 = max(0, len(rr) - a.tail)
+            while s0 < len(rr):   # 起点落在多字节字符中间就往后挪(token 边界是字节边界, 不一定是字符边界)
+                try: rt = b"".join(id2b[x[0]] for x in rr[s0:]).decode("utf-8"); break
+                except UnicodeDecodeError: s0 += 1
+            ct, ccut = prefix_text([x[0] for x in cc], min(a.content, len(cc)), id2b) if cc else ("", 0)
+            f.write(json.dumps({"id": f"{r['id']}#t{a.tail}", "q": r["q"], "src": r.get("src", "api"), "reasoning": rt, "content": ct, "ok": True,
+                                "finish": r.get("finish"), "content_cut": ccut < len(cc), "lp": {"reasoning_content": rr[s0:], "content": cc[:ccut]}}, ensure_ascii=False) + "\n"); n += 1
+    print(f"evalcut: {n} 条 × (思考前 {a.head} + 思考末 {a.tail} / 正文前 {a.content}) → {a.out}(跳过 {skip} 条: lp 里有不认识的 id)")
+
+
 def cmd_share(a):
     tok, _ = hf_byte_table(a.hf); S = 1022
     print(f"| 族 | 条 | 总 token | 中位 | 最长 | doc_tail={a.doc_tail} 进梯度 token |")
@@ -195,8 +219,10 @@ def main():
     r = sp.add_parser("rows"); r.add_argument("--raw", required=True); r.add_argument("--out", required=True)
     s = sp.add_parser("share"); s.add_argument("--hf", required=True); s.add_argument("--raw", nargs="+", required=True); s.add_argument("--doc-tail", type=int, default=8)
     h = sp.add_parser("head"); h.add_argument("--hf", required=True); h.add_argument("--raw", nargs="+", required=True); h.add_argument("--out", required=True); h.add_argument("--n", type=int, default=2048)
+    e = sp.add_parser("evalcut"); e.add_argument("--hf", required=True); e.add_argument("--raw", required=True); e.add_argument("--out", required=True)
+    e.add_argument("--head", type=int, default=1024); e.add_argument("--tail", type=int, default=512); e.add_argument("--content", type=int, default=1536)
     a = ap.parse_args()
-    {"branch": cmd_branch, "rows": cmd_rows, "share": cmd_share, "head": cmd_head}[a.cmd](a)
+    {"branch": cmd_branch, "rows": cmd_rows, "share": cmd_share, "head": cmd_head, "evalcut": cmd_evalcut}[a.cmd](a)
 
 
 if __name__ == "__main__":

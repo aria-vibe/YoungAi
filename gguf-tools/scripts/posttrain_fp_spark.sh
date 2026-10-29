@@ -2,7 +2,7 @@
 # posttrain_fp_spark.sh — ③ 向出厂原件蒸馏的整链(2026-10-22, docs/think_close.md §5): 装料导序列 → FP 参考前向打 top-K → 训 ③。
 #
 # 用法(spark 仓库根; 本脚本不停模型, 包在停模型包装器里跑):
-#   nohup gguf-tools/scripts/with_model_stopped_spark.sh gguf-tools/scripts/posttrain_fp_spark.sh <ptrain.cfg> <HF 出厂权重目录> <② 侧车目录|none> [每趟打分最多几条=96] [附加序列文件] > /tmp/bugmd/pt_fp_<时间>.log 2>&1 &
+#   nohup gguf-tools/scripts/with_model_stopped_spark.sh gguf-tools/scripts/posttrain_fp_spark.sh <ptrain.cfg> <HF 出厂权重目录> <② 侧车目录|none> [每趟打分最多几条=96] [附加序列文件] [API 原料] [apionly] > /tmp/bugmd/pt_fp_<时间>.log 2>&1 &
 #   每趟条数的内存账(10-22 实测, 96 条 / 5.6 万位 / 最长 1001): 教师进程整机占 73 GB(CUDA 分配不进 RSS, 看 free 的 used), 可用 51 GB;
 #   73 GB 里多少随条数长没拆过, 加条数先在新趟开头看 used 的涨幅, 不盲加。
 #   ptrain.cfg 照工作台写法(data= hold= out= epochs= layers= …, 见 model_train_job.c write_cfg), ★不要写 teacher=/dumpids=★: 本脚本按阶段自己加。
@@ -62,6 +62,9 @@ if [ "${#KEEP[@]}" -gt 0 ]; then
 else
     cp "$OUTD/teacher.ids" "$OUTD/teacher.rest"
 fi
+# 第 7 个参数 apionly(10-28 段 B 自学习, 用户: "里面只应该有官方 api、量化基座、反修 a 段、不断自学习的反修 b 段"): 靶只许是官方 API ——
+#   有序列没配上 API 表就停(api_teacher.py miss 查在哪一位分叉), 不落到本地 FP 教师(要流式装 476 GB 原件, 也不是这条路的靶)。
+if [ "${7:-}" = apionly ] && [ -s "$OUTD/teacher.rest" ]; then M "★apionly: $(wc -l < "$OUTD/teacher.rest") 条序列没配上 API 表, 不走本地 FP 教师, 停★"; exit 4; fi
 # 分份(10-26 改): 一份 = 一次前向, 缓存按 条数 × 最长位 分 ⇒ 按"条数 × 本份最长位 ≤ 98304(验过的规模) 且 ≤ PER 条"贪心装, 长的先装(排序后同长度的挤一份)。
 #   之前按 maxlen 折算固定条数: 前缀形态整篇一条几万位时, 96 条 × 4 万位一次前向必炸(10-25 实撞 71 条 × 4094 位 cudaErrorOperatingSystem); 每份都要重新流式装一遍原件, 份数也不能多。
 MAXL=$(awk '{ if (NF > m) m = NF } END { print m + 0 }' "$OUTD/teacher.rest"); PER="${PER:-96}"

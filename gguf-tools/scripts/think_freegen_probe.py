@@ -86,7 +86,10 @@ def main():
         offi = [r for r in offi if r.get("ok")]
     done = set()
     if os.path.exists(a.out):   # 续跑: 已生成的题跳过(服务重起、中断后接着采)
-        for ln in open(a.out, encoding="utf-8"): done.add(json.loads(ln)["id"])
+        # 只认真写完(stop)或到上限(length)的条; 断流的条(finish 为空, 10-28 实撞: 服务被杀那一刻在跑的请求留下 0 字正文)下次重做, 不然行为尺把它当 0 分
+        for ln in open(a.out, encoding="utf-8"):
+            r = json.loads(ln)
+            if r.get("finish") in ("stop", "length"): done.add(r["id"])
     picks = [r for r in offi if r["q"] not in ex and r["id"] not in done]
     if a.n: picks = picks[: a.n]
     print(f"freegen: 题 {len(offi)} 条, 排除 {len(ex)} 题, 已有 {len(done)}, 取 {len(picks)} 道; 服务 {a.server}; 上限 {a.max_tokens}; {a.jobs} 路", flush=True)
