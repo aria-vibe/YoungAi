@@ -349,6 +349,11 @@ int ds4_gpu_v41_engram_rows_tensor(ds4_gpu_tensor *out, const ds4_gpu_tensor *ra
  * 两发 cuBLAS Sgemm: T = x·B, y += T·A(f32 累加进 y; 调用方随后舍 bf16)。 */
 int ds4_gpu_v41_amp_apply_tensor(ds4_gpu_tensor *y, const ds4_gpu_tensor *x, const ds4_gpu_tensor *A, const ds4_gpu_tensor *B,
                                  ds4_gpu_tensor *T, uint32_t n_tok, uint32_t D, uint32_t K);
+/* 带路由的放大器(10-29 段 B 试验件, src/cuda/cuda_amp_route.inc.cu): y += ((x·B) ⊙ u)·A, u[t][k] = 1 + Σ_j rw[t][j]·S[sel[t][j]][k];
+ * S [NE][K] f32(每个专家一组秩系数), sel/rw = 本层路由 [n][NU](int32 / f32)。S = 0 与上面同一个函数。Metal 未实现(报错返回 0)。 */
+int ds4_gpu_v41_amp_route_apply_tensor(ds4_gpu_tensor *y, const ds4_gpu_tensor *x, const ds4_gpu_tensor *A, const ds4_gpu_tensor *B,
+                                       const ds4_gpu_tensor *S, const ds4_gpu_tensor *sel, const ds4_gpu_tensor *rw, ds4_gpu_tensor *T,
+                                       uint32_t n_tok, uint32_t D, uint32_t K, uint32_t NU, uint32_t NE);
 
 /* 就地 x[n] = bf16(x·s)(indexer weights 的 softmax_scale·n_heads^-½, 官方在 bf16 上乘) */
 int ds4_gpu_v41_scale_round_tensor(ds4_gpu_tensor *x, uint64_t n, float s);

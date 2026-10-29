@@ -101,6 +101,7 @@
 #include "src/cuda/cuda_hc.inc.cu"
 #include "src/cuda/cuda_zchain_1.inc.cu"
 #include "src/cuda/cuda_zchain_2.inc.cu"
+#include "src/cuda/cuda_amp_route.inc.cu"   /* 带路由的低秩放大器(10-29 段 B 试验件): 前向 + 反向 */
 #include "src/cuda/cuda_bwd_dense.inc.cu"   /* 后训练反传的稠密原语(2026-10-01): 借 q4k/fp4/fp8 → bf16 解码核, 必须在 v41_q4k / gemv_highprec 之后 */
 #include "src/cuda/cuda_bwd_comp.inc.cu"    /* 后训练反传: 压缩行梯度 / 压缩器池化 / engram 门(分界层以下用; 借 v41_ckv_get), 必须在 bwd_attn 之前 */
 #include "src/cuda/cuda_bwd_attn.inc.cu"    /* 后训练反传: 稀疏注意力 + RoPE(借 v41_rope_freq / KV 打包常量) */

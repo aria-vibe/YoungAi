@@ -136,6 +136,7 @@ typedef struct {
     void *ejob;                 /* engram 取行后台任务(core_v41_engram.c 私有): 前向一开始发, 到 engram 层再收 */
     ds4_gpu_tensor *ampA[DS4_MAX_LAYER], *ampB[DS4_MAX_LAYER];   /* 反修放大器 A[K][D] / B[K][D](f32, 设备常驻), 无=NULL */
     uint32_t ampK[DS4_MAX_LAYER];
+    ds4_gpu_tensor *ampS[DS4_MAX_LAYER];   /* 带路由的放大器(10-29 段 B 试验件): 每个专家一组秩系数 S[NE][K](ampr_Lnn.bin), 无=NULL; 归属同 ampA */
     uint8_t amp_shared;         /* 1 = ampA/ampB 是进程级插件缓存的张量(core_v41_amp.c), 释放时只减引用不 free; 0 = 自己的(草稿态的塔件) */
     ds4_gpu_tensor *ampT;       /* [cap][Kmax] 中间 T = x·B(每个状态自己的, 按 cap 开) */
     int stop_early;             /* 反修钩子说"取完了": 本次前向跳过余下层与出口(core_v41_forward.c), 调用方不读 logits */

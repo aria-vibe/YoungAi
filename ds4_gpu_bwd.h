@@ -72,6 +72,11 @@ int ds4_gpu_bwd_hc_post_tensor(ds4_gpu_tensor *gy, ds4_gpu_tensor *gres, ds4_gpu
 int ds4_gpu_bwd_amp_tensor(ds4_gpu_tensor *gA, ds4_gpu_tensor *gB, ds4_gpu_tensor *gx, const ds4_gpu_tensor *gy,
                            const ds4_gpu_tensor *x, const ds4_gpu_tensor *A, const ds4_gpu_tensor *B,
                            ds4_gpu_tensor *T, ds4_gpu_tensor *gT, uint32_t n_tok, uint32_t D, uint32_t K);
+/* 带路由的放大器(ds4_gpu_v41_amp_route_apply_tensor)的反向: 同上, 外加 gS [NE][K] += 逐专家秩系数的梯度(原子累加); rw 当常数。 */
+int ds4_gpu_bwd_amp_route_tensor(ds4_gpu_tensor *gA, ds4_gpu_tensor *gB, ds4_gpu_tensor *gS, ds4_gpu_tensor *gx, const ds4_gpu_tensor *gy,
+                                 const ds4_gpu_tensor *x, const ds4_gpu_tensor *A, const ds4_gpu_tensor *B, const ds4_gpu_tensor *S,
+                                 const ds4_gpu_tensor *sel, const ds4_gpu_tensor *rw, ds4_gpu_tensor *T, ds4_gpu_tensor *gT,
+                                 uint32_t n_tok, uint32_t D, uint32_t K, uint32_t NU, uint32_t NE);
 
 /* ---- 第二阶段: 逐层反传(穿过注意力 / MoE / mHC 混合系数 / 压缩器 / engram), 实现在 cuda_bwd_attn / hc / moe / comp ---- */
 
