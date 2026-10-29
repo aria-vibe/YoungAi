@@ -182,6 +182,96 @@ def agg_list(a, tok):
     return 0
 
 
+def paired(a):
+    """--paired 模式(10-28 判决门): 同一批位置上两臂逐位相减 —— 新臂 − 基臂的 KLD / Same top / Σmin, 均值 + 标准误。
+    清单一行 "名 全长 起:止,起:止,…"(think_trace_collect.py ids --pack 的 packs.txt; 编程判决份写一行 "code 15360 0:15360"), 臂写成 名=带 {id} 的 rows 模板, 恰好两臂(基在前)。
+    只数生成段: 第 p 行是对 ids[p+1] 的预测, 起 ≤ p+1 < 止 才算。标准误按每 --block 个相邻位一块取块均值(逐位不独立, 直接按位算会把误差报小;
+    缺省 256; wt2 只有 512 位要配 32, 否则两块估不出误差)。
+    --target ID --ids <ids>(结束位尺): 只数"下一个 token 是 ID"的位置(docend 的 25 个真 EOS), 这时配 --block 1(各篇的结尾互相隔得远);
+    读数看学生给真 token 的 NLL(.rows 第 10 列): 结尾位 KLD 被别的候选摊薄, "该停的地方给停多大概率"才是要守的东西。
+    为什么不比两份汇总数: 汇总的 Δ 不知道有多大是噪声; 同位相减再按块估误差, 门才能说"降/升得超过 2 个标准误"。
+    出错会怎样: 两臂行数对不上(判的不是同一份 ids)就停; 末尾一行 PAIRED_JSON 给脚本读。"""
+    import json, math
+    (n0, p0), (n1, p1) = [(x.split("=", 1)[0], x.split("=", 1)[1]) for x in a.arms]
+    B = a.block   # --ids 可以是带 {id} 的模板(多条序列各一份 ids, ptf_metrics 写的 <名字>.ids)
+    load_ids = lambda sid: [int(x) for x in open(a.ids.replace("{id}", sid)).read().split()] if a.target is not None else None
+    K = 5   # 每位: KLD / Same / Σmin / 学生 NLL / FP NLL —— 块里存 Δ(前四个), tot 存两臂各自的和
+    blk, cur, tot, n = [], [0.0] * K, [[0.0] * K, [0.0] * K], 0
+    hit10 = hit01 = 0   # Same top 一中一不中的位: 新中旧不中 / 旧中新不中(反修 A 段端到端择优同一本账, v41_e2e_select.inc.c e2e_pair)
+    for ln in open(a.paired):
+        if not ln.strip(): continue
+        sid, _, rg = ln.split()
+        R0, R1 = load_rows(p0.replace("{id}", sid)), load_rows(p1.replace("{id}", sid)); ids = load_ids(sid)
+        if len(R0) != len(R1): print(f"★{sid}: {n0} {len(R0)} 行 ≠ {n1} {len(R1)} 行, 判的不是同一份 ids, 停★"); return 2
+        if len(R0[0]) < 10: print(f"★{sid}: .rows 没有第 9/10 列(目标 NLL), 要新 anchor_metrics 重出★"); return 2
+        for s, e in (tuple(map(int, x.split(":"))) for x in rg.split(",")):
+            for p in range(max(0, s - 1), min(len(R0), e - 1)):
+                if ids is not None and ids[p + 1] != a.target: continue
+                v0 = (R0[p][1], R0[p][3], R0[p][2], R0[p][9], R0[p][8]); v1 = (R1[p][1], R1[p][3], R1[p][2], R1[p][9], R1[p][8])
+                n += 1; cnt = n % B; hit10 += v1[1] > v0[1]; hit01 += v0[1] > v1[1]
+                for i in range(K): tot[0][i] += v0[i]; tot[1][i] += v1[i]; cur[i] += v1[i] - v0[i]
+                if cnt == 0: blk.append([c / B for c in cur]); cur = [0.0] * K
+    if len(blk) < 2: print(f"★配对位置 {n} 个, 不足两块(--block {B}), 门判不了★"); return 2
+    nb = len(blk)
+    se = [math.sqrt(sum((b[i] - sum(x[i] for x in blk) / nb) ** 2 for b in blk) / (nb - 1) / nb) for i in range(K)]
+    m0, m1 = [t / n for t in tot[0]], [t / n for t in tot[1]]
+    d = dict(n=n, blocks=nb, kld0=m0[0], kld1=m1[0], same0=100 * m0[1], same1=100 * m1[1], smin0=m0[2], smin1=m1[2], nll0=m0[3], nll1=m1[3], ref_nll=m0[4])
+    d.update(dkld=m1[0] - m0[0], dkld_se=se[0], dsame=100 * (m1[1] - m0[1]), dsame_se=100 * se[1], dsmin=m1[2] - m0[2], dsmin_se=se[2], dnll=m1[3] - m0[3], dnll_se=se[3])
+    d.update(same_D=hit10 - hit01, same_d=hit10 + hit01)   # 没有真差别时 D 的标准差 ≈ √d; 门按 A 段: D < −2√d 否决
+    z = lambda k: d[k] / max(d[k + "_se"], 1e-12)
+    print(f"== 配对 {n1} 对 {n0}: {n} 位({nb} 块 × {B}){'' if a.target is None else f', 只数下一个 token = {a.target} 的位'}")
+    print(f"  KLD   {d['kld0']:.5f} → {d['kld1']:.5f}  Δ {d['dkld']:+.5f} ± {d['dkld_se']:.5f}({z('dkld'):+.1f} SE)")
+    print(f"  Same  {d['same0']:.2f}% → {d['same1']:.2f}%  Δ {d['dsame']:+.2f} ± {d['dsame_se']:.2f} pp; 新中旧不中 − 旧中新不中 = {d['same_D']:+d} 行(不一致 {d['same_d']} 行, 噪声 √d = {math.sqrt(d['same_d']):.1f})")
+    print(f"  Σmin  {d['smin0']:.4f} → {d['smin1']:.4f}  Δ {d['dsmin']:+.4f} ± {d['dsmin_se']:.4f}")
+    print(f"  真 token NLL  {d['nll0']:.4f} → {d['nll1']:.4f}  Δ {d['dnll']:+.4f} ± {d['dnll_se']:.4f}({z('dnll'):+.1f} SE); 参照 {d['ref_nll']:.4f}"
+          + ("" if a.target is None else f"  ⇒ 真 token 几何均值 p: 参照 {math.exp(-d['ref_nll']):.4f} / {n0} {math.exp(-d['nll0']):.4f} / {n1} {math.exp(-d['nll1']):.4f}"))
+    print("PAIRED_JSON " + json.dumps(d))
+    return 0
+
+
+def misses(a):
+    """--paired 清单 --misses(10-28 段 B 连回几轮后的复盘): 看 Same top 没中的位是什么样, 回答"Same top 往 100% 推卡在哪"。
+    臂 ≥ 2 个(按链上先后), 每臂: 没中的位按 FP 对【真 token】的把握分桶 —— FP 自己猜中真 token 时 p = exp(-ref_nll) 就是 FP top-1 的概率;
+    FP 也没猜中真 token 的位单列(那里 FP 的 top-1 概率读不到)。首末两臂再对一次账: 修好几位 / 修坏几位 / 一直错几位, 与 KLD 按首臂十分位的变化。
+    为什么: 配对门只给均值差, 看不出"没中的位是 FP 自己都拿不准的近乎平票, 还是 FP 很笃定而学生错了" —— 前者推不动也不该推, 后者才是丢掉的能力。"""
+    import math
+    lst = [ln.split() for ln in open(a.paired) if ln.strip()]
+    arms = [(x.split("=", 1)[0], x.split("=", 1)[1]) for x in a.arms]
+    P = {}   # 臂 → [(kld, same, ref_hit, p_ref_true)]
+    for name, tpl in arms:
+        v = []
+        for sid, _, rg in lst:
+            R = load_rows(tpl.replace("{id}", sid))
+            for s, e in (tuple(map(int, x.split(":"))) for x in rg.split(",")):
+                v += [(R[p][1], R[p][3], R[p][4], math.exp(-R[p][8])) for p in range(max(0, s - 1), min(len(R), e - 1))]
+        P[name] = v
+    n = len(P[arms[0][0]])
+    if any(len(v) != n for v in P.values()): print("★各臂位置数对不上★"); return 2
+    def bucket(r): return "FP没猜中真token" if not r[2] else ("FP p<0.5" if r[3] < 0.5 else "FP 0.5~0.9" if r[3] < 0.9 else "FP p≥0.9")
+    BK = ["FP p≥0.9", "FP 0.5~0.9", "FP p<0.5", "FP没猜中真token"]
+    tot = {k: sum(1 for r in P[arms[0][0]] if bucket(r) == k) for k in BK}
+    print(f"== Same top 没中的位, 按 FP 对真 token 的把握分桶(共 {n} 位; 各桶总位数: " + " / ".join(f"{k} {tot[k]}" for k in BK) + ")")
+    for name, _ in arms:
+        v = P[name]; m = [r for r in v if not r[1]]; kt = sum(r[0] for r in v)
+        print(f"  {name}: Same {100*(n-len(m))/n:.2f}%  没中 {len(m)} 位(占总 KLD {100*sum(r[0] for r in m)/kt:.1f}%)  "
+              + " / ".join(f"{k} {sum(1 for r in m if bucket(r)==k)}({100*sum(1 for r in m if bucket(r)==k)/max(1,tot[k]):.1f}%)" for k in BK))
+    (f0, v0), (f1, v1) = (arms[0][0], P[arms[0][0]]), (arms[-1][0], P[arms[-1][0]])
+    print(f"== {f0} → {f1} 逐位对账(桶按 {f0} 的位定)")
+    for k in BK:
+        ix = [i for i in range(n) if bucket(v0[i]) == k]
+        fix = sum(1 for i in ix if not v0[i][1] and v1[i][1]); brk = sum(1 for i in ix if v0[i][1] and not v1[i][1]); both = sum(1 for i in ix if not v0[i][1] and not v1[i][1])
+        print(f"  {k:14s} 修好 {fix:4d}  修坏 {brk:4d}  净 {fix-brk:+5d}  一直错 {both:4d}")
+    o = sorted(range(n), key=lambda i: v0[i][0]); D = 10
+    print(f"== KLD 按 {f0} 的十分位: 首臂均值 → 末臂均值(Δ%), 末行是各分位对总 Δ 的贡献")
+    rows = []
+    for d in range(D):
+        ix = o[d * n // D:(d + 1) * n // D]; k0 = sum(v0[i][0] for i in ix) / len(ix); k1 = sum(v1[i][0] for i in ix) / len(ix)
+        rows.append((k0, k1, (k1 - k0) * len(ix) / n))
+    print("  " + "  ".join(f"d{d}:{k0:.3f}→{k1:.3f}({100*(k1-k0)/max(k0,1e-9):+.0f}%)" for d, (k0, k1, _) in enumerate(rows)))
+    print("  贡献 " + "  ".join(f"d{d}:{c:+.5f}" for d, (_, _, c) in enumerate(rows)) + f"  合计 {sum(c for *_, c in rows):+.5f}")
+    return 0
+
+
 def load_rows(path):
     """.rows 一行: 位置 kld Σmin same ref命中 stu命中 ref_argmax stu_argmax [ref_nll stu_nll [set质量ref set质量stu]](anchor_metrics --row-out)"""
     R = []
@@ -201,8 +291,18 @@ def main():
     ap.add_argument("--conf", action="store_true", help="再出一张按 FP 置信度分桶的表(要 .rows 带第 9 列; 判细节只看 p>0.9 与 0.5~0.9 两桶)")
     ap.add_argument("--list", help="多段合计模式: 清单(id 全长 生成段起点), 臂写成 名=带 {id} {n} 的 rows 模板; 配 --ids-dir")
     ap.add_argument("--ids-dir", help="--list 的 ids 目录(<id>.ids)")
+    ap.add_argument("--paired", help="配对模式: 清单(名 全长 起:止,…), 两臂 基=模板 新=模板(模板带 {id}), 逐位相减出 Δ ± 标准误")
+    ap.add_argument("--misses", action="store_true", help="配 --paired: Same top 没中的位按 FP 把握分桶 + 首末臂修好/修坏对账 + KLD 十分位(臂 ≥ 2, 按链上先后)")
+    ap.add_argument("--block", type=int, default=256, help="--paired 的标准误按几位一块")
+    ap.add_argument("--target", type=int, help="--paired 只数下一个 token 是这个 id 的位(配 --ids; 结束位尺: EOS = 1)")
     ap.add_argument("arms", nargs="*", help="名=rows 路径")
     a = ap.parse_args()
+    if a.paired and a.misses:
+        if len(a.arms) < 2: print("★--misses 要至少两臂(按链上先后)★"); return 2
+        return misses(a)
+    if a.paired:
+        if len(a.arms) != 2: print("★--paired 要恰好两臂: 基=模板 新=模板★"); return 2
+        return paired(a)
     tok = Tokenizer.from_file(os.path.join(a.hf, "tokenizer.json"))
     if a.close_set:   # 词表里所有"收尾"token("</" 开头): anchor_metrics --set 的料, A_open 处这组质量 = "本可以收却没收"的程度
         ids = [i for i in range(tok.get_vocab_size()) if tok.decode([i]).lstrip().startswith("</")]

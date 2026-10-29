@@ -129,6 +129,26 @@ def cmd_probe_echo(a):
     json.dump(res, open(a.probe + ".echo.json", "w", encoding="utf-8"), ensure_ascii=False)
 
 
+def cmd_probe_raw(a):
+    """裸续写探针(10-28 段 B 第一层"原始语料"): beta/completions 给一段裸前缀(源文件开头, 不套对话模板), 看它接出来像不像源文件、
+    逐位 top-20 是什么格式(旧式接口的 top_logprobs 是 字串→logprob, 可能没有 bytes)、字串能不能逐位对回 HF 词表 id。"""
+    key = open(a.key, encoding="utf-8").read().strip(); tok, b2id = hf_byte_table(a.hf)
+    body = {"model": a.model, "prompt": a.prompt.replace("\\n", "\n"), "max_tokens": a.max_tokens, "logprobs": 20, "temperature": 1.0}
+    t0 = time.time()
+    try:
+        with post(COMPLETIONS_URL, key, body, a.timeout) as r: res = json.load(r)
+    except urllib.error.HTTPError as e:
+        print(f"HTTP {e.code}: {e.read().decode('utf-8', 'replace')[:600]}"); return
+    ch = (res.get("choices") or [{}])[0]; lp = ch.get("logprobs") or {}
+    print(f"{time.time()-t0:.1f}s; usage {res.get('usage')}; finish {ch.get('finish_reason')}; logprobs 键 {list(lp.keys()) if isinstance(lp, dict) else type(lp)}")
+    toks, top = lp.get("tokens") or [], lp.get("top_logprobs") or []
+    print(f"tokens {len(toks)}; top_logprobs {len(top)} 条, 第一条类型 {type(top[0]).__name__ if top else None}: {str(top[0])[:300] if top else ''}")
+    miss = sum(1 for t in toks if t.encode("utf-8") not in b2id)
+    print(f"按 utf-8 字节查 HF 词表: tokens 里查不到 {miss}/{len(toks)}; 前 12 个 {toks[:12]}")
+    print("—— 续写原文 ——\n" + ch.get("text", "")[:1500])
+    json.dump(res, open(a.out, "w", encoding="utf-8"), ensure_ascii=False)
+
+
 def cmd_probe_hfcompare(a):
     """API 的分布和本仓判决尺的 FP 教师(v41_teacher.py, 出厂原件)是不是一回事: 五指标全锚在 HF 原件上, API 若是另一套精度/另一版权重, 拿它当教师会把 ③ 往错的锚拉。
     第一步(没有 --teacher-bin 或文件不在): 把 探针 json 还原成教师要吃的 id 串 = BOS + 部署同款模板 + API 的思考 token(bytes→id), 写 --ids, 外面拿 v41_teacher.py --ids --ntok --out 打 logits。
@@ -156,10 +176,12 @@ def cmd_probe_hfcompare(a):
           f"Σmin(top-20∪rest) 均 {smin.mean():.4f} 中位 {np.median(smin):.4f} p5 {np.percentile(smin, 5):.4f}; KL(HF‖API) 均 {kl.mean():.5f} 中位 {np.median(kl):.5f} p95 {np.percentile(kl, 95):.5f}")
 
 
-def stream_lp(key, model, q, max_tokens, timeout):
-    """一题流式拉完, 带 top-20; 返回 (reasoning, content, finish, usage, {列: [原始分布条…]})"""
+def stream_lp(key, model, q, max_tokens, timeout, think=True):
+    """一题流式拉完, 带 top-20; 返回 (reasoning, content, finish, usage, {列: [原始分布条…]})。
+    think=False: 关思考(thinking disabled, v41_api_parity.py 同写法), 官方直接从正文写起, 只有 content 一列 —— 10-28 段 B 自学习:
+    思考模式的料正文只占 11~13%, 编程尺量的却是原始代码"""
     body = {"model": model, "messages": [{"role": "user", "content": q}], "max_tokens": max_tokens, "logprobs": True, "top_logprobs": 20,
-            "stream": True, "stream_options": {"include_usage": True}}
+            "stream": True, "stream_options": {"include_usage": True}, **({} if think else {"thinking": {"type": "disabled"}})}
     ent = {"reasoning_content": [], "content": []}; txt = {"reasoning_content": [], "content": []}; usage = finish = None
     with post(API_URL, key, body, timeout) as r:
         for raw in r:
@@ -193,17 +215,39 @@ def realign(rec, tok, id2b):
         if t is not None: rec[f] = t
         align = align and t is not None and [r[0] for r in rows] == tok.encode(rec[f], add_special_tokens=False).ids
     rec["align_ok"] = align   # 只是记账: 偶有非规范切分(中文词边界, 198 条里 5 条各 1~2 处), ptf 按字节偏移对位, 那一两位写 one-hot, 整条不作废
-    rec["ok"] = rec.get("finish") == "stop" and bool(rec.get("reasoning")) and bool(rec.get("content"))
+    # 关思考的条没有思考段; 裸续写(raw)是文档不是回答, 写到 max_tokens 停(finish=length)也算一份完整料
+    rec["ok"] = (rec.get("finish") == "stop" or bool(rec.get("raw"))) and (bool(rec.get("reasoning")) or rec.get("think") is False) and bool(rec.get("content"))
     rec.setdefault("src", "api")   # think_trace_collect.py chunks 的清单要这个字段
     return rec
 
 
-def collect_one(key, model, item, max_tokens, timeout, tok, b2id, id2b):
+def raw_lp(key, model, prompt, max_tokens, timeout):
+    """裸续写(10-28 段 B 第一层"原始语料"): beta/completions 拿 prompt 当文档开头接着写, 不套对话模板 —— 两把尺(编程尺 = 裸源文件,
+    wt2 = 裸百科)量的都是这种"接续文档"的能力, 对话料里没有。返回与 stream_lp 同形(content 一列); 旧式接口的分布是 字串→logprob,
+    这里转成对话接口那种 {token, bytes, logprob, top_logprobs:[{token, bytes, logprob}]}, 后面 bytes→id 的路共用。"""
+    body = {"model": model, "prompt": prompt, "max_tokens": max_tokens, "logprobs": 20, "temperature": 1.0}
+    with post(COMPLETIONS_URL, key, body, timeout) as r: res = json.load(r)
+    ch = (res.get("choices") or [{}])[0]; lp = ch.get("logprobs") or {}
+    bt = lambda s: list(s.encode("utf-8"))
+    ent = [{"token": t, "bytes": bt(t), "logprob": l, "top_logprobs": [{"token": c, "bytes": bt(c), "logprob": v} for c, v in (top or {}).items()]}
+           for t, l, top in zip(lp.get("tokens") or [], lp.get("token_logprobs") or [], lp.get("top_logprobs") or [])]
+    return "", ch.get("text", ""), ch.get("finish_reason"), res.get("usage"), {"reasoning_content": [], "content": ent}
+
+
+def collect_one(key, model, item, max_tokens, timeout, tok, b2id, id2b, think=True, raw=False):
     delay = 5
     for attempt in range(5):
         try:
             t0 = time.time()
-            reasoning, content, finish, usage, ent = stream_lp(key, model, item["q"], max_tokens, timeout)
+            reasoning, content, finish, usage, ent = (raw_lp(key, model, item["q"], max_tokens, timeout) if raw
+                                                      else stream_lp(key, model, item["q"], max_tokens, timeout, think))
+            # 裸续写第一位就采到 EOS(0 位): 多数是温 1 采样本身(10-28 同一个开头三采一次), 同一个开头再采;
+            #   第三次起开头补一个换行 —— Go 的 "package x\n" 后面几乎总是空行, 词表里那是一个 "\n\n" token, 停在单个换行上它从没见过这种切法,
+            #   o004 四采全是 EOS; 补成 "\n\n" 结尾就是规范切分。实际发出去的开头写回 q(行的 prefix 用它, 与官方看到的逐字同)
+            for k in range(3 if raw and not ent["content"] else 0):
+                if k == 1: item = dict(item, q=item["q"] + "\n")
+                reasoning, content, finish, usage, ent = raw_lp(key, model, item["q"], max_tokens, timeout)
+                if ent["content"]: break
             lp = {}
             for k in ("reasoning_content", "content"):
                 rows = []
@@ -211,8 +255,8 @@ def collect_one(key, model, item, max_tokens, timeout, tok, b2id, id2b):
                     cid = [b2id.get(bytes(t["bytes"] or [])) for t in e.get("top_logprobs") or []]
                     rows.append([b2id.get(bytes(e["bytes"] or [])), e["logprob"], [c for c in cid if c is not None], [t["logprob"] for c, t in zip(cid, e["top_logprobs"]) if c is not None]])
                 lp[k] = rows
-            return realign(dict(item, reasoning=reasoning, content=content, finish=finish, usage=usage, model=model, effort="high",
-                                secs=round(time.time() - t0, 1), lp=lp), tok, id2b)
+            return realign(dict(item, reasoning=reasoning, content=content, finish=finish, usage=usage, model=model, effort="high" if think and not raw else "none",
+                                think=think and not raw, raw=raw, secs=round(time.time() - t0, 1), lp=lp), tok, id2b)
         # http.client.HTTPException(10-27 实撞): 流式读到一半上游断开抛 IncompleteRead, 它不是 OSError, 漏接就把整个 collect 进程打崩(52 道停在 46)
         except (urllib.error.HTTPError, urllib.error.URLError, OSError, json.JSONDecodeError, http.client.HTTPException) as e:
             msg = f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else type(e).__name__
@@ -238,7 +282,7 @@ def cmd_collect(a):
     print(f"collect: {len(qs)} 题, 已有 ok {len(done)}, 本次 {len(todo)}, {a.jobs} 路, max_tokens {a.max_tokens}", flush=True)
     lock = threading.Lock(); t0 = time.time(); nok = 0
     with open(a.out, "a", encoding="utf-8") as f, ThreadPoolExecutor(a.jobs) as ex:
-        futs = [ex.submit(collect_one, key, a.model, q, a.max_tokens, a.timeout, tok, b2id, id2b) for q in todo]
+        futs = [ex.submit(collect_one, key, a.model, q, a.max_tokens, a.timeout, tok, b2id, id2b, not a.no_think, a.raw) for q in todo]
         for i, fu in enumerate(as_completed(futs), 1):
             r = fu.result(); nok += bool(r["ok"])
             with lock: f.write(json.dumps(r, ensure_ascii=False) + "\n"); f.flush()
@@ -300,12 +344,16 @@ def cmd_ptf(a):
         o, p = [], 0
         for i in ids: o.append(p); p += len(id2b.get(i, b""))
         return o
+    # 每块备两个版本: 原文 / 去掉行尾空白(训练器读 text 行先 pt_rstrip 去尾部 ' '/'\n'/'\r', core_ptrain_data.c —— 块在序列末尾时导出的序列里就没有那个空白 token;
+    #   10-27 实撞: 思考头截在 2048 位、末位恰是 " \n" 的 28 条全对不上, 被迫走本地 FP 教师补表 18 分钟)。匹配先试原文再试去尾版。
     for t in traces:
         t["_blk"] = {}
         for k, text in (("reasoning_content", t["reasoning"]), ("content", t["content"])):
-            canon = tok.encode(text, add_special_tokens=False).ids; rows = t["lp"][k]
-            byoff = {o: r for o, r in zip(offs([r[0] for r in rows]), rows)}
-            t["_blk"][k] = (canon, [byoff.get(o) if (byoff.get(o) and byoff[o][0] == i) else None for o, i in zip(offs(canon), canon)])
+            rows = t["lp"][k]; byoff = {o: r for o, r in zip(offs([r[0] for r in rows]), rows)}; vs = []
+            for txt in dict.fromkeys([text, text.rstrip(" \r\n")]):
+                canon = tok.encode(txt, add_special_tokens=False).ids
+                vs.append((canon, [byoff.get(o) if (byoff.get(o) and byoff[o][0] == i) else None for o, i in zip(offs(canon), canon)]))
+            t["_blk"][k] = vs
     lines = [ln for ln in open(a.ids, encoding="utf-8") if ln.strip()]
     n = 0; used = set(); tot_rows = api_rows = onehot_mid = 0
     with open(a.out, "wb") as f, open(a.covered, "w", encoding="utf-8") as cf:
@@ -314,19 +362,23 @@ def cmd_ptf(a):
             seq = [int(x) for x in ln.split()]; hit = None
             for ti, t in enumerate(traces):
                 if ti in used: continue
-                rid, cid = t["_blk"]["reasoning_content"][0], t["_blk"]["content"][0]
-                pr = find_block(seq, rid)
-                if pr < 0: continue
-                pc = find_block(seq[pr + len(rid):], cid) if cid else -1
-                if cid and pc < 0: continue
-                hit = (ti, pr, pr + len(rid) + pc if cid else None); break
+                for rv in t["_blk"]["reasoning_content"]:
+                    for cv in t["_blk"]["content"]:
+                        rid, cid = rv[0], cv[0]
+                        pr = find_block(seq, rid)
+                        if pr < 0: continue
+                        pc = find_block(seq[pr + len(rid):], cid) if cid else -1
+                        if cid and pc < 0: continue
+                        hit = (ti, pr, pr + len(rid) + pc if cid else None, {"reasoning_content": rv, "content": cv}); break
+                    if hit: break
+                if hit: break
             if not hit: continue
-            ti, pr, pc = hit; used.add(ti); t = traces[ti]; L = len(seq)
+            ti, pr, pc, blk = hit; used.add(ti); t = traces[ti]; L = len(seq)
             top_id = np.full((L - 1, K), -1, np.int32); top_p = np.zeros((L - 1, K), np.float32); rest = np.zeros(L - 1, np.float32)
             top_id[:, 0] = seq[1:]; top_p[:, 0] = 1.0   # 默认 one-hot(模板 / </think> / EOS 这些 API 不给分布的位, 以及对不上的位)
             for p0, k in ((pr, "reasoning_content"), (pc, "content")):
                 if p0 is None: continue
-                for j, r in enumerate(t["_blk"][k][1]):
+                for j, r in enumerate(blk[k][1]):
                     if r is None: onehot_mid += 1; continue
                     i = p0 + j - 1; ids, lps = r[2][:K], r[3][:K]; ps = np.exp(np.array(lps, np.float64))
                     top_id[i] = -1; top_p[i] = 0; top_id[i, :len(ids)] = ids; top_p[i, :len(ids)] = ps; rest[i] = max(0.0, 1.0 - ps.sum()); api_rows += 1
@@ -335,6 +387,46 @@ def cmd_ptf(a):
         f.seek(0); f.write(struct.pack("<III", 0x31465450, K, n))
     print(f"ptf: 导出序列 {len(lines)} 条, 对上 API 轨迹 {n} 条(轨迹 ok {len(traces)} 条) → {a.out}; 行 {tot_rows}, 其中 API 分布 {api_rows} / one-hot {tot_rows - api_rows}"
           f"(块内切分对不上的 {onehot_mid} 位); 覆盖清单 {a.covered}")
+
+
+def cmd_simids(a):
+    """训练行 → 模拟训练器 dumpids 导出的序列(BOS + text 去尾部空白 + EOS(eos 不是 false 时)), 一行一条: 发车前拿它跑 ptf, 先证明教师表配得上。
+    为什么(10-28): 配不上的序列会落到本地 FP 教师补表(流式装 476 GB 原件, 一份 ~18 分钟), 一轮的训练超时扛不住; 等到训练链里才发现就晚了。
+    prefix 行(10-28): BOS + prefix 自己分词 + text 自己分词再拼(训练器 pt_add_text 同一分界: 两段各自分词, 不跨界合并)。
+    HF 分词与 ds4 分词器在 DS4 特殊 token 上一致(10-20 金标)。段 B 自学习的判决序列也由它出(与训练器看到的序列同一种渲染)。"""
+    from tokenizers import Tokenizer
+    tok = Tokenizer.from_file(os.path.join(a.hf, "tokenizer.json")); bos, eos = tok.token_to_id("<｜begin▁of▁sentence｜>"), tok.token_to_id(EOS)
+    n = 0
+    with open(a.out, "w") as f:
+        for r in (json.loads(l) for l in open(a.rows, encoding="utf-8") if l.strip()):
+            if "text" not in r: continue
+            pre = tok.encode(r["prefix"], add_special_tokens=False).ids if "prefix" in r else []
+            ids = [bos] + pre + tok.encode(r["text"].rstrip(" \r\n"), add_special_tokens=False).ids + ([eos] if r.get("eos", True) else [])
+            f.write(" ".join(map(str, ids)) + "\n"); n += 1
+    print(f"simids: {n} 条 → {a.out}")
+
+
+def cmd_miss(a):
+    """ptf 没对上的序列(--ids 是 posttrain_fp 切出来的剩余份, 如 teacher.part.002)逐条查: 在 raw 里找思考块最长公共前缀的那条轨迹, 打出在第几位分叉、两边各是什么字节。
+    为什么(10-27): v6 有 28 条没对上, 被迫走本地 FP 教师补表 18 分钟 —— 一小时一轮扛不住, 先找对不上的根子。"""
+    tok, b2id = hf_byte_table(a.hf); id2b = {i: b for b, i in b2id.items()}
+    traces = [t for t in (json.loads(l) for l in open(a.raw, encoding="utf-8")) if t.get("ok") and t.get("lp")]
+    blks = [(t["id"], tok.encode(t["reasoning"], add_special_tokens=False).ids) for t in traces]
+    for n, ln in enumerate(l for l in open(a.ids, encoding="utf-8") if l.strip()):
+        if n >= a.n: break
+        seq = [int(x) for x in ln.split()]; best = (0, None, 0, 0)
+        for tid, blk in blks:   # 用思考块前 8 位定锚, 再量从锚起能一路对上多少位
+            for p in range(len(seq) - 8):
+                if seq[p:p + 8] == blk[:8]:
+                    k = 0
+                    while k < len(blk) and p + k < len(seq) and seq[p + k] == blk[k]: k += 1
+                    if k > best[0]: best = (k, tid, p, len(blk))
+                    break
+        k, tid, p, L = best
+        if tid is None: print(f"  序列 {n}: 长 {len(seq)}, 没有任何轨迹的思考块开头出现在里面; 头 {b''.join(id2b.get(i, b'?') for i in seq[:40])[:120]!r}"); continue
+        blk = dict(blks)[tid]
+        print(f"  序列 {n}: 长 {len(seq)}, 最像 {tid}: 从 {p} 起对上 {k}/{L} 位" + ("" if k >= L else
+              f"; 分叉处 序列 {[id2b.get(i, b'?') for i in seq[p + k - 1:p + k + 3]]} | 轨迹 {[id2b.get(i, b'?') for i in blk[k - 1:k + 3]]}"))
 
 
 def main():
@@ -346,16 +438,22 @@ def main():
     e = sp.add_parser("probe-echo"); e.add_argument("--key", required=True); e.add_argument("--probe", required=True)
     e.add_argument("--model", default="deepseek-flash"); e.add_argument("--max-tokens", type=int, default=4); e.add_argument("--timeout", type=int, default=600)
     e.add_argument("--echo", action="store_true"); e.add_argument("--with-content", action="store_true")
+    pr = sp.add_parser("probe-raw"); pr.add_argument("--key", required=True); pr.add_argument("--hf", required=True); pr.add_argument("--prompt", required=True); pr.add_argument("--out", required=True)
+    pr.add_argument("--model", default="deepseek-flash"); pr.add_argument("--max-tokens", type=int, default=300); pr.add_argument("--timeout", type=int, default=600)
     h = sp.add_parser("probe-hfcompare"); h.add_argument("--hf", required=True); h.add_argument("--probe", required=True); h.add_argument("--ids", required=True); h.add_argument("--teacher-bin")
     c = sp.add_parser("collect"); c.add_argument("--key", required=True); c.add_argument("--questions", required=True); c.add_argument("--out", required=True); c.add_argument("--hf", required=True)
     c.add_argument("--model", default="deepseek-flash"); c.add_argument("--max-tokens", type=int, default=65536); c.add_argument("--jobs", type=int, default=4); c.add_argument("--timeout", type=int, default=3600)
+    c.add_argument("--no-think", action="store_true", help="关思考: 官方直接写正文(料几乎全是代码), 行里记 think:false, chunks 按非思考模板渲染")
+    c.add_argument("--raw", action="store_true", help="裸续写: 题单的 q 是文档开头(不套对话模板), 走 beta/completions; 行里记 raw:true, 写到上限停也算 ok")
     t = sp.add_parser("ptf"); t.add_argument("--ids", required=True); t.add_argument("--raw", required=True); t.add_argument("--out", required=True); t.add_argument("--covered", required=True)
     t.add_argument("--topk", type=int, default=20); t.add_argument("--hf", required=True)
+    si = sp.add_parser("simids"); si.add_argument("--rows", required=True); si.add_argument("--hf", required=True); si.add_argument("--out", required=True)
+    ms = sp.add_parser("miss"); ms.add_argument("--ids", required=True); ms.add_argument("--raw", required=True); ms.add_argument("--hf", required=True); ms.add_argument("--n", type=int, default=30)
     da = sp.add_parser("diffalign"); da.add_argument("--raw", required=True); da.add_argument("--hf", required=True); da.add_argument("--n", type=int, default=4)
     fx = sp.add_parser("fixtext"); fx.add_argument("--raw", required=True); fx.add_argument("--hf", required=True)
     a = ap.parse_args()
-    {"probe-logprobs": cmd_probe_logprobs, "probe-align": cmd_probe_align, "probe-echo": cmd_probe_echo, "probe-hfcompare": cmd_probe_hfcompare,
-     "collect": cmd_collect, "ptf": cmd_ptf, "diffalign": cmd_diffalign, "fixtext": cmd_fixtext}[a.cmd](a)
+    {"probe-logprobs": cmd_probe_logprobs, "probe-raw": cmd_probe_raw, "probe-align": cmd_probe_align, "probe-echo": cmd_probe_echo, "probe-hfcompare": cmd_probe_hfcompare,
+     "collect": cmd_collect, "ptf": cmd_ptf, "diffalign": cmd_diffalign, "fixtext": cmd_fixtext, "miss": cmd_miss, "simids": cmd_simids}[a.cmd](a)
 
 
 if __name__ == "__main__":
