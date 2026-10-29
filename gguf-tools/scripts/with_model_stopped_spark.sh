@@ -2,6 +2,7 @@
 # with_model_stopped_spark.sh — 停下工作台的空闲模型子进程, 跑一条命令, 跑完按 gguf/serve_pick.txt 把模型装回(2026-10-20 固化)。
 #
 # 怎么用: gguf-tools/scripts/with_model_stopped_spark.sh <命令...>        (在 ~/ds4-main 下, 工作台 ds4-train :8000 开着)
+#        gguf-tools/scripts/with_model_stopped_spark.sh --load           只按 serve_pick.txt 装回(模型不在时用)
 #   例: with_model_stopped_spark.sh bash -c 'gguf-tools/scripts/v41_judge.sh … ; speed-bench/decoder_replay_scan_spark.sh …'
 # 为什么要它: 判决尺(v41_judge.sh)、探针、A/B 都要 113 GB 的机器空出来, 10-17 起每个脚本各抄一份"停子进程 → 干活 → 装回"
 #   (kernel_ab_spark.sh / model_restart_spark.sh / decoder_replay_scan_spark.sh 三处同一段), 这里收成一处; 被包的脚本再碰到"模型没在跑"
@@ -24,6 +25,8 @@ restore_model() {
     M "装回 $pg + $pz → $resp"
 }
 
+# --load: 只装回(不停、不跑命令)。为什么(10-28): 包着训练的这一层被一起杀掉时没机会装回, 模型就一直不在; 调用方(自学习脚本的退出保护)拷回段 B 后用它装
+[ "$1" = --load ] && { restore_model; exit 0; }
 st=$(curl -s --noproxy '*' --max-time 5 127.0.0.1:8001/metrics | tr ',' '\n' | grep -o '"state":"[a-z]*"' | head -1)
 [ -z "$st" ] || [ "$st" = '"state":"idle"' ] || { M "★模型子进程 $st, 不是 idle, 不停★"; exit 1; }
 stopped=0

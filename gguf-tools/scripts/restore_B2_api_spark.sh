@@ -14,7 +14,11 @@ ROOT="$HOME/ds4-main"; cd "$ROOT" || exit 1
 FROM=1; TO=4; OCFG=""; OPCFG=""
 # --cfg / --pcfg: 换正式/探针配方(10-25 晚: ctxlen 前缀形态用 restore_B2ctx_*.cfg, 料已在盘上就 --from 2 跳过 ①)
 TRAW=""   # --teacher-raw raw.jsonl(10-26): ③ 改走 posttrain_fp_spark.sh, 靶 = 官方 API top-20 软靶(api_teacher.py collect 的原料), 不再 one-hot; 保持料由本地 FP 教师补
-while [ $# -gt 0 ]; do case "$1" in --from) FROM="${2:?}"; shift 2;; --to) TO="${2:?}"; shift 2;; --cfg) OCFG="${2:?}"; shift 2;; --pcfg) OPCFG="${2:?}"; shift 2;; --teacher-raw) TRAW="${2:?}"; shift 2;; *) echo "★不认识的参数 $1★"; exit 2;; esac; done
+# --tmo-train / --tmo-judge <分钟>(10-27 自进化): ③ 训练(含教师打表)与 ④ 段 C 的硬超时, 都套在 with_model_stopped 里面; --heldout <目录|none> / --pelseg 0 透传给段 C
+TMOT=""; TMOJ=""; HOARG=()
+while [ $# -gt 0 ]; do case "$1" in --from) FROM="${2:?}"; shift 2;; --to) TO="${2:?}"; shift 2;; --cfg) OCFG="${2:?}"; shift 2;; --pcfg) OPCFG="${2:?}"; shift 2;; --teacher-raw) TRAW="${2:?}"; shift 2;;
+    --tmo-train) TMOT="${2:?}"; shift 2;; --tmo-judge) TMOJ="${2:?}"; shift 2;; --heldout) HOARG+=(--heldout "${2:?}"); shift 2;; --pelseg) HOARG+=(--pelseg "${2:?}"); shift 2;; *) echo "★不认识的参数 $1★"; exit 2;; esac; done
+TT=(); [ -n "$TMOT" ] && TT=(timeout --kill-after=60 "${TMOT}m")
 # --to N: 只跑到第 N 步就停(先单跑 ② 探针看一窗多少秒, 再决定正式趟料的窗数)
 stage(){ [ "$FROM" -le "$1" ] && [ "$TO" -ge "$1" ]; }
 PY="$HOME/v41env/bin/python"
@@ -64,17 +68,18 @@ if stage 3; then
     if [ -n "$TRAW" ]; then
         [ -s "$TRAW" ] || die "API 教师原料 $TRAW 不在"
         # posttrain_fp_spark.sh 自己分三阶段(导序列 → API 表 + 本地 FP 教师补缺 → 训), 整个在停模型下跑; 它的 train.out 也落在 $OUT
-        "$W" gguf-tools/scripts/posttrain_fp_spark.sh "$CFG" "$HF" "$ARM" "" "" "$TRAW" > "$OUT/fp_chain.log" 2>&1; rc=$?
+        "$W" "${TT[@]}" gguf-tools/scripts/posttrain_fp_spark.sh "$CFG" "$HF" "$ARM" "" "" "$TRAW" > "$OUT/fp_chain.log" 2>&1; rc=$?
         grep -E "^\[ptfp|★" "$OUT/fp_chain.log" | tail -14
     else
-        "$W" bash -c "${DS4[*]} --ptrain $CFG > $OUT/train.out 2>&1"; rc=$?
+        "$W" "${TT[@]}" bash -c "${DS4[*]} --ptrain $CFG > $OUT/train.out 2>&1"; rc=$?
     fi
+    [ "$rc" = 124 ] && die "③ 训练超时(${TMOT} 分钟; 看 $OUT/train.out 停在哪一步)"
     grep -E "ptrain\]|★|错|失败|epoch|held" "$OUT/train.out" | tail -12
     [ "$rc" = 0 ] && ls "$OUT"/ckpt_e*/amp_L00.bin >/dev/null 2>&1 || die "正式趟 rc=$rc(看 $OUT/train.out)"
     for h in "$OUT"/heldout_e*.tsv; do [ -s "$h" ] && echo "  $(basename "$h") 留出损失 $(awk -F'\t' '{s+=$4; n++} END{if(n) printf "%.4f", s/n}' "$h")"; done
 fi
 if stage 4; then
     M "④ 选轮 + 并进侧车 + 段 C 报数(restore_sidecar_chain_spark.sh --from C)"
-    bash gguf-tools/scripts/restore_sidecar_chain_spark.sh --from C --cfg "$CFG" || die "段 C 失败"
+    bash gguf-tools/scripts/restore_sidecar_chain_spark.sh --from C --cfg "$CFG" "${HOARG[@]}" ${TMOJ:+--tmo-judge "$TMOJ"} || die "段 C 失败"
 fi
 M "完成"; echo "B2API_EXIT 0"

@@ -17,9 +17,12 @@ ROOT="$HOME/ds4-main"; cd "$ROOT" || exit 1
 #   --judge-only(10-27): 只跑段 C 的判决, 不选轮不并包 —— 量"现在侧车目录里这套"的基线(发新一趟训练前, 先看现役在留出题上涨没涨)。
 #   --heldout <目录>(10-27, 泛化留出尺): 目录里 list.txt(id 全长 生成段起点) + <id>.ids(think_trace_collect.py ids 产出); 每段过两臂,
 #     末尾 judge_rows_tokclass.py --list 合成一张表。训练料里一道都没有的题: 这里涨 = 泛化, 只在鹈鹕涨 = 定向。缺省 gguf/go-onebit/code/svgheld, 没有 list.txt 就跳过。
-FROM="A"; PICK=""; CFG="gguf-tools/data/posttrain/restore_B_1024.cfg"; JONLY=0; HO="gguf/go-onebit/code/svgheld"
+#   --tmo-judge <分钟>(10-27 自进化一轮一小时): 段 C 判决的硬超时, 套在 with_model_stopped 里面(套外面会连包装层一起杀, 模型装不回来);
+#     超时 = rc 124 停链报出来, 不重试 —— 判决超时说明哪一段比预想的长, 要查, 不是再等一遍。
+#   --pelseg 0(10-27 自进化): 不判鹈鹕设计推理四段 —— 用户: 鹈鹕只是例子, 要的是整个模型能力的还原; 一轮里的细节尺改用编程判决份按 FP 置信度分桶。
+FROM="A"; PICK=""; CFG="gguf-tools/data/posttrain/restore_B_1024.cfg"; JONLY=0; HO="gguf/go-onebit/code/svgheld"; TMOJ=""; PELSEG=1
 while [ $# -gt 0 ]; do case "$1" in --from) FROM="${2:?}"; shift 2;; --pick) PICK="${2:?}"; shift 2;; --cfg) CFG="${2:?}"; shift 2;;
-    --judge-only) JONLY=1; FROM=C; shift;; --heldout) HO="${2:?}"; shift 2;; *) echo "★不认识的参数 $1★"; exit 2;; esac; done
+    --judge-only) JONLY=1; FROM=C; shift;; --heldout) HO="${2:?}"; shift 2;; --tmo-judge) TMOJ="${2:?}"; shift 2;; --pelseg) PELSEG="${2:?}"; shift 2;; *) echo "★不认识的参数 $1★"; exit 2;; esac; done
 HF="hf/DeepSeek-V4.1-Flash-1017"
 mapfile -t PK < gguf/serve_pick.txt; GG="${PK[0]#"$ROOT"/}"; DEP="${PK[1]:-}"; DEP="${DEP#"$ROOT"/}"
 ARM="gguf/v41/$(basename "$GG" .gguf)-grrb-restore_fit_n15360-engine"
@@ -55,6 +58,9 @@ elif stage_ge C; then
   if [ -z "$PICK" ]; then
     # 选轮 = 留出损失最低的轮(train.log 的 epoch 行; 格式与工作台 model_train_pick.c 读的同一份), 抓不到就要显式 --pick
     PICK=$(ls -d "$BOUT"/ckpt_e* 2>/dev/null | while read -r d; do e=$(basename "$d"); h=$(ls -t "$BOUT"/heldout_e"${e#ckpt_e}".tsv 2>/dev/null | head -1); [ -s "$h" ] && echo "$(awk -F'\t' '{s+=$4; n++} END{if(n) printf "%.6f", s/n}' "$h") $e"; done | sort -n | head -1 | awk '{print $2}')
+    # 给了 eval=(泛化留出)时料不再留出, heldout_eNN.tsv 是空的(10-28 自进化第一轮): 按 train.log 每轮的 gen_kl 取最低; 只有一轮就是它
+    [ -z "$PICK" ] && PICK=$(awk '/^epoch /{for(i=1;i<NF;i++) if($i=="gen_kl") printf "%s ckpt_e%02d\n", $(i+1), $2}' "$BOUT/train.log" 2>/dev/null | sort -n | head -1 | awk '{print $2}')
+    [ -z "$PICK" ] && [ "$(ls -d "$BOUT"/ckpt_e* 2>/dev/null | wc -l)" = 1 ] && PICK=$(basename "$(ls -d "$BOUT"/ckpt_e*)")
   fi
   [ -n "$PICK" ] && [ -s "$BOUT/$PICK/amp_L00.bin" ] || die "段 C 选不出轮(--pick ckpt_eNN 显式给; 现有: $(ls "$BOUT" 2>/dev/null | tr '\n' ' '))"
   # ★并进侧车★(用户 10-24: 没有决策位单独目录, 两段是同一个产物): 选中轮的 amp_Lnn.bin 拷到侧车目录根, 引擎挂 --zchain 时自己读(core_v41_amp.c:292, 零改动)。
@@ -71,14 +77,17 @@ if stage_ge C; then
   #   基线(段 B 第一趟的侧车)77.1 / 76.3 / 78.2 / —; 这是"path 少一半"的直接尺, 编程判决份与 wt2 守不退。
   M "段 C 终判: 编程判决份 + wt2 + 设计推理四段, 两臂: 裸 / 还原侧车(整目录)"
   J="gguf-tools/scripts/v41_judge.sh"; PEL="gguf/go-onebit/code/pelican"; TC="gguf-tools/scripts/judge_rows_tokclass.py"
-  bash gguf-tools/scripts/with_model_stopped_spark.sh bash -c "
+  PSEG="think_off1_b2:10326 think_off1_b6:10926 think_off1_b5:16862 think_off2_b3:25475"; [ "$PELSEG" = 0 ] && PSEG=""
+  TJ=(); [ -n "$TMOJ" ] && TJ=(timeout --kill-after=60 "${TMOJ}m")
+  bash gguf-tools/scripts/with_model_stopped_spark.sh "${TJ[@]}" bash -c "
     bash $J gguf/go-onebit/code/judge.ids 15360 --hf $HF engine:$GG engine:$GG:$ARM &&
     bash $J gguf/go-onebit/g7/wt2.ids 512 --hf $HF engine:$GG engine:$GG:$ARM &&
-    for s in think_off1_b2:10326 think_off1_b6:10926 think_off1_b5:16862 think_off2_b3:25475; do bash $J $PEL/\${s%%:*}.ids \${s##*:} --hf $HF engine:$GG engine:$GG:$ARM || exit 1; done &&
-    for s in $HOL; do bash $J $HO/\${s%%:*}.ids \${s##*:} --hf $HF engine:$GG engine:$GG:$ARM || exit 1; done" || die "段 C 判决失败"
+    for s in $PSEG; do bash $J $PEL/\${s%%:*}.ids \${s##*:} --hf $HF engine:$GG engine:$GG:$ARM || exit 1; done &&
+    for s in $HOL; do bash $J $HO/\${s%%:*}.ids \${s##*:} --hf $HF engine:$GG engine:$GG:$ARM || exit 1; done"; rc=$?
+  [ "$rc" = 124 ] && die "段 C 判决超时(${TMOJ} 分钟)"; [ "$rc" = 0 ] || die "段 C 判决失败"
   M "段 C 读数(Same top / KLD, 裸 / 侧车):"; grep -h -E "Same top|Mean KLD" gguf/v41judge/log_stu_code_judge_n15360_eng*"$(basename "$GG" .gguf)"*.txt 2>/dev/null | tail -4
   GB="$(basename "$GG" .gguf)"; AB="$(basename "$ARM")"
-  for s in think_off1_b2:10326 think_off1_b6:10926 think_off1_b5:16862 think_off2_b3:25475; do
+  for s in $PSEG; do
     n="${s%%:*}"; k="${s##*:}"; TAG="pelican_${n}_n$k"
     M "设计推理 $n 生成段(6569 起):"
     # --conf(10-26 晚): 按 FP 置信度分桶 —— 细节错只看 p>0.9 / 0.5~0.9 两桶的"错 top-1", 总 Same top 被 FP 自己也多选的 p<0.5 桶撑着
