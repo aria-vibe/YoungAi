@@ -24,6 +24,16 @@
 #        写 evo/plan_next_raw.json(与任务层的 plan_next.json 分开); 下一轮 --raw 照它跑(10-28 用户: 每轮的下一步由官方 API 裁决和建议) —— 两把尺本来就都是裸文档
 #     为什么: 现役在官方的对话回答上对官方 KL 只有 0.044~0.075, 在裸源文件上对原件 0.249; 对话料练十一轮, 两把裸文档尺一次都没降过 2 SE
 #     例: nohup bash … --raw --work gguf/go-onebit/evo/o001 --to 5 > /tmp/bugmd/api_o001.log 2>&1 &
+#   --dec 第二层"决策位"(10-29 用户: 第一层裸语料推到编程 Same top 84.97 之后, 接着现役段 B 训第二阶段 —— 同样的编程题域, 料换成带决策位的形态:
+#     思考 → </think> → 正文 → EOS; 尺还是编程 + wt2 两把, ★不设门只报数★(用户: "就算回退也不一定是坏事, 因为决策更好了"), 训完挂着, 接 dsh 鹈鹕看效果):
+#     ① 官方出 --q 道编程题 → 两件事并行: (a) 官方【开思考】作答(逐位 top-20; </think> / EOS 两位 API 不给分布, 配表时 one-hot)
+#        (b) 现役侧车自己想同一批题(服务开着, think_freegen_probe, 上限 32768)→ 每 8192 位切一个分支点, 官方从学生前缀接着想到收口(api_branch.py, 续 ≤32768)
+#        为什么要 (b): 收不了口是曝光偏差 —— 学生走到两万位后进了官方没去过的区域, 官方自己的轨迹上没有一位教它回来; 10-26 v4b 加了分支续写,
+#        学生自由生成 17/18 收口、鹈鹕 2/2 自收手(fable5 10-27)。学生前缀只当上下文零梯度(prefix 行), 靶全是官方的 ⇒ 不碰 09-30 "禁自吐当靶"
+#     ② 料 = 官方整条轨迹一行(头进 prefix, 收口条 eos:true)+ 分支行; ③ 同第一层(--restore-b, ctxlen 65536 前缀形态, 尾窗 1024 反传);
+#        train.log 多一行 "decision eNN kl … n … tp …" = 料里目标是 EOS/</think> 的位的 KL(core_restoreb.c rb_dec_log), 第二层动没动决策位看它
+#     ⑤ 不回退: 新段 B 留在侧车上, 账本去留列记 keep(dec); 现役在 <work>/init, 要撤就 restore_init。⑥ 复盘本轮不跑(计划分层只有 raw / task)
+#     例: nohup bash … --dec --q 4 --beh 0 --work gguf/go-onebit/evo/d001 --why "…" > /tmp/bugmd/api_d001.log 2>&1 &
 #   --why "…" 本轮改了什么、为什么会变好(10-28 用户: "每次跑下一轮一定要有理由输出, 现在改了什么为什么会变好"): 发车第一行打出来, 存 <work>/why.txt、账本第 20 列;
 #     没给就用任务层计划(plan_in.json)里官方复盘写的 why; 两个都没有不发车
 #   训练参数(10-28 用户: "复盘不能仅限于训练语料, 训练参数也很重要, 都要复盘, 脚本里动态获取"): ⑥ 官方复盘连料带参数一起定, 写进计划的 train 对象
@@ -58,13 +68,15 @@
 # 出错会怎样: 训练/判决半路失败 → 侧车换回 init 重装, 现役不受影响; 超时 = rc 124 停车报出来, 不重试(超时说明哪段比预想的长, 要查)。
 set -uo pipefail
 ROOT="$HOME/ds4-main"; cd "$ROOT" || exit 1
-FROM=0; TO=7; WORK=""; Q=""; INIT=cur; BEH=1; LR=""; JMODE=""; BUDGET=60; RANK=""; GAP=""; REST=""; RAWM=0; RAWTOK=""; WHYRUN=""; EPOCHS=""; BATCH=""; MAXLEN=""
-declare -A TMO=([q]=5 [collect]=25 [train]="" [judge]=30 [beh]=20 [review]=10 [plan]=15)
+FROM=0; TO=7; WORK=""; Q=""; INIT=cur; BEH=1; LR=""; JMODE=""; BUDGET=60; RANK=""; GAP=""; REST=""; RAWM=0; DECM=0; RAWTOK=""; WHYRUN=""; EPOCHS=""; BATCH=""; MAXLEN=""
+# student 30 = 4 题 × 32768 位上限 @45 t/s 两路; branch = 官方续 ≤32768 位 @170 tok/s 六路
+declare -A TMO=([q]=5 [collect]=25 [student]=30 [branch]=15 [train]="" [judge]=30 [beh]=20 [review]=10 [plan]=15)
 while [ $# -gt 0 ]; do case "$1" in
-    --work) WORK="${2:?}"; shift 2;; --budget) BUDGET="${2:?}"; shift 2;; --rank) RANK="${2:?}"; shift 2;; --gap) GAP="${2:?}"; shift 2;; --rest) REST="${2:?}"; shift 2;; --raw) RAWM=1; shift;; --why) WHYRUN="${2:?}"; shift 2;; --raw-tok) RAWTOK="${2:?}"; shift 2;; --epochs) EPOCHS="${2:?}"; shift 2;; --batch) BATCH="${2:?}"; shift 2;; --maxlen) MAXLEN="${2:?}"; shift 2;; --q) Q="${2:?}"; shift 2;; --init) INIT="${2:?}"; shift 2;; --beh) BEH="${2:?}"; shift 2;;
+    --work) WORK="${2:?}"; shift 2;; --budget) BUDGET="${2:?}"; shift 2;; --rank) RANK="${2:?}"; shift 2;; --gap) GAP="${2:?}"; shift 2;; --rest) REST="${2:?}"; shift 2;; --raw) RAWM=1; shift;; --dec) DECM=1; shift;; --why) WHYRUN="${2:?}"; shift 2;; --raw-tok) RAWTOK="${2:?}"; shift 2;; --epochs) EPOCHS="${2:?}"; shift 2;; --batch) BATCH="${2:?}"; shift 2;; --maxlen) MAXLEN="${2:?}"; shift 2;; --q) Q="${2:?}"; shift 2;; --init) INIT="${2:?}"; shift 2;; --beh) BEH="${2:?}"; shift 2;;
     --from) FROM="${2:?}"; shift 2;; --to) TO="${2:?}"; shift 2;; --lr) LR="${2:?}"; shift 2;; --tmo) TMO[${2%%=*}]="${2#*=}"; shift 2;;
     --_judge) JMODE="${2:?}"; shift 2;;   # 内部: 停模型包装里回调自己, 把现在侧车判一遍存到这个目录
     *) echo "★不认识的参数 $1★"; exit 2;; esac; done
+[ "$RAWM$DECM" != 11 ] || { echo "★--raw 与 --dec 是两层, 一轮只跑一层★"; exit 2; }
 PY="$HOME/v41env/bin/python"; HF=hf/DeepSeek-V4.1-Flash-1017; PD=gguf-tools/data/posttrain; KEY=$PD/deepseek_api.key
 EVO=gguf/go-onebit/evo; HOLD=$EVO/hold; FR=$EVO/fprows; W=gguf-tools/scripts/with_model_stopped_spark.sh
 TTC=gguf-tools/scripts/think_trace_collect.py; APT=gguf-tools/scripts/api_teacher.py
@@ -101,7 +113,7 @@ LIVEK=$(od -An -t d4 -j 4 -N 4 "$ARM/amp_L00.bin" 2>/dev/null | tr -d " "); [ -n
 if [ -n "$RANK" ]; then [ "$RANK" -ge "$LIVEK" ] || die "--rank $RANK 比现役的秩 $LIVEK 小(训练器只接扩秩续训)"; [ "$RANK" = "$LIVEK" ] || TAG="$TAG-r$RANK"; else RANK=$LIVEK; fi
 # 本轮按哪份计划跑: 第一次进 ① 时把上一轮复盘出的 evo/plan_next.json 抄成 <work>/plan_in.json, 之后分段重跑都读这一份(下一轮复盘改了 plan_next 也不串)
 # 两层各一份计划(第一层 = plan_next_raw.json, 任务层 = plan_next.json), 互不串
-PNEXT=$EVO/plan_next$([ "$RAWM" = 1 ] && echo _raw).json
+PNEXT=$EVO/plan_next$([ "$RAWM" = 1 ] && echo _raw; [ "$DECM" = 1 ] && echo _dec).json   # 第二层还没有复盘, plan_next_dec.json 不存在 = 不读任务层的旧计划
 PIN=$WORK/plan_in.json; { [ "$FROM" -le 1 ] && [ ! -s "$PIN" ] && [ -s "$PNEXT" ]; } && cp "$PNEXT" "$PIN"
 PLANG=(); PBRIEF=""
 if [ -s "$PIN" ]; then
@@ -128,8 +140,9 @@ CK=ckpt_e$(printf %02d "$EPOCHS")   # 最后一遍的检查点(③ 每遍落一�
 PARAMSJ="{\"lr\": $LR, \"epochs\": $EPOCHS, \"batch\": $BATCH, \"maxlen\": $MAXLEN, \"gap\": $GAP, \"rest\": $REST$([ "$RAWM" = 1 ] && echo ", \"raw_tok\": $RAWTOK")}"
 M "本轮训练参数: $PARAMSJ"
 # 训练时长跟着题数走: 4 道 ≈ 22 步 × 26 s + 装载与首末评估 ≈ 16 分钟; 留一倍余量。超时 = 查哪段变慢, 不是加时
-[ -n "${TMO[train]}" ] || TMO[train]=$((30 + 8 * Q * (RAWM ? 8 : 1) * EPOCHS))   # 裸续写: 每种语言 Q 个 × 30 种 ≈ 8 道题的料
+[ -n "${TMO[train]}" ] || TMO[train]=$((30 + 8 * Q * (RAWM ? 8 : DECM ? 4 : 1) * EPOCHS))   # 裸续写: 每种语言 Q 个 × 30 种 ≈ 8 道题的料; 决策位: 思考轨迹 + 分支 ≈ 4 倍正文料
 OUT=gguf/v41/posttrain/restore-api-$TAG; DATA=$WORK/rows.jsonl; RAW=$WORK/api_raw.jsonl; QJ=$WORK/q.jsonl
+STU=$WORK/student.jsonl; BRRAW=$WORK/branch_raw.jsonl; BRROW=$WORK/branch_rows.jsonl; LPRAW=$WORK/lp_raw.jsonl   # --dec: 学生轨迹 / 分支续写原料 / 分支训练行 / 配表用的教师原料(官方轨迹 + 分支)
 printf 'code 15360 0:15360\n' > "$FR/code.lst"; printf 'wt2 512 0:512\n' > "$FR/wt2.lst"
 # 门半边 / 报数半边(见头注释 ⑤): 按 layout 的窗交替分, 每种语言第 1/3 窗进门、第 2/4 窗只报数
 grep -v '^#' gguf/go-onebit/code/judge.ids.layout | awk -v o="$FR" '$1 == "win" {W = $2; next} NF == 3 {for (k = 0; k < int($3 / W); k++) {s = $2 + k * W; r = s ":" s + W; if (k % 2 == 0) g = g (g ? "," : "") r; else h = h (h ? "," : "") r}}
@@ -181,7 +194,7 @@ fi
 BFP=$(cat "$WORK/base.fp" 2>/dev/null)
 if stage 1; then   # ① 官方现出新编程题 + 官方轨迹
     tick 出题采轨迹
-    SEEN=("$PD"/mix_q_*.txt "$PD"/hold_q_*.txt "$HOLD/q.jsonl"); for f in "$EVO"/[rfa][0-9]*/q.jsonl; do [ -s "$f" ] && [ "$f" != "$QJ" ] && SEEN+=("$f"); done
+    SEEN=("$PD"/mix_q_*.txt "$PD"/hold_q_*.txt "$HOLD/q.jsonl"); for f in "$EVO"/[rfad][0-9]*/q.jsonl; do [ -s "$f" ] && [ "$f" != "$QJ" ] && SEEN+=("$f"); done
     if [ "$RAWM" = 1 ]; then
         RL=("${PLANG[@]}"); [ "${#RL[@]}" -gt 0 ] || mapfile -t RL < <(grep -v '^#' gguf/go-onebit/code/judge.ids.layout | awk 'NF == 3 {print $1}')   # 计划定的语言; 没计划 = 30 种全上
         if [ -s "$QJ" ]; then M "① 开头已在($(wc -l < "$QJ") 个), 沿用"
@@ -193,7 +206,19 @@ if stage 1; then   # ① 官方现出新编程题 + 官方轨迹
     else M "① 官方现出 $Q 道新编程题(与历来 ${#SEEN[@]} 份题集去重, 禁词 ${#BAN[@]} 个; $([ -s "$PIN" ] && echo "按计划 $PIN: ${PLANG[*]}" || echo "没有计划, 不限语言")) → $QJ"
         STEER=(); [ "${#PLANG[@]}" -gt 0 ] && STEER=(--langs "${PLANG[@]}" --brief "$PBRIEF")
         T q "$PY" gguf-tools/scripts/api_round.py questions --key "$KEY" --round "$RN" --prefix "apr$(printf %03d "$RN")" --families code --n "$Q" --out "$QJ" --seen "${SEEN[@]}" --ban "${BAN[@]}" "${STEER[@]}" || die "出题失败"; fi
-    if [ "$RAWM" = 0 ]; then
+    if [ "$DECM" = 1 ]; then   # 第二层: 官方开思考作答(后台, 只打 API)与学生自己想同一批题(占模型服务)并行, 再从学生前缀分支续写
+        M "① 官方解答(开思考, 带逐位 top-20, 8 路, 上限 65536; 后台) → $RAW"
+        T collect "$PY" "$APT" collect --key "$KEY" --questions "$QJ" --out "$RAW" --hf "$HF" --max-tokens 65536 --jobs 8 --timeout 1200 > "$WORK/collect.log" 2>&1 & CPID=$!
+        waitready || die "模型服务没就绪(学生生成要现役侧车在线)"
+        M "① 学生(现役 $BFP)自己想这 $(wc -l < "$QJ") 道题(思考档, 上限 32768, 2 路) → $STU"
+        T student "$PY" gguf-tools/scripts/think_freegen_probe.py --questions "$QJ" --n 0 --jobs 2 --max-tokens 32768 --timeout 1200 --out "$STU" || die "学生生成失败"
+        M "① 学生 $(wc -l < "$STU") 条, 自己收口 $("$PY" -c "import json,sys; print(sum(1 for l in open(sys.argv[1]) if json.loads(l).get('closed')))" "$STU") 条"
+        M "① 分支续写: 学生思考每 8192 位一个分支点(没收口的末尾再加一个), 官方接着想 ≤32768 位, 6 路 → $BRRAW"
+        T branch "$PY" gguf-tools/scripts/api_branch.py branch --key "$KEY" --student "$STU" --out "$BRRAW" --hf "$HF" --every 8192 --max-tokens 32768 --jobs 6 --timeout 900 || die "分支续写失败"
+        M "① 分支 $("$PY" -c "import json,sys; R=[json.loads(l) for l in open(sys.argv[1])]; R=[r for r in R if r.get('ok')]; print(f'ok {len(R)} 条, 官方续到收口 {sum(1 for r in R if r.get(\"closed\"))} 条')" "$BRRAW")"
+        "$PY" gguf-tools/scripts/api_branch.py rows --raw "$BRRAW" --out "$BRROW" || die "分支行失败"
+        wait "$CPID" || die "官方开思考采集失败(看 $WORK/collect.log)"; tail -2 "$WORK/collect.log"
+    elif [ "$RAWM" = 0 ]; then
     # 关思考(10-28 用户批): 思考模式的料正文只占 11~13%(a001~a003), 其余是思考段的文字, 编程尺量的却是原始代码 ⇒ 让官方直接写正文, 料几乎全是代码
     M "① 官方解答(关思考, 带逐位 top-20, 8 路, 上限 65536) → $RAW"
     T collect "$PY" "$APT" collect --key "$KEY" --questions "$QJ" --out "$RAW" --hf "$HF" --max-tokens 65536 --jobs 8 --timeout 1200 --no-think || die "采集失败"
@@ -205,9 +230,15 @@ if stage 2; then   # ② 料
     if [ "$RAWM" = 1 ]; then   # 裸文档一份一行: 开头只当上下文, 续写是靶; 写到上限停的文档没有结尾, 不补 EOS
         "$PY" -c "import json,sys; [print(json.dumps({'prefix': r['q'], 'text': r['content'], 'eos': False}, ensure_ascii=False)) for r in map(json.loads, open(sys.argv[1]))]" "$WORK/api_ok.jsonl" > "$DATA.all" || die "料失败"
     else "$PY" "$TTC" chunks --hf "$HF" --raw "$WORK/api_ok.jsonl" --out "$DATA.all" --max-tok 1000000 --max-chunks 1 --head-prefix >/dev/null || die "料失败"; fi
+    TRAW=$RAW
+    if [ "$DECM" = 1 ]; then   # 第二层: 官方整条轨迹行 + 分支行; 教师原料两份拼一份(ptf 按内容找块, 分支的前缀位 one-hot 占位、训练器不算它)
+        [ -s "$BRROW" ] || die "分支行 $BRROW 是空的"
+        M "② 料: 官方轨迹 $(wc -l < "$DATA.all") 行 + 分支 $(wc -l < "$BRROW") 行"
+        cat "$BRROW" >> "$DATA.all"; cat "$RAW" "$BRRAW" > "$LPRAW"; TRAW=$LPRAW
+    fi
     BANRE=$(printf '%s\n' "${BAN[@]}" | paste -sd'|')   # 泄题门: 出题时按禁词丢过题, 这里拦轨迹里自己冒出来的 —— 整行剔掉
     grep -v -i -E "$BANRE" "$DATA.all" > "$DATA.ban"
-    match_api "$DATA.ban" "$RAW" "$WORK/keep.txt" || die "料配 API 表失败"
+    match_api "$DATA.ban" "$TRAW" "$WORK/keep.txt" || die "料配 API 表失败"
     awk 'NR==FNR{k[$1]=1; next} (FNR in k)' "$WORK/keep.txt" "$DATA.ban" > "$DATA"
     M "② 料 $(wc -l < "$DATA") 行(官方收口 $(wc -l < "$WORK/api_ok.jsonl") / 采 $(wc -l < "$RAW"); 禁词剔 $(( $(wc -l < "$DATA.all") - $(wc -l < "$DATA.ban") )), 配不上 API 表剔 $(( $(wc -l < "$DATA.ban") - $(wc -l < "$DATA") )))"
     mv "$DATA.ban.ptf" "$WORK/teacher.ptf" || die "官方教师表没落下来"   # ③ 直接吃这份(训练器同款渲染配出来的, 配上的行都在里面)
@@ -277,7 +308,9 @@ info = f"Same编程{c['same_D']:+d}/√{c['same_d']}·wt2{w['same_D']:+d}/√{w[
 print("keep" if not why else "rollback", ";".join(why + [info]) if why else "全过;" + info)
 EOF
 )
-    if [ "$V" = keep ]; then M "⑤ 留: 新侧车 $NFP 成为现役($WHY)"
+    # 第二层不设门(10-29 用户: "先看看指标, 就算回退也不一定是坏事, 因为决策更好了"): 门的读数照算照记, 去留一律留, 鹈鹕(dsh)另判
+    [ "$DECM" = 1 ] && { V="keep(dec)"; WHY="第二层不设门,只报:$WHY;决策位 $(grep '^decision' "$OUT/train.log" | awk '{printf "%s kl %s n %s; ", $2, $4, $6}')"; }
+    if [ "$V" != rollback ]; then M "⑤ 留: 新侧车 $NFP 成为现役($WHY)"
         if [ "$BEH" = 1 ]; then
             beh_gen > "$WORK/beh_new.log" 2>&1 || die "新侧车评委失败(看 $WORK/beh_new.log)"
             M "⑤ 评委(只报):"; "$PY" gguf-tools/scripts/api_round.py summary "官方=$HOLD/official.review.jsonl" "旧现役=$EVO/beh/$BFP.review.jsonl" "新现役=$EVO/beh/$NFP.review.jsonl" 2>&1 | tail -8
@@ -301,7 +334,8 @@ print("\t".join(map(str, ["$TAG", "$BFP", "$NFP", "$K0", "$K1", r(c["kld0"]), r(
 EOF
     M "ledger: $(tail -1 "$EVO/ledger_api.tsv")"
 fi
-if stage 6; then   # ⑥ 官方复盘 → 下一轮计划
+if stage 6 && [ "$DECM" = 1 ]; then M "⑥ 第二层本轮不复盘(计划分层只有 raw / task; 10-29 用户: 先看指标和鹈鹕)"
+elif stage 6; then   # ⑥ 官方复盘 → 下一轮计划
     tick 复盘
     # 本轮的去留以账本为准(⑤ 写的那一行: 第 3 列新侧车指纹, 第 18/19 列去留与理由); 门的读数从两套 rows 重算(同一工具, 逐位确定)
     IFS=$'\t' read -r NFP V WHY < <(awk -F'\t' -v t="$TAG" '$1 == t {n = $3; v = $18; w = $19} END {print n "\t" v "\t" w}' "$EVO/ledger_api.tsv")

@@ -136,7 +136,29 @@ static bool rb_loss(const pt_cfg *c, pt_run *r, ds4_gpu_tensor *w, ds4_gpu_tenso
               ds4_gpu_tensor_read(r->loss, 0, r->loss_h, (uint64_t)m * 4);
     if (ok) { double l = 0; for (uint32_t k = 0; k < m; k++) l += r->loss_h[k]; *loss += l; *ntok += m; }
     if (ok && mode == 1) for (uint32_t k = 0; k < m; k++) gw[off + k] = r->loss_h[k];
+    /* 决策位读数(10-29, 段 B 第二层): 不反传的全料趟里把目标是 EOS / </think> 的位单独累计(pt_run.dec_*, 与 ③ pt_loss_rows 同式)。
+     * 为什么: 这几位每条轨迹只有 1~2 个, 对 train_kl 的贡献 ≈ 0, 不单列就看不见第二层到底有没有动它们 */
+    if (ok && r->dec_on && mode != 2) for (uint32_t k = 0; k < m; k++) {
+        const size_t kk = (size_t)off + k;
+        const int32_t y = s->sids[s->sa0 + kk];
+        if (y != r->dec_ids[0] && y != r->dec_ids[1]) continue;
+        r->dec_kl += r->loss_h[k]; r->dec_n++;
+        for (uint32_t q = 0; q < TK; q++) if (s->top_id[kk * TK + q] == y) { r->dec_tp += s->top_p[kk * TK + q]; break; }
+    }
     return ok;
+}
+
+/* 一趟全料评估的决策位均值: train.log 一行 "decision eNN kl … n … tp …"(与 ③ 同字段), 屏幕一行; 料里一个决策位都没有(裸续写料)就不打 */
+static void rb_dec_log(pt_run *r, const char *tag, FILE *lf) {
+    if (!r->dec_n) { r->dec_on = 0; return; }
+    const double kl = r->dec_kl / r->dec_n, tp = r->dec_tp / r->dec_n;
+    fprintf(stderr, "ds4: [restore-b] %s 决策位(目标是 EOS/</think> 的 %u 位): KL %.4f, 教师给它 p %.3f\n", tag, r->dec_n, kl, tp);
+    if (lf) { fprintf(lf, "decision %s kl %.5f n %u tp %.4f\n", tag, kl, r->dec_n, tp); fflush(lf); }
+    r->dec_on = 0;
+}
+static void rb_dec_begin(ds4_engine *e, pt_run *r) {
+    r->dec_ids[0] = ds4_token_eos(e); r->dec_ids[1] = ds4_token_think_end(e);
+    r->dec_on = 1; r->dec_kl = r->dec_tp = 0.0; r->dec_n = 0;
 }
 
 /* 一个样本的前向 + 损失(+ 反传): pt_step_sample 的多层路照抄(前缀形态、按篇接力、环头快照同式), 只把损失换成 rb_loss。
@@ -359,8 +381,10 @@ int ds4_engine_restoreb(ds4_engine *e, const char *spec) {
     double kl0 = 0, kl1 = 0;
     if (b.freeze) fprintf(stderr, "ds4: [restore-b] 冻住前 %d 个秩(起点 %s), 只训后 %u 个\n", b.freeze, b.init, c.rank - (uint32_t)b.freeze);
     fprintf(stderr, "ds4: [restore-b] 训练 L%u-L%u 秩 %u, lr %.2g, batch %u, %u 轮, 料 %u 段; 第 0 步逐位 KL(定缺口)…\n", c.layer_lo, c.layer_hi, c.rank, (double)c.lr, c.batch, c.epochs, ntr);
+    rb_dec_begin(e, &r);
     if (!rb_pass(e, &c, &r, w, &d, ord, ntr, gw, 1, &kl0)) goto out;
     if (lf) { fprintf(lf, "step 0 eval_kl 0.00000 train_kl %.5f hold_kl 0.00000\n", kl0); fflush(lf); }
+    rb_dec_log(&r, "e00", lf);
     if (ax && !rb_aux_log(ax, &c, &r, amask, "e00", lf)) goto out;
     {   /* 第 0 步逐位 KL 落 <out>/kl0.tsv(一行"目标 token id  KL"): 拿去和编程尺的缺口按 token 类对照(api_round.py tokclass) ——
          * 料里的缺口和尺上的缺口不是同一类 token 时, 修好料的缺口也搬不到尺上(10-28: 尺的缺口 68% 在标识符上) */
@@ -422,10 +446,12 @@ int ds4_engine_restoreb(ds4_engine *e, const char *spec) {
                 fprintf(stderr, "ds4: [restore-b] 步 %u 逐层靶: 敏感方向上剩 %.4f, 不加权剩 %.4f\n", step, as.wtgt > 0 ? as.wres / as.wtgt : 0.0, as.res / as.tgt);
             if (mem >= 0 && mem < RB_MEM_FLOOR_MB) { fprintf(stderr, "ds4: ★[restore-b] 训练中可用内存 %ld MB 低于 %d MB, 停车★\n", mem, RB_MEM_FLOOR_MB); goto out; }
         }
+        rb_dec_begin(e, &r);
         if (!rb_pass(e, &c, &r, w, &d, ord, ntr, gw, 0, &kl1)) goto out;
         fprintf(stderr, "ds4: [restore-b] ★轮 %u 末: 全料逐位 KL %.4f(第 0 步 %.4f), %u 步, %.0f s★\n", ep, kl1, kl0, step, now_sec() - t0);
         if (lf) { fprintf(lf, "epoch %u eval_kl 0.00000 train_kl %.5f hold_kl 0.00000 gain 0.00000 se 0.00000 nq %u rows 0\n", ep, kl1, ntr); fflush(lf); }
         char et[16]; snprintf(et, sizeof et, "e%02u", ep);
+        rb_dec_log(&r, et, lf);
         if (ax && !rb_aux_log(ax, &c, &r, amask, et, lf)) goto out;
         char ck[1200]; snprintf(ck, sizeof ck, "%s/ckpt_e%02u", c.out, ep);
         if (!pt_save_amp(&c, &r, ck) || (rt.on && !rb_route_save(&c, &r, ck))) goto out;
