@@ -53,13 +53,21 @@ pipeline_tag: text-generation
 
 Same prompt ("create an HTML page with a 2D SVG animation of a pelican riding a bicycle"), same agent flow (dsh):
 
-| Official DeepSeek V4.1 Flash (510 GB original, official API) | This project (113.6 GB equal-weight quantization + restore sidecar, local) |
-|:---:|:---:|
-| ![Official](docs/img/pelican-official.png) | ![This project](docs/img/pelican-local.png) |
+| Official DeepSeek V4.1 Flash (510 GB original, official API) | This project, Oct 27: restore sidecar before self-learning | This project, Oct 30: after 8 kept rounds of self-learning |
+|:---:|:---:|:---:|
+| ![Official](docs/img/pelican-official.png) | ![This project, Oct 27](docs/img/pelican-local.png) | ![This project, Oct 30](docs/img/pelican-local-1030.png) |
 
-The right image is the local run's final page, one run, not hand-picked: the model wrote it, looked at its own screenshot,
-fixed what it saw and stopped by itself after 72 tool calls (38 minutes). The long bill and the pouch hanging along it are
-there now; the gap is still visible: the neck does not stand up, the pouch is small, and the body reads more like a duck.
+Both local runs use the 113.6 GB equal-weight base plus the restore sidecar on one machine; only the sidecar's correction
+changed in between. One run each, not hand-picked.
+
+- **Oct 27.** A frame from the first draft while the model reviewed its own screenshot; we stopped the run there. The
+  pouch comes out as a round ball under a short bill, and body, wings and neck merge into one lump.
+- **Oct 30.** The final page: the model wrote it, looked at its own screenshot, fixed what it saw and stopped by itself
+  after 72 tool calls (38 minutes). The long bill and the pouch hanging along it are there now. The gap is still
+  visible: the neck does not stand up, the pouch is small, and the body reads more like a duck.
+
+Between the two, on the same rulers: code Same top 84.3% → 85.0% (KL 0.252 → 0.230), general English 81.4% → 82.0%
+(KL 0.621 → 0.586). How the sidecar learns is under [The model](#the-model).
 
 ![YoungAi Studio: the assistant hunting for the cheapest DGX Spark](docs/img/studio-agent-en.png)
 
