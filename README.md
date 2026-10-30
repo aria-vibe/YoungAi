@@ -93,13 +93,15 @@ A 113.6 GB base plus a 145 MB restore sidecar picks the same next token as the 5
 |---|---:|---:|---:|
 | ① base | 113.6 GB | 78.4% | 76.8% |
 | ① + ② code sidecar | + 41 MB | 82.0% | 79.7% |
+| ① + ② + ③ post-training | + 101 MB | 84.8% | 82.4% |
 | **① + restore sidecar (default on the Spark)** | **+ 145 MB** | **85.0%** | **82.0%** |
 
 "Same" means that on the same text, our model and the original rank the same token first. Code is 15,360 held-out tokens
-across 30 languages; general English is WikiText-2. Mean KL by row: code 0.446 → 0.318 → 0.230, general English
-0.803 → 0.673 → 0.586.
+across 30 languages; general English is WikiText-2. Mean KL by row: code 0.446 → 0.318 → 0.230 → 0.230, general English
+0.803 → 0.673 → 0.574 → 0.586. Against ② + ③ the restore sidecar is ahead on code Same top and level on code KL; on general
+English it is 0.4 points lower (2 of 512 tokens), above the 80% floor we hold it to.
 
-**Two things get 113.6 GB this far:**
+**Three things get 113.6 GB this far:**
 
 1. **Multimodal loads on demand and unloads after use.** The vision tower (0.97 GB, original BF16) is a separate file; at
    start-up the engine only records where it sits on disk. It is read into GPU memory when an image arrives and released
@@ -108,16 +110,18 @@ across 30 languages; general English is WikiText-2. Mean KL by row: code 0.446 �
 2. **A 41 MB sidecar.** A gain on every row of every routed expert plus a small bias on each router, solved against the
    original weights. One per domain (finance / code / law / medicine / science), switched from the chat box in under a
    second.
+3. **A 101 MB post-training file.** A rank-64 correction on the output of every MoE layer, taught by the 510 GB original
+   itself: it learns the original's next-token distribution at every position. The code used for scoring shares not a
+   single 24-token stretch with the training data, and general English rises 2.7 points as well: it fixes the quantization
+   error itself rather than memorizing.
 
-**The restore sidecar** puts two pieces in one directory: gains and router biases like ② (40 MB), and a rank-64 correction
-on the output of every MoE layer (105 MB). The correction keeps learning from the official API in rounds. Each round the API writes fresh
-source files, the sidecar trains on them once, and the round is kept only if code KL drops by more than 2 standard
-errors on half of the code ruler; the other half only reports. The last round trained on full reasoning traces,
-including where the original stops thinking and stops answering, and was kept without that gate: it costs 1% code KL and
-the pelican run above stopped by itself. 29 rounds so far, 8 kept. No training text shares a 16-token stretch with either
-ruler, apart from two lines of Dockerfile boilerplate. Pass the directory to `ds4-server --zchain`.
+**The restore sidecar** puts both pieces in one directory: gains and router biases like ② (40 MB), a rank-64 correction
+like ③ (105 MB). Its correction keeps learning from source files the official API writes fresh. No training text shares a
+16-token stretch with either ruler, apart from two lines of Dockerfile boilerplate. Pass the directory to
+`ds4-server --zchain`.
 
-Context is 1M tokens; the full KV cache is 0.89 GB. Method and full tables: [technical notes §5](docs/TECHNICAL.md#5-results).
+Context is 1M tokens; the full KV cache is 0.89 GB. Method and full tables: [technical notes §5](docs/TECHNICAL.md#5-results);
+how the post-training file is made: [§4.3](docs/TECHNICAL.md#43-the-post-training-file).
 
 ### Speed
 
@@ -239,8 +243,11 @@ make                                                            # Metal build
 bash gguf-tools/scripts/hf_install.sh download --dir ~/youngai   # ~317 GB, resumable
 M=~/youngai/model/DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative
 ./ds4-server --metal -m $M.gguf --zchain $M-grrb-code_fit_n15360-engine \
+    --posttrain ~/youngai/model/posttrain-code-20261022 \
     --engram-dir ~/youngai/deepseek-engram --mem-budget-mb 110000 --port 8000   # OpenAI / Anthropic API on :8000
 ```
+
+The `--posttrain` line adds the post-training file, which pairs with the code sidecar; drop it to run the sidecar alone.
 
 If the server says a model range is *not covered by mapped model views*, the build predates Mac support: pull and run
 `make` again.
@@ -265,6 +272,7 @@ compatible). Create a key on the *API* tab and send `Authorization: Bearer <key>
 ```sh
 curl -fsSLO https://huggingface.co/wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017/resolve/main/install.sh
 bash install.sh                      # --domain law for another domain (default: code); --endpoint https://hf-mirror.com for a mirror
+bash install.sh --posttrain          # also load the post-training file (pairs with the code sidecar)
 ```
 
 ## Limits
@@ -273,8 +281,13 @@ bash install.sh                      # --domain law for another domain (default:
   16 GB, so on it we only run the GPU kernel tests.
 - One machine, one model: background tasks and your chat take turns rather than running in parallel.
 - Sites behind a login or a captcha stay closed to the assistant; it says what it could not open instead of guessing.
-- The per-domain sidecars are scored on held-out text only. The restore sidecar has also run the task benchmarks at the
-  top of this page, on small subsets.
+- The per-domain sidecars and the post-training file are scored on held-out text only. The restore sidecar has also run
+  the task benchmarks at the top of this page, on small subsets.
+- The post-training file makes long reasoning stop earlier than the original: on two real reasoning runs of 10–30k
+  tokens, the chance of stopping is 1.6–2× the original's, so hard problems may get a few steps less thought. Leave it
+  off if that matters (`install.sh` without `--posttrain`, or no `--posttrain` on `ds4-server`).
+- The Studio's *Post-train* switch only lists files trained on this machine; the one from Hugging Face is loaded with
+  `install.sh --posttrain` or `ds4-server --posttrain`.
 
 ## Danger mode (experimental) — disclaimer
 

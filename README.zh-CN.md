@@ -65,26 +65,29 @@ DGX Spark 或 Apple Silicon 的 Mac，1M 上下文。开源，MIT 协议；纯 C
 |---|---:|---:|---:|
 | ① 基座 | 113.6 GB | 78.4% | 76.8% |
 | ① + ② 编程侧车 | + 41 MB | 82.0% | 79.7% |
+| ① + ② + ③ 后训练 | + 101 MB | 84.8% | 82.4% |
 | **① + 还原侧车（Spark 上默认）** | **+ 145 MB** | **85.0%** | **82.0%** |
 
 "一致"指同一段文字上，我们的模型和原件挑出的最可能的下一个 token 相同。编程用的是 30 种语言、15,360 个 token 的
-留出代码，通用英文是 WikiText-2。各行平均 KL：编程 0.446 → 0.318 → 0.230，通用英文 0.803 → 0.673 → 0.586。
+留出代码，通用英文是 WikiText-2。各行平均 KL：编程 0.446 → 0.318 → 0.230 → 0.230，通用英文 0.803 → 0.673 → 0.574 → 0.586。
+还原侧车对 ② + ③：编程 Same top 领先、编程 KL 持平；通用英文低 0.4 个点（512 个 token 里差 2 个），在我们守的 80% 底线之上。
 
-**113.6 GB 能做到这个数，靠两件事：**
+**113.6 GB 能做到这个数，靠三件事：**
 
 1. **多模态按需加载：用时装，用完卸。** 视觉塔 0.97 GB（原件 BF16）是单独一个文件，启动时只记下它在盘上的位置。
    来图时才读进显存，跑完就释放，文本请求一个字节不碰它。128 GB 内存因此几乎全给了文本主干：113.6 GB 的基座，
    每 8 个权重一起向量量化，约 1.6 bit/权重，不用训练数据。
 2. **侧车 41 MB。** 给每个路由专家的每一行权重乘一个增益、给路由器加一点偏置，对着出厂原件解出来。
    金融 / 编程 / 法律 / 医疗 / 科研各一份，聊天框下拉切换，不到 1 秒。
+3. **后训练 101 MB。** 每层 MoE 的输出加一个秩 64 的修正，老师就是 510 GB 的出厂原件，学它逐位的下一个 token 分布。
+   判决用的代码和训练料一个 24 token 的片段都不重合。通用英文跟着涨 2.7 个点，说明它修的是量化本身的误差，不是背题。
 
-**还原侧车**把两样东西放进一个目录：像 ② 那样的增益和路由偏置（40 MB），每层 MoE 输出上一个秩 64 的修正（105 MB）。
-修正部分按轮向官方 API 学：每轮由 API 现写一批新的源文件，侧车在上面训一遍；编程尺的一半上 KL 降过 2 个标准误才留，
-另一半只报数不参与去留。最后一轮训的是完整的思考过程，包括原件在哪里收住思考、在哪里结束回答，这一轮不设门直接留：
-编程 KL 退了 1%，上面那趟鹈鹕自己收了手。到目前跑了 29 轮，留下 8 轮。训练料和两把尺没有任何 16 个 token 长的重合片段，
-只有两行 Dockerfile 样板句例外。用法：把这个目录传给 `ds4-server --zchain`。
+**还原侧车**把两样东西放进一个目录：像 ② 那样的增益和路由偏置（40 MB），像 ③ 那样的秩 64 修正（105 MB）。
+修正部分接着向官方 API 现写的源文件学。训练料和两把尺没有任何 16 个 token 长的重合片段，只有两行 Dockerfile 样板句例外。
+用法：把这个目录传给 `ds4-server --zchain`。
 
-上下文 1M token，满载 KV 缓存 0.89 GB。测法和完整结果表见[技术细节第五章](docs/TECHNICAL.zh-CN.md#五实测结果)。
+上下文 1M token，满载 KV 缓存 0.89 GB。测法和完整结果表见[技术细节第五章](docs/TECHNICAL.zh-CN.md#五实测结果)，
+后训练怎么做见[技术细节 4.3](docs/TECHNICAL.zh-CN.md#43-后训练文件)。
 
 ### 速度
 
@@ -191,8 +194,11 @@ make                                                            # Metal 版
 bash gguf-tools/scripts/hf_install.sh download --dir ~/youngai   # 约 317 GB，断点续传
 M=~/youngai/model/DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative
 ./ds4-server --metal -m $M.gguf --zchain $M-grrb-code_fit_n15360-engine \
+    --posttrain ~/youngai/model/posttrain-code-20261022 \
     --engram-dir ~/youngai/deepseek-engram --mem-budget-mb 110000 --port 8000   # :8000 上是 OpenAI / Anthropic 兼容 API
 ```
+
+`--posttrain` 那一行是后训练文件，它配的是编程侧车，删掉这一行就是只挂侧车。
 
 服务端报某段模型区间 *not covered by mapped model views*，说明代码是支持 Mac 之前的版本：拉最新代码重新 `make`。
 
@@ -215,6 +221,7 @@ M=~/youngai/model/DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative
 ```sh
 curl -fsSLO https://huggingface.co/wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017/resolve/main/install.sh
 bash install.sh                      # 默认编程侧车，--domain law 换领域；--endpoint https://hf-mirror.com 走镜像
+bash install.sh --posttrain          # 再挂后训练文件（配编程侧车）
 ```
 
 ## 局限
@@ -222,7 +229,10 @@ bash install.sh                      # 默认编程侧车，--domain law 换领�
 - 我们在 DGX Spark 上做端到端验证。Mac 整模型的数来自贡献者的 M5 Max；我们手上的 Mac 只有 16 GB，只跑 GPU 核测试。
 - 一台机器一份模型：后台任务和你聊天是排队跑，不是并行。
 - 要登录或有验证码的网站，助理打不开；它会说哪些没打开，不会去猜。
-- 各领域侧车只在留出文本上评过分。还原侧车另外跑过本页顶部的任务基准，用的是小子集。
+- 各领域侧车和后训练文件只在留出文本上评过分。还原侧车另外跑过本页顶部的任务基准，用的是小子集。
+- 后训练文件让长思考收口得比原件早：在两条 1 万–3 万 token 的真实长思考上，收口的概率是原件的 1.6–2 倍，难题可能少想几步。
+  不想要就别挂（`install.sh` 不带 `--posttrain`，或去掉 `ds4-server` 的 `--posttrain`）。
+- 工作台的"后训练"开关只列本机训出来的后训练文件，从 Hugging Face 下的那一份要用 `install.sh --posttrain` 或 `ds4-server --posttrain` 挂。
 
 ## 危险模式（实验性）· 免责声明
 
