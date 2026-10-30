@@ -60,6 +60,9 @@ Avg of 6 is 82.5 ± 3.6, against 81.8 for GSQ-RCO, 83.5 for UD-IQ1_S and 85.6 fo
 against 92–95) and HMMT reads high (72.7 ± 13.4 against 54–63); neither is settled at this size. Aider Polyglot was not run:
 its official harness needs Docker, which our Spark lacks.
 
+**These scores do not stand for what the model can actually do.** The pelican test below shows it: same model, same task,
+benchmark scores barely move, and the drawings are a step apart.
+
 Same prompt ("create an HTML page with a 2D SVG animation of a pelican riding a bicycle"), same agent flow (dsh):
 
 | Official DeepSeek V4.1 Flash (510 GB original, official API) | This project, Oct 27: restore sidecar before self-learning | This project, Oct 30: after 8 kept rounds of self-learning |
