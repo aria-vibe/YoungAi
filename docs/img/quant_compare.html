@@ -1,0 +1,180 @@
+<!doctype html>
+<!-- 1 位量化对比图的源文件(本项目 vs Unsloth UD-IQ1_S/IQ1_M vs ISTA-DASLab GSQ-RCO IQ1_M)。
+     改数 = 改下面 QUANTS 一处, 再跑 docs/img/render_arch.sh quant_compare 出 quant_compare.png / quant_compare-en.png。
+     别家的数全部来自 https://unsloth.ai/docs/models/deepseek-v4.1-flash (2026-10-30 抄录; 指标与那页一一对应),
+     本项目的数来自 docs/TECHNICAL.zh-CN.md §5.1 与 gguf/v41/bench/1031/<任务>/summary.json(2026-10-31 凌晨, 每项 50 分钟预算的随机子集)。 -->
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>1 位量化对比</title>
+<style>
+  :root {
+    --bg: #f9f9f7; --surface: #fcfcfb; --ink: #0b0b0b; --sub: #52514e; --muted: #898781;
+    --grid: #e1e0d9; --axis: #c3c2b7; --ring: rgba(11,11,11,.10);
+    --s-unsloth: #2a78d6; --s-ours: #eb6834; --s-gsq: #1baf7a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html.en .zh, html:not(.en) .en { display: none; }
+  body { width: 1500px; background: var(--bg); color: var(--ink); padding: 36px 44px 30px;
+         font: 16px/1.45 system-ui, -apple-system, "PingFang SC", "Segoe UI", sans-serif; }
+  header h1 { font-size: 30px; letter-spacing: -0.4px; margin-bottom: 6px; }
+  header p { color: var(--sub); font-size: 16px; margin-bottom: 20px; }
+  .card { background: var(--surface); border: 1px solid var(--ring); border-radius: 14px; padding: 18px 20px 14px; margin-bottom: 20px; }
+  .card h2 { font-size: 17px; margin-bottom: 2px; }
+  .card .s { color: var(--sub); font-size: 13.5px; margin-bottom: 10px; }
+  .legend { display: flex; gap: 18px; font-size: 13.5px; color: var(--sub); margin: 6px 0 4px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 6px; }
+  svg text { font-family: inherit; }
+  .tick { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+  .lab { fill: var(--ink); font-size: 13px; }
+  .val { fill: var(--ink); font-size: 13px; font-variant-numeric: tabular-nums; font-weight: 600; }
+  .note { fill: var(--muted); font-size: 12px; }
+  .ptitle { fill: var(--ink); font-size: 14px; font-weight: 600; }
+  .psub { fill: var(--muted); font-size: 11.5px; }
+  footer { color: var(--sub); font-size: 13px; line-height: 1.55; }
+  footer li { margin-left: 18px; margin-bottom: 3px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="zh">DeepSeek V4.1 Flash 1017 的 1 位量化：本项目 113.6 GB 对 Unsloth、ISTA-DASLab 的 1 位档</span><span class="en">1-bit quants of DeepSeek V4.1 Flash 1017: this project (113.6 GB) vs the 1-bit tiers of Unsloth and ISTA-DASLab</span></h1>
+  <p><span class="zh">指标与 Unsloth 的 DeepSeek-V4.1-Flash 指南一一对应。体积只算权重本身，不含 110.6 GB 的 Engram n-gram 表（本项目用官方原件的表，203 GB，放 SSD 按需读）。</span><span class="en">Metrics mirror Unsloth's DeepSeek-V4.1-Flash guide one to one. Sizes are weights only, excluding the 110.6 GB Engram n-gram table (this project keeps the original 203 GB table on SSD, read on demand).</span></p>
+</header>
+
+<div class="card">
+  <h2><span class="zh">任务基准</span><span class="en">Task benchmarks</span></h2>
+  <div class="s"><span class="zh">每项 pass@1 %（高好），截断率是答案撞上 32,768 token 上限的比例（低好）。各题样本数见面板副标题；温度 1.0、top-p 1.0</span><span class="en">pass@1 % per benchmark (higher is better); truncated = share of answers cut at the 32,768-token cap (lower is better). Samples per item in each panel's subtitle; temperature 1.0, top-p 1.0</span></div>
+  <div class="legend"><span><i style="background:var(--s-unsloth)"></i>Unsloth UD v3.1 IQ1_S / IQ1_M</span><span><i style="background:var(--s-gsq)"></i>ISTA-DASLab GSQ-RCO IQ1_M</span><span><i style="background:var(--s-ours)"></i><span class="zh">本项目 ① 基座 + 还原侧车</span><span class="en">this project, base + restore sidecar</span></span></div>
+  <svg id="tasks" width="1410" height="10"></svg>
+</div>
+
+<div class="card">
+  <h2><span class="zh">和官方原件的一致程度 vs 体积</span><span class="en">Agreement with the official reference vs size</span></h2>
+  <div class="s"><span class="zh">上行 top-1 一致率（高好），下行平均 KL（低好）；左列短文本，右列长文本。两家的文本不同，只能看量级，见脚注 2</span><span class="en">Top row: top-1 agreement (higher is better); bottom row: mean KL (lower is better). Left: short text, right: long text. Different texts on each side; read as magnitudes, see note 2</span></div>
+  <div class="legend"><span><i style="background:var(--s-unsloth)"></i>Unsloth UD v3.1</span><span><i style="background:var(--s-ours)"></i><span class="zh">本项目（基座 + 还原侧车 145 MB）</span><span class="en">this project (base + 145 MB restore sidecar)</span></span></div>
+  <svg id="scatter" width="1410" height="10"></svg>
+</div>
+
+<footer>
+  <ol>
+    <li><span class="zh">别家的任务分全部出自 Unsloth 同一套测试（页面 Full Benchmarking Results 表与 Test Methodology）。ISTA-DASLab 自报 AIME25 100%，Unsloth 没能复现，图里用的是 Unsloth 的复测值。本项目各行是我们自己按同口径跑的（gguf-tools/scripts/bench_suite.py 等，产物在 gguf/v41/bench/1031/），但每项只给 50 分钟预算、单路串行：题序按固定种子打乱，跑到哪算哪，所以是随机子集，点旁的横杠是 ±1 个标准误。数学题判分用 math-verify 做符号等价，GPQA 用镜像 hendrydong/gpqa_diamond_mc（官方仓库门控）。Aider Polyglot 的官方 harness 要 Docker，Spark 上没有，本项目没跑。</span><span class="en">All task scores for others come from Unsloth's own harness (their Full Benchmarking Results and Test Methodology). ISTA-DASLab self-reports 100% on AIME25; Unsloth could not reproduce it, so the chart uses Unsloth's re-run. Our rows are our own runs with the same recipe (gguf-tools/scripts/bench_suite.py etc., outputs in gguf/v41/bench/1031/), but each benchmark got a 50-minute budget on one serial lane: items are shuffled with a fixed seed and we score whatever finished, so each row is a random subset and the bar beside the dot is ±1 standard error. Math answers are checked with math-verify symbolic equivalence; GPQA uses the mirror hendrydong/gpqa_diamond_mc (the official repo is gated). Aider Polyglot's official harness needs Docker, which the Spark lacks, so it was not run.</span></li>
+    <li><span class="zh">Unsloth 的一致率/KL 对官方 F32 参考，文本叫 wiki1100 和 long17k，没有公开。本项目对 510 GB 官方原件的参考前向：短文本 = WikiText-2 512 token，长文本 = 30 种语言留出代码 15,360 token（docs/TECHNICAL.zh-CN.md §5.1）。</span><span class="en">Unsloth measures against the official F32 reference on texts called wiki1100 and long17k (not published). This project measures against a reference forward of the 510 GB original: short = WikiText-2, 512 tokens; long = held-out code in 30 languages, 15,360 tokens (docs/TECHNICAL.md §5.1).</span></li>
+    <li><span class="zh">Unsloth 和 ISTA 的下载总包 = 图中体积 + IQ4_NL Engram 110.6 GB（UD-IQ1_S 233.0 GB、UD-IQ1_M 250.4 GB、GSQ-RCO IQ1_M 231.3 GB）。本项目下载总包 317 GB，其中 Engram 是官方原件 203 GB。</span><span class="en">Unsloth/ISTA download totals = chart size + 110.6 GB IQ4_NL Engram (UD-IQ1_S 233.0 GB, UD-IQ1_M 250.4 GB, GSQ-RCO IQ1_M 231.3 GB). This project's download is 317 GB, of which the Engram is the 203 GB original.</span></li>
+  </ol>
+</footer>
+<script>
+const EN = location.search.includes('en'); if (EN) document.documentElement.classList.add('en');
+const T = (zh, en) => EN ? en : zh;
+// ── 数据只改这里 ──────────────────────────────────────────────────────────────
+// gb = 不含 engram 的权重体积; 任务分 = pass@1 %; trunc = 六项基准里撞上限的比例 %; top1/kl = [短文本, 长文本]; null = 待跑
+const QUANTS = [
+  { s: 'unsloth', name: 'UD-IQ1_S',      gb: 122.4, aime: 92.92, hmmt: 57.01, gpqa: 87.63, mmlu: 86.62, ifeval: 94.92, lcb: 82.10, avg6: 83.53, aider: 36.52, trunc: 4.15, top1: [82.8, 85.1], kl: [0.457, 0.364] },
+  { s: 'unsloth', name: 'UD-IQ1_M',      gb: 139.8, aime: 95.00, hmmt: 62.88, gpqa: 88.38, mmlu: 87.53, ifeval: 95.10, lcb: 84.38, avg6: 85.55, aider: 42.13, trunc: 2.91, top1: [87.1, 88.2], kl: [0.314, 0.241] },
+  { s: 'gsq',     name: 'GSQ-RCO IQ1_M', gb: 120.7, aime: 91.88, hmmt: 53.60, gpqa: 85.10, mmlu: 85.49, ifeval: 91.77, lcb: 82.86, avg6: 81.78, aider: 29.78, trunc: 4.69 },
+  // 本项目 = 2026-10-31 凌晨 gguf/v41/bench/1031/<task>/summary.json: 每项 50 分钟预算, 题序固定种子打乱, 跑到的是随机子集(n 写在面板副标题),
+  // se = 二项 1 SE(%), 图里画成横杠; avg6 的 SE = 六项 SE 平方和开根 / 6; trunc 合并 205 个答案 10 个撞上限。Aider 没跑(spark 无 Docker)。
+  { s: 'ours',    name: T('本项目', 'this project'), gb: 113.7, aime: 77.78, hmmt: 72.73, gpqa: 85.19, mmlu: 87.67, ifeval: 91.80, lcb: 80.00, avg6: 82.53, aider: null, trunc: 4.88,
+    se: { aime: 9.8, hmmt: 13.43, gpqa: 6.84, mmlu: 3.85, ifeval: 3.51, lcb: 10.33, avg6: 3.56, trunc: 1.50 },
+    skip: { aider: T('未跑：spark 上没有 Docker', 'not run: no Docker on the Spark') },
+    top1: [81.84, 85.03], kl: [0.576, 0.227] },
+];
+const BENCH = [
+  { key: 'aime',   title: 'AIME25',          sub: T('30 题 × 16 样本；本项目 18 题 × 1', '30 problems × 16 samples; ours 18 problems × 1') },
+  { key: 'hmmt',   title: 'HMMT Feb26',      sub: T('33 题 × 16 样本；本项目 11 题 × 1', '33 problems × 16 samples; ours 11 problems × 1') },
+  { key: 'gpqa',   title: 'GPQA-Diamond',    sub: T('198 题 × 8 样本；本项目 27 题 × 1', '198 items × 8 samples; ours 27 items × 1') },
+  { key: 'mmlu',   title: 'MMLU-Pro',        sub: T('1,203 题分层子集 × 2；本项目 73 题 × 1', '1,203-item stratified subset × 2; ours 73 items × 1') },
+  { key: 'ifeval', title: 'IFEval',          sub: T('541 条 × 2，官方严格判分；本项目 61 条 × 1', '541 prompts × 2, official strict; ours 61 prompts × 1') },
+  { key: 'lcb',    title: 'LiveCodeBench v6', sub: T('175 题 × 3，32K；本项目 15 题 × 1', '175 problems × 3, 32K; ours 15 problems × 1') },
+  { key: 'avg6',   title: T('六项均分', 'Avg of 6'), sub: T('上面六项的平均；本项目是六个子集的均值', 'mean of the six above; ours is the mean of six subsets') },
+  { key: 'aider',  title: 'Aider Polyglot',  sub: T('225 题 × 1，Docker 官方 harness', '225 exercises × 1, official Docker harness') },
+  { key: 'trunc',  title: T('截断率（低好）', 'Truncated % (lower is better)'), sub: T('六项里撞 32,768 上限的答案比例；本项目 205 个答案', 'share of answers hitting the 32,768 cap; ours 205 answers') },
+];
+// ────────────────────────────────────────────────────────────────────────────
+const NS = 'http://www.w3.org/2000/svg';
+function el(p, tag, a, text) { const e = document.createElementNS(NS, tag); for (const k in a) e.setAttribute(k, a[k]); if (text != null) e.textContent = text; p.appendChild(e); return e; }
+const C = { unsloth: 'var(--s-unsloth)', gsq: 'var(--s-gsq)', ours: 'var(--s-ours)' };
+
+// 任务基准: 3×3 小图, 每图一项指标, 四行 = 四个量化版本, 点图(横轴不从 0 起, 所以不用条)
+(function tasks() {
+  const svg = document.getElementById('tasks');
+  const COLS = 3, PW = 470, PH = 150, LBL = 128, MR = 80, TOP = 40, RH = 22;   // MR 要装下 "80.00 ±10.3" 这种带 SE 的标签
+  BENCH.forEach((b, k) => {
+    const ox = (k % COLS) * PW, oy = Math.floor(k / COLS) * PH;
+    // 轴范围要装下本项目的 ±1 SE 横杠(HMMT 那格 ±13 pp, 不然杠伸出面板)
+    const vals = QUANTS.flatMap(q => q[b.key] == null ? [] : [q[b.key] - (q.se?.[b.key] || 0), q[b.key] + (q.se?.[b.key] || 0)]);
+    const lo = Math.max(0, Math.floor((Math.min(...vals) - 2) / 2) * 2), hi = Math.ceil((Math.max(...vals) + 2) / 2) * 2;
+    const X = v => ox + LBL + (v - lo) / (hi - lo) * (PW - LBL - MR);
+    el(svg, 'text', { x: ox, y: oy + 14, class: 'ptitle' }, b.title);
+    el(svg, 'text', { x: ox, y: oy + 29, class: 'psub' }, b.sub);
+    const yb = oy + TOP + QUANTS.length * RH;
+    const step = (hi - lo) >= 16 ? 4 : 2;
+    for (let t = lo; t <= hi; t += step) {
+      el(svg, 'line', { x1: X(t), x2: X(t), y1: oy + TOP - 4, y2: yb, stroke: 'var(--grid)' });
+      el(svg, 'text', { x: X(t), y: yb + 14, 'text-anchor': 'middle', class: 'tick' }, t);
+    }
+    el(svg, 'line', { x1: X(lo), x2: X(hi), y1: yb, y2: yb, stroke: 'var(--axis)' });
+    QUANTS.forEach((q, i) => {
+      const y = oy + TOP + i * RH + RH / 2;
+      el(svg, 'text', { x: ox + LBL - 10, y: y + 4, 'text-anchor': 'end', class: 'lab', 'font-size': 12.5 }, q.name);
+      const v = q[b.key];
+      if (v == null) {
+        el(svg, 'circle', { cx: X(lo) + 6, cy: y, r: 5, fill: 'none', stroke: C[q.s], 'stroke-width': 1.5, 'stroke-dasharray': '2 2' });
+        el(svg, 'text', { x: X(lo) + 16, y: y + 4, class: 'note', fill: C[q.s] }, q.skip?.[b.key] || T('待跑', 'pending'));
+        return;
+      }
+      const se = q.se?.[b.key] || 0;
+      el(svg, 'line', { x1: X(lo), x2: X(v), y1: y, y2: y, stroke: C[q.s], 'stroke-width': 1.2, opacity: .35 });
+      if (se) {   // ±1 SE 横杠, 两端短竖线
+        el(svg, 'line', { x1: X(v - se), x2: X(v + se), y1: y, y2: y, stroke: C[q.s], 'stroke-width': 1.5 });
+        for (const e of [v - se, v + se]) el(svg, 'line', { x1: X(e), x2: X(e), y1: y - 4, y2: y + 4, stroke: C[q.s], 'stroke-width': 1.5 });
+      }
+      const c = el(svg, 'circle', { cx: X(v), cy: y, r: 5.5, fill: C[q.s], stroke: 'var(--surface)', 'stroke-width': 1.5 });
+      el(c, 'title', {}, `${q.name} (${q.gb} GB) ${b.title}: ${v}${se ? ' ± ' + se : ''}`);
+      el(svg, 'text', { x: X(v + se) + 9, y: y + 4, class: 'val', 'font-size': 12.5 }, v.toFixed(2) + (se ? ` ±${se.toFixed(1)}` : ''));
+    });
+  });
+  svg.setAttribute('height', Math.ceil(BENCH.length / COLS) * PH - 4);
+})();
+
+// 一致程度: 2×2 散点, x 体积, y 一致率 / KL
+(function scatter() {
+  const svg = document.getElementById('scatter');
+  const panels = [
+    { key: 'top1', i: 0, title: T('top-1 一致率 % · 短文本', 'top-1 agreement % · short'), y0: 80, y1: 90, ticks: [80, 82, 84, 86, 88, 90] },
+    { key: 'top1', i: 1, title: T('top-1 一致率 % · 长文本', 'top-1 agreement % · long'),  y0: 80, y1: 90, ticks: [80, 82, 84, 86, 88, 90] },
+    { key: 'kl',   i: 0, title: T('平均 KL · 短文本', 'mean KL · short'), y0: 0, y1: 0.6, ticks: [0, 0.2, 0.4, 0.6] },
+    { key: 'kl',   i: 1, title: T('平均 KL · 长文本', 'mean KL · long'),  y0: 0, y1: 0.6, ticks: [0, 0.2, 0.4, 0.6] },
+  ];
+  const PW = 660, PH = 150, ML = 50, MT = 22, GX = 50, GY = 22, x0 = 100, x1 = 150;
+  const pts = QUANTS.filter(q => q.top1);
+  panels.forEach((p, k) => {
+    const ox = (k % 2) * (PW + GX), oy = Math.floor(k / 2) * (PH + GY);
+    const X = v => ox + ML + (v - x0) / (x1 - x0) * (PW - ML - 10);
+    const Y = v => oy + MT + (p.y1 - v) / (p.y1 - p.y0) * (PH - MT - 18);
+    el(svg, 'text', { x: ox + ML, y: oy + 12, class: 'ptitle' }, p.title);
+    for (const t of p.ticks) {
+      el(svg, 'line', { x1: X(x0), x2: X(x1), y1: Y(t), y2: Y(t), stroke: 'var(--grid)' });
+      el(svg, 'text', { x: X(x0) - 6, y: Y(t) + 4, 'text-anchor': 'end', class: 'tick' }, t);
+    }
+    el(svg, 'line', { x1: X(x0), x2: X(x1), y1: Y(p.y0), y2: Y(p.y0), stroke: 'var(--axis)' });
+    for (const g of [100, 110, 120, 130, 140, 150]) el(svg, 'text', { x: X(g), y: Y(p.y0) + 14, 'text-anchor': 'middle', class: 'tick' }, g + (g === 150 ? ' GB' : ''));
+    const u = pts.filter(d => d.s === 'unsloth').map(d => `${X(d.gb)},${Y(d[p.key][p.i])}`).join(' ');
+    el(svg, 'polyline', { points: u, fill: 'none', stroke: C.unsloth, 'stroke-width': 1.5, opacity: .5 });
+    pts.forEach(d => {
+      const v = d[p.key][p.i], cx = X(d.gb), cy = Y(v);
+      const c = el(svg, 'circle', { cx, cy, r: d.s === 'ours' ? 6 : 5, fill: C[d.s], stroke: 'var(--surface)', 'stroke-width': 2 });
+      el(c, 'title', {}, `${d.name} ${d.gb} GB: ${v}`);
+      const lab = p.key === 'kl' ? v.toFixed(3) : v.toFixed(1);
+      const short = (d.s === 'ours' ? T('本项目 ', 'ours ') : d.name.replace('UD-', '') + ' ') + lab;
+      // 本项目的点和 IQ1_S 同高, 标签放点下方(短文本 KL 那格点顶着标题, 放右侧); 别家放右侧
+      const below = d.s === 'ours' && !(p.key === 'kl' && p.i === 0);
+      const a = below ? { x: cx - 6, y: cy + 18 } : { x: cx + 9, y: cy + 4 };
+      el(svg, 'text', { ...a, class: 'note', 'font-size': 11.5, fill: d.s === 'ours' ? 'var(--ink)' : 'var(--muted)' }, short);
+    });
+  });
+  svg.setAttribute('height', 2 * PH + GY + 6);
+})();
+document.fonts.ready.then(() => { document.body.dataset.h = Math.ceil(document.body.getBoundingClientRect().height); });
+</script>
+</body>
+</html>

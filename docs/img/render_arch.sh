@@ -7,11 +7,13 @@ set -euo pipefail
 cd "$(dirname "$0")"
 CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 [ -x "$CHROME" ] || { echo "找不到 $CHROME" >&2; exit 1; }
-SRC="file://$PWD/arch.html"
-W=1600   # 与 arch.html 里 body 的 width 一致
+# $1 = 页面名(默认 arch; quant_compare 等同目录的其他图也走这条), 宽度从页面 body 的 width 读。
+NAME="${1:-arch}"
+SRC="file://$PWD/$NAME.html"
+W=$(grep -o 'width: *[0-9]*px' "$NAME.html" | head -1 | grep -o '[0-9]*')
 for lang in zh en; do
-    q=""; out=arch.png
-    [ "$lang" = en ] && { q="?en"; out=arch-en.png; }
+    q=""; out=$NAME.png
+    [ "$lang" = en ] && { q="?en"; out=$NAME-en.png; }
     h=$("$CHROME" --headless --disable-gpu --window-size=$W,1200 --virtual-time-budget=3000 --dump-dom "$SRC$q" 2>/dev/null \
         | grep -o 'data-h="[0-9]*"' | grep -o '[0-9]*')
     [ -n "$h" ] || { echo "$lang: 没读到页面高度" >&2; exit 1; }
