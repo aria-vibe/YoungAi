@@ -1,0 +1,9 @@
+{"task": "aime25", "id": "24", "why": "答 150 金 149", "round": "t002", "date": "2026-10-31", "metric": "AIME25", "kept": "c5f27cdb260b(t008b)"}
+{"task": "aime25", "id": "30", "why": "答 None 金 240 撞上限", "round": "t002", "date": "2026-10-31", "metric": "截断率", "kept": "c5f27cdb260b(t008b)"}
+{"task": "hmmt_feb26", "id": "17", "why": "答 1572 金 1574", "round": "t002", "date": "2026-10-31", "metric": "HMMT Feb26", "kept": "c5f27cdb260b(t008b)"}
+{"task": "gpqa_diamond", "id": "g091", "why": "答 B 金 C", "round": "t002", "date": "2026-10-31", "metric": "GPQA-D", "kept": "c5f27cdb260b(t008b)"}
+{"task": "mmlu_pro", "id": "11579", "why": "答 G 金 E", "round": "t002", "date": "2026-10-31", "metric": "MMLU-Pro", "kept": "c5f27cdb260b(t008b)"}
+{"task": "lcb_v6", "id": "arc196_a", "why": "test 4: wrong answer", "round": "t002", "date": "2026-10-31", "metric": "LCB v6", "kept": "c5f27cdb260b(t008b)"}
+{"task": "ifeval", "id": "3442", "why": "违指令", "round": "t002", "date": "2026-10-31", "metric": "IFEval", "kept": "c5f27cdb260b(t008b)"}
+{"task": "aider", "id": "go/exercises/practice/wordy", "why": "单测挂", "round": "t002", "date": "2026-10-31", "metric": "Aider", "kept": "c5f27cdb260b(t008b)"}
+{"task": "aime25", "id": "28", "why": "答 48 金 248", "round": "t002", "date": "2026-10-31", "metric": "六项均分", "kept": "c5f27cdb260b(t008b)"}
