@@ -76,7 +76,7 @@ RS_NAME="DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-restore_fit_n15360-
 pt_sidecar(){ sed -n "s/^ *$PT_DOMAIN) *echo \"\(DeepSeek-[^\"]*-engine\)\";;\$/\1/p" "$INSTALL"; }   # POSTTRAIN_DOMAIN 在仓库里的侧车目录名
 BASE_HF="$ROOT/hf/$(ins_var BASE_REPO | sed 's#.*/##')"   # 出厂权重目录 = BASE_REPO 斜杠后半截(LICENSE-DeepSeek 从这里拷)
 STAGE="$ROOT/gguf/hf_upload/${REPO#*/}"
-README_ASSETS="web/logo.jpg docs/img/arch.png docs/img/arch-en.png docs/img/studio-agent.png docs/img/studio-agent-en.png docs/img/pelican-official.png docs/img/pelican-local.png docs/img/pelican-local-1030.png docs/TECHNICAL.md docs/TECHNICAL.zh-CN.md docs/pwa.md"
+README_ASSETS="web/logo.jpg docs/img/quant_compare.png docs/img/quant_compare-en.png docs/img/arch.png docs/img/arch-en.png docs/img/studio-agent.png docs/img/studio-agent-en.png docs/img/pelican-official.png docs/img/pelican-local.png docs/img/pelican-local-1030.png docs/TECHNICAL.md docs/TECHNICAL.zh-CN.md docs/pwa.md"
 
 # 基座那一半: 分块 + SHA256SUMS + 视觉侧车。stage 在它之上再摆 README/侧车/bin/③
 stage_base() {
