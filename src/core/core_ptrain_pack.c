@@ -291,6 +291,10 @@ bool pt_pack_warm(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_data *d, u
             if (R + s->sn > r->st.cap_tok) continue;
             ps[np++] = s; R += s->sn;
         }
+        if (!np) {   /* 没有一题装得进包(全是前缀形态的长题, 10-31 t001 实撞: 12 行 aider 请求, 前缀 2388 位起步, 0 题的包走 pt_pack_step 直接失败) → 跳过, 峰值由下面最长题那趟量 */
+            fprintf(stderr, "ds4: [ptrain] 预热第 %d 包: 没有装得下 %u 位的题, 跳过(全走前缀形态)\n", pass + 1, r->st.cap_tok);
+            continue;
+        }
         if (R > *rows) *rows = R;
         le[0] = 0; nt[0] = 0;
         ok = np == 1 ? pt_step_sample(e, c, r, ps[0], 1, &le[0], &nt[0]) : pt_pack_step(e, c, r, ps, np, 1, le, nt);
