@@ -1,0 +1,26 @@
+# aider 的模型设置(--read-model-settings), 给 Aider Polyglot 跑分用: 模型是我们自己的 ds4-server, aider 不认识它,
+# 不写这份它会按 "whole" 编辑格式、温度 0、600 s 超时去跑——温 0 配思考必进长周期环(fable5 10-19), 600 s 装不下 32k token 的回复。
+# 口径对 unsloth 页: 每次回复上限 32,768 token; 温度/采样用模型卡默认(1.0 / 1.0); 开思考(reasoning_effort=high 是 ds4-server 的开关)。
+# 编辑格式 diff = aider 排行榜上 DeepSeek 系模型的格式(模型自带设置里 deepseek-chat / deepseek-r1 都是 diff)。
+# 对照: 官方 API 上的原版(aider_bench_mac.sh 第 6 个参数给 openai/deepseek-flash); 官方默认开思考, 不传 reasoning_effort; 其余同上。
+- name: openai/deepseek-flash
+  edit_format: diff
+  use_repo_map: false
+  streaming: false
+  use_temperature: 1.0
+  extra_params:
+    max_tokens: 32768
+    timeout: 3600
+    top_p: 1.0
+- name: openai/ds4
+  edit_format: diff
+  use_repo_map: false
+  streaming: false
+  use_temperature: 1.0
+  accepts_settings: [reasoning_effort]
+  extra_params:
+    max_tokens: 32768
+    timeout: 3600
+    top_p: 1.0
+    extra_body:
+      reasoning_effort: high
