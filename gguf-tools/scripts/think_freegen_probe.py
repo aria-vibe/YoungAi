@@ -28,8 +28,9 @@ def density(text, pat):
     return 1000.0 * len(re.findall(pat, text)) / max(1, len(text))
 
 
-def gen(server, q, max_tokens, timeout):
-    body = {"model": "deepseek-flash", "messages": [{"role": "user", "content": q}], "max_tokens": max_tokens, "stream": True,
+def gen(server, q, max_tokens, timeout, messages=None):
+    """messages 给了就原样发(真实 agent 请求, 10-31), 否则单条 user q"""
+    body = {"model": "deepseek-flash", "messages": messages or [{"role": "user", "content": q}], "max_tokens": max_tokens, "stream": True,
             "reasoning_effort": "high", "stream_options": {"include_usage": True}}
     req = urllib.request.Request(server.rstrip("/") + "/v1/chat/completions", data=json.dumps(body).encode("utf-8"), method="POST",
                                  headers={"Content-Type": "application/json"})
@@ -54,13 +55,14 @@ def gen(server, q, max_tokens, timeout):
 
 
 def one(a, r):
-    rs, cs, finish, usage, secs = gen(a.server, r["q"], a.max_tokens, a.timeout)
+    rs, cs, finish, usage, secs = gen(a.server, r["q"], a.max_tokens, a.timeout, r.get("messages"))
     u = usage or {}; rt = (u.get("completion_tokens_details") or {}).get("reasoning_tokens") or u.get("completion_tokens")
     ou = r.get("usage") or {}; ort = (ou.get("completion_tokens_details") or {}).get("reasoning_tokens")
     closed = bool(cs) and finish == "stop"
     state = "收口" if closed else ("有正文但 finish=" + str(finish) if cs else ("到上限没停" if finish == "length" else "没收口 finish=" + str(finish)))
     if not rs: state += "(没有思考段)"
     rec = dict(id=r["id"], q=r["q"], reasoning=rs, content=cs, finish=finish, usage=usage, secs=round(secs, 1), closed=closed, max_tokens=a.max_tokens,
+               **({"messages": r["messages"]} if r.get("messages") else {}),
                official=dict(reasoning_tokens=ort, hmm=round(density(r.get("reasoning") or "", "Hmm"), 2), wait=round(density(r.get("reasoning") or "", "(?i)wait"), 2), body=len(r.get("content") or "")))
     line = (f"| {r['id']} | {state} | {rt}({ort}) | {density(rs, 'Hmm'):.2f}({rec['official']['hmm']}) | {density(rs, '(?i)wait'):.2f}({rec['official']['wait']}) | "
             f"{len(cs)}({rec['official']['body']}) | {secs:.0f} |")

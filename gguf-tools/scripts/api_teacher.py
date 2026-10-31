@@ -176,11 +176,12 @@ def cmd_probe_hfcompare(a):
           f"Σmin(top-20∪rest) 均 {smin.mean():.4f} 中位 {np.median(smin):.4f} p5 {np.percentile(smin, 5):.4f}; KL(HF‖API) 均 {kl.mean():.5f} 中位 {np.median(kl):.5f} p95 {np.percentile(kl, 95):.5f}")
 
 
-def stream_lp(key, model, q, max_tokens, timeout, think=True):
+def stream_lp(key, model, q, max_tokens, timeout, think=True, messages=None):
     """一题流式拉完, 带 top-20; 返回 (reasoning, content, finish, usage, {列: [原始分布条…]})。
     think=False: 关思考(thinking disabled, v41_api_parity.py 同写法), 官方直接从正文写起, 只有 content 一列 —— 10-28 段 B 自学习:
-    思考模式的料正文只占 11~13%, 编程尺量的却是原始代码"""
-    body = {"model": model, "messages": [{"role": "user", "content": q}], "max_tokens": max_tokens, "logprobs": True, "top_logprobs": 20,
+    思考模式的料正文只占 11~13%, 编程尺量的却是原始代码
+    messages 给了就原样发(真实 agent 请求: system + 示例轮 + user, 10-31), q 只当标签"""
+    body = {"model": model, "messages": messages or [{"role": "user", "content": q}], "max_tokens": max_tokens, "logprobs": True, "top_logprobs": 20,
             "stream": True, "stream_options": {"include_usage": True}, **({} if think else {"thinking": {"type": "disabled"}})}
     ent = {"reasoning_content": [], "content": []}; txt = {"reasoning_content": [], "content": []}; usage = finish = None
     with post(API_URL, key, body, timeout) as r:
@@ -240,7 +241,7 @@ def collect_one(key, model, item, max_tokens, timeout, tok, b2id, id2b, think=Tr
         try:
             t0 = time.time()
             reasoning, content, finish, usage, ent = (raw_lp(key, model, item["q"], max_tokens, timeout) if raw
-                                                      else stream_lp(key, model, item["q"], max_tokens, timeout, think))
+                                                      else stream_lp(key, model, item["q"], max_tokens, timeout, think, item.get("messages")))
             # 裸续写第一位就采到 EOS(0 位): 多数是温 1 采样本身(10-28 同一个开头三采一次), 同一个开头再采;
             #   第三次起开头补一个换行 —— Go 的 "package x\n" 后面几乎总是空行, 词表里那是一个 "\n\n" token, 停在单个换行上它从没见过这种切法,
             #   o004 四采全是 EOS; 补成 "\n\n" 结尾就是规范切分。实际发出去的开头写回 q(行的 prefix 用它, 与官方看到的逐字同)
@@ -272,7 +273,8 @@ def cmd_collect(a):
         if not ln.strip(): continue
         r = json.loads(ln); t = r.get("text", ""); u, s = t.find(USER), t.find(ASST)
         q = r.get("q") or (t[u + len(USER):s] if 0 <= u < s else None)
-        if q: qs.append({"id": str(r.get("id") or f"{os.path.basename(a.questions)}#{i}"), "q": q})
+        if r.get("messages") and not q: q = [m for m in r["messages"] if m["role"] == "user"][-1]["content"]   # 多条消息的行: q = 最后一条 user, 只当标签
+        if q: qs.append({"id": str(r.get("id") or f"{os.path.basename(a.questions)}#{i}"), "q": q, **({"messages": r["messages"], "src": r.get("src", "task")} if r.get("messages") else {})})
     done = set(); rows = []
     if os.path.exists(a.out):
         for ln in open(a.out, encoding="utf-8"):

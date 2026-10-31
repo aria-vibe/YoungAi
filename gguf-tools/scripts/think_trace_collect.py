@@ -44,6 +44,34 @@ EFFORT_BUDGET = {"low": 50, "high": 75, "max": 100}   # 官方 encoding.py REASO
 SYS, USER, ASST, THINK, THINK_END, EOS = "<｜System｜>", "<｜User｜>", "<｜Assistant｜>", "<think>", "</think>", "<｜end▁of▁sentence｜>"
 
 
+def render_messages(msgs, effort="high"):
+    """多条消息(system / 示例 user-assistant 轮 / user)→ 思考档的对话帧前缀, 末尾停在 <｜Assistant｜><think>, 不带 BOS(训练器自己加, 与 HEAD + USER + q 的老写法同约定)。
+    逐字节照 src/server/server_dsml_render.c render_chat_prompt_text(2026-10-31, 真实 agent 请求当料: aider 一条请求 10 条消息):
+      <｜System｜> + effort 前缀 + 全部 system 正文("\\n\\n" 连) ; user → <｜User｜>正文 ; 历史 assistant(在最后一条 user 之前)→ <｜Assistant｜></think>正文<｜end▁of▁sentence｜>
+    只认 system / user / assistant 三种角色且 user / assistant 交替; tool 消息、连续两条 user 这里不支持(服务端另有拼法), 碰到直接报错, 不猜。
+    单条 user 时 == SYS + EFFORT + USER + q + ASST + THINK(api_branch.HEAD 的老写法), 老料不变。"""
+    sysm = [m for m in msgs if m["role"] in ("system", "developer")]
+    out = SYS + EFFORT_PREFIX.format(budget=EFFORT_BUDGET[effort]) + "\n\n".join(m.get("content") or "" for m in sysm)
+    last_user = max(i for i, m in enumerate(msgs) if m["role"] == "user")
+    pending = False
+    for i, m in enumerate(msgs):
+        if m["role"] in ("system", "developer"): continue
+        if m["role"] == "user":
+            assert not pending, "连续两条 user 消息: 服务端的拼法这里没实现"
+            out += USER + (m.get("content") or ""); pending = True
+        elif m["role"] == "assistant":
+            assert pending, "assistant 消息前没有 user"
+            out += ASST + ((THINK + (m.get("reasoning_content") or "") + THINK_END) if i > last_user else THINK_END) + (m.get("content") or "") + EOS; pending = False
+        else: raise ValueError(f"不支持的角色 {m['role']}")
+    assert pending, "最后一条不是 user"
+    return out + ASST + THINK
+
+
+def user_msgs(q_or_msgs, q=None):
+    """统一入口: 行里有 messages 就用它, 否则单条 user 提问"""
+    return q_or_msgs if isinstance(q_or_msgs, list) else [{"role": "user", "content": q if q is not None else q_or_msgs}]
+
+
 def read_jsonl(path):
     if not os.path.exists(path):
         return []
