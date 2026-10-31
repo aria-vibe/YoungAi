@@ -2,7 +2,8 @@
 # posttrain_fp_spark.sh — ③ 向出厂原件蒸馏的整链(2026-10-22, docs/think_close.md §5): 装料导序列 → FP 参考前向打 top-K → 训 ③。
 #
 # 用法(spark 仓库根; 本脚本不停模型, 包在停模型包装器里跑):
-#   nohup gguf-tools/scripts/with_model_stopped_spark.sh gguf-tools/scripts/posttrain_fp_spark.sh <ptrain.cfg> <HF 出厂权重目录> <② 侧车目录|none> [每趟打分最多几条=96] [附加序列文件] [API 原料] [apionly] > /tmp/bugmd/pt_fp_<时间>.log 2>&1 &
+#   nohup gguf-tools/scripts/with_model_stopped_spark.sh gguf-tools/scripts/posttrain_fp_spark.sh <ptrain.cfg> <HF 出厂权重目录> <② 侧车目录|none> [每趟打分最多几条=96] [附加序列文件] [API 原料] [apionly|teacheronly] > /tmp/bugmd/pt_fp_<时间>.log 2>&1 &
+#   第 7 参 teacheronly(10-31): 只跑 ①② 出 teacher.ptf 就退, 不训 ③(参数锚攒 F 用: 尺的门半边窗当料, judge_gate_rows.py 出行, 表给 --fisher-only)
 #   每趟条数的内存账(10-22 实测, 96 条 / 5.6 万位 / 最长 1001): 教师进程整机占 73 GB(CUDA 分配不进 RSS, 看 free 的 used), 可用 51 GB;
 #   73 GB 里多少随条数长没拆过, 加条数先在新趟开头看 used 的涨幅, 不盲加。
 #   ptrain.cfg 照工作台写法(data= hold= out= epochs= layers= …, 见 model_train_job.c write_cfg), ★不要写 teacher=/dumpids=★: 本脚本按阶段自己加。
@@ -105,6 +106,8 @@ for p in "${PARTS[@]}"; do
 done
 cat "${PARTS[@]/%/.ptf}" > "$OUTD/teacher.ptf"
 M "② 完成: $OUTD/teacher.ptf $(du -h "$OUTD/teacher.ptf" | cut -f1)"
+# 第 7 个参数 teacheronly(10-31 参数锚攒 F): 只要 ①② 的教师表, 不训 ③ —— 表交给 restore_B_api_round_spark.sh --fisher-only(lr=0 只攒 g²)
+[ "${7:-}" = teacheronly ] && { M "teacheronly: 教师表已出, 不训 ③"; exit 0; }
 
 # ③ 训
 { cat "$CFG"; echo "teacher=fp:$OUTD/teacher.ptf"; } > "$OUTD/stage3.cfg"
