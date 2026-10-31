@@ -90,19 +90,19 @@ Spark, Metal on the Mac, one Makefile, no third-party libraries linked.
 ## The model
 
 A 113.6 GB base plus a 145 MB restore sidecar picks the same next token as the 510 GB original weights (Same top)
-**85.0%** of the time on code:
+**85.1%** of the time on code:
 
 | | Size | Code | General English |
 |---|---:|---:|---:|
 | ① base | 113.6 GB | 78.4% | 76.8% |
 | ① + ② code sidecar | + 41 MB | 82.0% | 79.7% |
 | ① + ② + ③ post-training | + 101 MB | 84.8% | 82.4% |
-| **① + restore sidecar (default on the Spark)** | **+ 145 MB** | **85.0%** | **82.0%** |
+| **① + restore sidecar (default on the Spark)** | **+ 145 MB** | **85.1%** | **82.2%** |
 
 "Same" means that on the same text, our model and the original rank the same token first. Code is 15,360 held-out tokens
-across 30 languages; general English is WikiText-2. Mean KL by row: code 0.446 → 0.318 → 0.230 → 0.230, general English
-0.803 → 0.673 → 0.574 → 0.586. Against ② + ③ the restore sidecar is ahead on code Same top and level on code KL; on general
-English it is 0.4 points lower (2 of 512 tokens), above the 80% floor we hold it to.
+across 30 languages; general English is WikiText-2. Mean KL by row: code 0.446 → 0.318 → 0.230 → 0.227, general English
+0.803 → 0.673 → 0.574 → 0.590. Against ② + ③ the restore sidecar is ahead on code Same top and level on code KL; on general
+English it is 0.2 points lower (1 of 512 tokens), above the 80% floor we hold it to.
 
 **Three things get 113.6 GB this far:**
 
