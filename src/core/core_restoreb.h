@@ -37,6 +37,18 @@ bool rb_route_alloc(rb_route *rt, const pt_cfg *c, pt_run *r, const char *init);
 bool rb_route_step(rb_route *rt, const pt_cfg *c, pt_run *r, uint32_t step, double *gn);   /* Adam(核里清零梯度), gn = ‖∇S‖ */
 bool rb_route_save(const pt_cfg *c, const pt_run *r, const char *dir);
 void rb_route_free(rb_route *rt);
+/* core_restoreb_init.c: 起点 + 参数锚(EWC 的解耦版, 10-31; 为什么与文件格式见该文件头)。rb_anchor_alloc 要在 rb_load_init 之后调(p0 = 此刻的 A/B);
+ * rb_anchor_step 每个优化步在 Adam 之前调(攒数据梯度的 g²); rb_anchor_pull 在 Adam 之后调(θ ← θ − (F/(F̄·S))·(θ−θ*)); rb_anchor_save 随 ckpt 落 fisher_Lnn.bin。 */
+bool rb_load_init(const pt_cfg *c, pt_run *r, const char *dir);
+typedef struct {
+    float lam, coef; bool have_f; uint32_t nold, steps; double fmean, pen, gn2;   /* lam = rb_anchor 的 S, coef = 1/(F̄·S); 起点有没有 F / 攒过几轮 / 本轮步数 / F 均值 / 本轮累计 Σ F·Δθ² 与拉回位移² */
+    ds4_gpu_tensor *p0A[DS4_MAX_LAYER], *p0B[DS4_MAX_LAYER], *FA[DS4_MAX_LAYER], *FB[DS4_MAX_LAYER], *accA[DS4_MAX_LAYER], *accB[DS4_MAX_LAYER];
+} rb_anchor;
+bool rb_anchor_alloc(rb_anchor *an, const pt_cfg *c, const pt_run *r, const char *init, float lam);
+bool rb_anchor_step(rb_anchor *an, const pt_cfg *c, pt_run *r, double *pen, double *gn2);
+bool rb_anchor_pull(rb_anchor *an, const pt_cfg *c, pt_run *r, double *pen, double *gn2);
+bool rb_anchor_save(const rb_anchor *an, const pt_cfg *c, const char *dir);
+void rb_anchor_free(rb_anchor *an);
 /* core_restoreb_bwd.c: 段 B 自己的逐层反传(= pt_layers_bwd 单题路 + 每层 g_y 出来后调 rb_aux_layer; as 为 NULL 不调; rt 非 NULL = 带路由) */
 bool rb_layers_bwd(ds4_engine *e, const pt_cfg *c, pt_run *r, uint32_t n, rb_auxstep *as, rb_route *rt);
 

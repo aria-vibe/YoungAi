@@ -408,6 +408,59 @@ int ds4_gpu_bwd_adam_tensor(ds4_gpu_tensor *p, ds4_gpu_tensor *g, ds4_gpu_tensor
     return cuda_ok(cudaGetLastError(), "bwd adam");
 }
 
+/* 参数锚: facc 先吃数据梯度的平方(锚梯度加进 g 之前), 两个和(罚项 / 锚梯度范数²)按块树形求和后 double 原子累加 */
+__global__ static void bwd_anchor_kernel(double *out, float *g, float *facc, const float *p, const float *p0, const float *F, uint64_t n, float lam) {
+    __shared__ float sh[32];
+    float sp = 0.f, sg = 0.f;
+    for (uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (uint64_t)gridDim.x * blockDim.x) {
+        const float gi = g[i];
+        facc[i] += gi * gi;
+        if (F) { const float d = p[i] - p0[i], fd = F[i] * d, a = lam * fd; g[i] = gi + a; sp += fd * d; sg += a * a; }
+    }
+    sp = bwd_block_sum(sp, sh);
+    sg = bwd_block_sum(sg, sh);
+    if (threadIdx.x == 0) { atomicAdd(out, (double)sp); atomicAdd(out + 1, (double)sg); }
+}
+__global__ static void bwd_pull_kernel(double *out, float *p, const float *p0, const float *F, uint64_t n, float coef) {
+    __shared__ float sh[32];
+    float sp = 0.f, sg = 0.f;
+    for (uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x; i < n; i += (uint64_t)gridDim.x * blockDim.x) {
+        const float d = p[i] - p0[i], fd = F[i] * d;
+        float k = coef * F[i]; if (k > 1.f) k = 1.f;   /* 封顶: 最多拉回全部位移。F 重尾, 不封顶的坐标系数 > 1 一步拉过头, 下一步更过头, 10-31 t008 步 10 位移 rms 1.35e3 炸掉 */
+        const float s = k * d;
+        p[i] -= s; sp += fd * d; sg += s * s;
+    }
+    sp = bwd_block_sum(sp, sh);
+    sg = bwd_block_sum(sg, sh);
+    if (threadIdx.x == 0) { atomicAdd(out, (double)sp); atomicAdd(out + 1, (double)sg); }
+}
+int ds4_gpu_bwd_pull_tensor(ds4_gpu_tensor *p, const ds4_gpu_tensor *p0, const ds4_gpu_tensor *F, uint64_t n, float coef, double *pen, double *gn2) {
+    if (!p || !p0 || !F || !pen || !gn2) return 0;
+    double *d = (double *)v41_grow(&g_bwd_dsum, 2 * sizeof(double), "bwd pull");
+    if (!d || !cuda_ok(cudaMemsetAsync(d, 0, 2 * sizeof(double), v41_cublas_stream()), "bwd pull zero")) return 0;
+    bwd_pull_kernel<<<512, 256, 0, g_cur_stream>>>(d, (float *)p->ptr, (const float *)p0->ptr, (const float *)F->ptr, n, coef);
+    if (!cuda_ok(cudaGetLastError(), "bwd pull")) return 0;
+    double h[2] = { 0, 0 };
+    if (!cuda_ok(cudaMemcpyAsync(h, d, 2 * sizeof(double), cudaMemcpyDeviceToHost, v41_cublas_stream()), "bwd pull d2h") ||
+        !cuda_ok(cudaStreamSynchronize(v41_cublas_stream()), "bwd pull sync")) return 0;
+    *pen += h[0]; *gn2 += h[1];
+    return 1;
+}
+int ds4_gpu_bwd_anchor_tensor(ds4_gpu_tensor *g, ds4_gpu_tensor *facc, const ds4_gpu_tensor *p, const ds4_gpu_tensor *p0,
+                              const ds4_gpu_tensor *F, uint64_t n, float lam, double *pen, double *gn2) {
+    if (!g || !facc || !p || !p0 || !pen || !gn2) return 0;
+    double *d = (double *)v41_grow(&g_bwd_dsum, 2 * sizeof(double), "bwd anchor");
+    if (!d || !cuda_ok(cudaMemsetAsync(d, 0, 2 * sizeof(double), v41_cublas_stream()), "bwd anchor zero")) return 0;
+    bwd_anchor_kernel<<<512, 256, 0, g_cur_stream>>>(d, (float *)g->ptr, (float *)facc->ptr, (const float *)p->ptr, (const float *)p0->ptr,
+                                                     F ? (const float *)F->ptr : NULL, n, lam);
+    if (!cuda_ok(cudaGetLastError(), "bwd anchor")) return 0;
+    double h[2] = { 0, 0 };
+    if (!cuda_ok(cudaMemcpyAsync(h, d, 2 * sizeof(double), cudaMemcpyDeviceToHost, v41_cublas_stream()), "bwd anchor d2h") ||
+        !cuda_ok(cudaStreamSynchronize(v41_cublas_stream()), "bwd anchor sync")) return 0;
+    *pen += h[0]; *gn2 += h[1];
+    return 1;
+}
+
 /* 层入口 hc 存档: 值本来就在 bf16 格点上(hc_post/嵌入/engram 出口都舍过), 存高 16 位无损; v41_bf16r 兜底(万一上游漏舍也只差一次正确舍入) */
 __global__ static void bwd_pack16_kernel(uint16_t *o, const float *x, uint64_t n) {
     const uint64_t i = (uint64_t)blockIdx.x * blockDim.x + threadIdx.x;
