@@ -14462,3 +14462,6 @@ PPL 2.8852 对 2.8827(比值 **1.001**), Σmin **0.9695**(中位 0.981), Mean KL
 - **pel-c5f2 跑完(21:17 自收手, rc 0, 1769 s, 事件 314: 思考段 59 / 6.8 万字, 工具调用 62 = bash 36 + 截图读图 + 搜网 1)**: 终稿 = 第一稿只改一处(云的 animation-delay −34s → −10s), 25,120 B / path 65 / transform-origin 7, SVG XML 自查过;
   收尾正文自述: 红头盔红围巾、喉囊随节奏晃、轮/曲柄/腿同步、翅膀拍、云/太阳/路面虚线动、prefers-reduced-motion。截图 .playwright-mcp/pel-c5f2_final.png(与 draft1 同构图)。
   ⇒ 第一稿即成稿, 29 分钟自审只动一个数字, 自己收手(d006 跑到第 30 步被叫停, v4q 第 27 轮卡在 Chromium)。鹈鹕不在料里, 是泛化侧的一个点: 带锚那一轮没把它搞坏, 反而是今天最利落的一趟。
+- **提交与发布(21:2x~21:37)**: make test 全套过后分 9 个 commit(391ef92c…55ff16e9)+ README 读数 df18ffcd(85.1 / 82.2); 六项题集 jsonl 按 GPQA 许可不进仓库。
+  git push 被 GitHub 拒(403 "You must verify your email address"), 要在 github.com/settings/emails 验邮箱后再推。
+  HF: 还原侧车 c5f2 先误传到老仓库 YoungAi-DeepSeek-V4.1-Flash(现役仓库是 -1017 那个, docs 检查拦住才发现), 已删老仓库里的误传目录; 重传 -1017: 106 文件(改了 40 amp + manifest, 65 同)73 s 逐字节核过, manifest 末行 = t008b 段 B; docs(README ×2 + TECHNICAL ×2 + 图 + install.sh)10 s。
