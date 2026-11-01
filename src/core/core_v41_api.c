@@ -381,6 +381,10 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
             }
             uint32_t a = 0;
             while (a < k && want[a] == batch[a + 1u]) a++;   /* 接受最长前缀(采样下 want 已按"接受 ⇒ 草稿 / 拒绝 ⇒ 残差"拼好, 同一句) */
+            /* Only emitted tokens may enter the end checkpoint. Keeping an
+             * accepted suffix past max_tokens prevents the next turn matching it. */
+            const uint32_t remaining = (uint32_t)(n_predict - produced);
+            if (a > remaining) a = remaining;
             /* 每个出过草稿的轮都观测首位(k=0 的轮看吐出的 token 是否就是草稿首位), 否则校准会死锁在 ρ=0(见 core_v41.h) */
             if (drafted && !g_ds4_v41_verify_k) v41_sched_observe(&cal, dr.host_conf, k ? (a >= 1u) : (want[0] == dr.host_ids[1]));
             /* ★每出一次草稿打一行账(2026-09-19, --emit-trace 或 --v41-prof)★: 位置 / 调度器选的 k 与预测比值 / 实际接受 /
