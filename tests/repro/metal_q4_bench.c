@@ -9,7 +9,7 @@ static double seconds(void) {
     return (double)t.tv_sec + (double)t.tv_nsec * 1e-9;
 }
 int main(void) {
-    const uint32_t K = 5120, O = 32768, REPS = 8;
+    const uint32_t K = 5120, O = 32768, REPS = 64;
     const uint64_t bytes = test_v41_wbytes(V41_WT_Q4K, O, K);
     test_v41_seed(0x6161);
     if (!ds4_gpu_init() || !test_v41_model_begin(bytes + 4096)) return 1;
@@ -23,7 +23,10 @@ int main(void) {
     free(x);
     for (uint32_t n = 1; n <= 8; n++) {
         /* Warm the selected pipeline before five timed command batches. */
-        if (!ds4_gpu_v41_matmul_q4k_tensor(out, test_v41_model_map(), test_v41_model_size(), off, K, O, tx, n, 1) || !ds4_gpu_synchronize()) return 1;
+        if (!ds4_gpu_begin_commands()) return 1;
+        for (uint32_t i = 0; i < REPS; i++)
+            if (!ds4_gpu_v41_matmul_q4k_tensor(out, test_v41_model_map(), test_v41_model_size(), off, K, O, tx, n, 1)) return 1;
+        if (!ds4_gpu_end_commands()) return 1;
         for (int run = 0; run < 5; run++) {
             const double begin = seconds();
             if (!ds4_gpu_begin_commands()) return 1;

@@ -39,9 +39,11 @@ contract so new callers cannot depend on late host writes.
 ## Arithmetic and model-free validation
 
 The Q4_K verification kernel shares packed weights/scales across 2–8 rows and uses
-the single-row lane/block traversal and SIMD reduction. Reassociation and implicit
-FMA contraction are disabled locally in both Q4_K kernels: otherwise compiler
-choices can change the result with NT even when the source expression is identical.
+the single-row lane/block traversal and SIMD reduction. Reassociation is disabled locally in both Q4_K kernels, with within-expression
+FMA contraction enabled: otherwise compiler choices can change the result with NT
+even when the source expression is identical. Packed weights/scales and the current
+activation row are shared across the two output rows; activation arrays do not grow
+with NT, avoiding register spills at larger batches.
 This may change baseline single-row rounding and requires the model-level gate.
 The skip flag remains grid-wide (`skip[0]`).
 

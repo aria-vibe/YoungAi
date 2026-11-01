@@ -70,7 +70,7 @@ kernel void kernel_v41_gemv_q4k_ll(constant v41_gemv_args &a [[buffer(0)]], devi
                                    device float *out [[buffer(3)]], device const int *skip [[buffer(4)]],
                                    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]],
                                    ushort sgitg [[simdgroup_index_in_threadgroup]]) {
-    #pragma clang fp reassociate(off) contract(off)
+    #pragma clang fp reassociate(off) contract(on)
     if (a.has_skip != 0u && skip[0] >= 0) return;
     constexpr ushort kmask1 = 0x3f3f, kmask2 = 0x0f0f, kmask3 = 0xc0c0;
     const uint g = tgpig.y;
@@ -136,7 +136,7 @@ kernel void kernel_v41_gemv_q4k_w(constant v41_gemv_args &a [[buffer(0)]], devic
                                    device float *out [[buffer(3)]], device const int *skip [[buffer(4)]],
                                    uint3 tgpig [[threadgroup_position_in_grid]], ushort tiisg [[thread_index_in_simdgroup]],
                                    ushort sgitg [[simdgroup_index_in_threadgroup]]) {
-    #pragma clang fp reassociate(off) contract(off)
+    #pragma clang fp reassociate(off) contract(on)
     if (a.has_skip != 0u && skip[0] >= 0) return;
     constexpr ushort kmask1 = 0x3f3f, kmask2 = 0x0f0f, kmask3 = 0xc0c0;
     const uint g = tgpig.y;
@@ -145,51 +145,51 @@ kernel void kernel_v41_gemv_q4k_w(constant v41_gemv_args &a [[buffer(0)]], devic
     const uint nb = a.in_dim / 256u, rowb = nb * 144u;
     const uint first_row = (tgpig.x * V41_Q4K_NSG + sgitg) * V41_Q4K_NR0;
     device const uchar *wrow = w + a.w_off + (ulong)g * a.w_gstride + (ulong)first_row * rowb;
-    float yl[NT][16], yh[NT][16];
     float sumf[NT][V41_Q4K_NR0] = {};
-    ushort sc16[4];
-    thread const uchar *sc8 = (thread const uchar *)sc16;
     for (uint ib = ix; ib < nb; ib += 4) {
-        float4 sumy[NT] = {};
+        ushort4 scales[V41_Q4K_NR0], qlo[V41_Q4K_NR0], qhi[V41_Q4K_NR0];
+        half2 dm[V41_Q4K_NR0];
+        for (short row = 0; row < V41_Q4K_NR0; row++) {
+            device const uchar *blk = wrow + (ulong)row * rowb + (ulong)ib * 144u;
+            device const ushort *sc = (device const ushort *)(blk + 4) + iq;
+            device const ushort *q1 = (device const ushort *)(blk + 16) + 16 * iq + 4 * ir;
+            scales[row][0] = sc[0] & kmask1;
+            scales[row][1] = sc[2] & kmask1;
+            scales[row][2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
+            scales[row][3] = ((sc[4] >> 4) & kmask2) | ((sc[2] & kmask3) >> 2);
+            qlo[row] = *(device const ushort4 *)q1;
+            qhi[row] = *(device const ushort4 *)(q1 + 32);
+            dm[row] = *(device const half2 *)blk;
+        }
         for (uint t = 0; t < NT; t++) {
+            float yl[16], yh[16];
+            float4 sumy = {};
             device const float *y4 = x + (ulong)t * a.x_stride + ib * 256u + 64 * iq + 8 * ir;
             for (short i = 0; i < 8; ++i) {
-                yl[t][i + 0] = y4[i + 0];   sumy[t][0] += yl[t][i + 0];
-                yl[t][i + 8] = y4[i + 32];  sumy[t][1] += yl[t][i + 8];
-                yh[t][i + 0] = y4[i + 128]; sumy[t][2] += yh[t][i + 0];
-                yh[t][i + 8] = y4[i + 160]; sumy[t][3] += yh[t][i + 8];
+                yl[i + 0] = y4[i + 0];   sumy[0] += yl[i + 0];
+                yl[i + 8] = y4[i + 32];  sumy[1] += yl[i + 8];
+                yh[i + 0] = y4[i + 128]; sumy[2] += yh[i + 0];
+                yh[i + 8] = y4[i + 160]; sumy[3] += yh[i + 8];
             }
-        }
-        device const uchar *blk = wrow + (ulong)ib * 144u;
-        device const ushort *sc = (device const ushort *)(blk + 4) + iq;
-        device const ushort *q1 = (device const ushort *)(blk + 16) + 16 * iq + 4 * ir;
-        device const half *dh = (device const half *)blk;
-        for (short row = 0; row < V41_Q4K_NR0; row++) {
-            sc16[0] = sc[0] & kmask1;
-            sc16[1] = sc[2] & kmask1;
-            sc16[2] = ((sc[4] >> 0) & kmask2) | ((sc[0] & kmask3) >> 2);
-            sc16[3] = ((sc[4] >> 4) & kmask2) | ((sc[2] & kmask3) >> 2);
-            const ushort4 qlo = *(device const ushort4 *)q1;
-            const ushort4 qhi = *(device const ushort4 *)(q1 + 32);
-            for (uint t = 0; t < NT; t++) {
+            for (short row = 0; row < V41_Q4K_NR0; row++) {
+                thread const uchar *sc8 = (thread const uchar *)(scales + row);
                 float4 acc1 = { 0.f, 0.f, 0.f, 0.f }, acc2 = { 0.f, 0.f, 0.f, 0.f };
                 for (short i = 0; i < 4; ++i) {
-                    acc1[0] += yl[t][2 * i + 0] * (qlo[i] & 0x000F);
-                    acc1[1] += yl[t][2 * i + 1] * (qlo[i] & 0x0F00);
-                    acc1[2] += yl[t][2 * i + 8] * (qlo[i] & 0x00F0);
-                    acc1[3] += yl[t][2 * i + 9] * (qlo[i] & 0xF000);
-                    acc2[0] += yh[t][2 * i + 0] * (qhi[i] & 0x000F);
-                    acc2[1] += yh[t][2 * i + 1] * (qhi[i] & 0x0F00);
-                    acc2[2] += yh[t][2 * i + 8] * (qhi[i] & 0x00F0);
-                    acc2[3] += yh[t][2 * i + 9] * (qhi[i] & 0xF000);
+                    acc1[0] += yl[2 * i + 0] * (qlo[row][i] & 0x000F);
+                    acc1[1] += yl[2 * i + 1] * (qlo[row][i] & 0x0F00);
+                    acc1[2] += yl[2 * i + 8] * (qlo[row][i] & 0x00F0);
+                    acc1[3] += yl[2 * i + 9] * (qlo[row][i] & 0xF000);
+                    acc2[0] += yh[2 * i + 0] * (qhi[row][i] & 0x000F);
+                    acc2[1] += yh[2 * i + 1] * (qhi[row][i] & 0x0F00);
+                    acc2[2] += yh[2 * i + 8] * (qhi[row][i] & 0x00F0);
+                    acc2[3] += yh[2 * i + 9] * (qhi[row][i] & 0xF000);
                 }
-                sumf[t][row] += float(dh[0]) * ((acc1[0] + 1.f / 256.f * acc1[1]) * sc8[0] +
-                                             (acc1[2] + 1.f / 256.f * acc1[3]) * sc8[1] * 1.f / 16.f +
-                                             (acc2[0] + 1.f / 256.f * acc2[1]) * sc8[4] +
-                                             (acc2[2] + 1.f / 256.f * acc2[3]) * sc8[5] * 1.f / 16.f) -
-                             float(dh[1]) * (sumy[t][0] * sc8[2] + sumy[t][1] * sc8[3] + sumy[t][2] * sc8[6] + sumy[t][3] * sc8[7]);
+                sumf[t][row] += float(dm[row][0]) * ((acc1[0] + 1.f / 256.f * acc1[1]) * sc8[0] +
+                (acc1[2] + 1.f / 256.f * acc1[3]) * sc8[1] * 1.f / 16.f +
+                (acc2[0] + 1.f / 256.f * acc2[1]) * sc8[4] +
+                (acc2[2] + 1.f / 256.f * acc2[3]) * sc8[5] * 1.f / 16.f) -
+                float(dm[row][1]) * (sumy[0] * sc8[2] + sumy[1] * sc8[3] + sumy[2] * sc8[6] + sumy[3] * sc8[7]);
             }
-            q1 += rowb / 2; sc += rowb / 2; dh += rowb / 2;
         }
     }
     for (uint t = 0; t < NT; t++) for (short row = 0; row < V41_Q4K_NR0; ++row) {
