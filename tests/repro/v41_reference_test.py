@@ -122,6 +122,40 @@ def test_embedding_policy():
         torch.testing.assert_close(actual, values[1:].to(dtype), rtol=0, atol=0)
 
 
+def test_precision_controls():
+    # Invalid key slots must contribute neither value nor denominator; the sink
+    # contributes only to the denominator. This closed-form case is independent
+    # of any engine kernel or floating-point reduction order.
+    from v41_reference_precision import install
+    import v41_patches as patches
+    old_f = patches.F
+    model = SimpleNamespace()
+    try:
+        install(model, ['attention', 'rowwise'])
+        q = torch.zeros(1, 2, 2, 8, dtype=torch.bfloat16)
+        kv = torch.stack([torch.ones(8), torch.full((8,), 3.)])[None].to(torch.bfloat16)
+        ids = torch.tensor([[[0, -1], [0, 1]]])
+        got = model.sparse_attn(q, kv, torch.zeros(2), ids, 1.)
+        expected = torch.stack([torch.full((2, 8), .5), torch.full((2, 8), 4/3)])[None].to(q.dtype)
+        torch.testing.assert_close(got, expected, rtol=0, atol=0)
+        ids.fill_(-1)
+        assert torch.count_nonzero(model.sparse_attn(q, kv, torch.zeros(2), ids, 1.)) == 0
+        # Rowwise controls must retain prefix values when unrelated future rows
+        # are added, including the grouped projection used outside M.linear.
+        generator = torch.Generator().manual_seed(17)
+        x = torch.randn(1, 9, 3, 32, generator=generator)
+        w = torch.randn(3, 8, 32, generator=generator)
+        short = model.torch.einsum('bsgd,grd->bsgr', x[:, :2], w)
+        full = model.torch.einsum('bsgd,grd->bsgr', x, w)
+        torch.testing.assert_close(short, full[:, :2], rtol=0, atol=0)
+        weight = w.flatten(0, 1)
+        short = model.F.linear(x[:, :2], weight)
+        full = model.F.linear(x, weight)
+        torch.testing.assert_close(short, full[:, :2], rtol=0, atol=0)
+    finally:
+        patches.F = old_f
+
+
 if __name__ == '__main__':
     ap=argparse.ArgumentParser(description=__doc__);ap.add_argument('--gguf',required=True)
-    a=ap.parse_args();test_primitives();test_sidecars();test_embedding_policy();test_real_vq(Weights(a.gguf));print('CPU reference tests: PASS')
+    a=ap.parse_args();test_primitives();test_sidecars();test_embedding_policy();test_real_vq(Weights(a.gguf));test_precision_controls();print('CPU reference tests: PASS')

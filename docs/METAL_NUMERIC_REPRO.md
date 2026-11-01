@@ -125,3 +125,15 @@ setup, scope and measured results. The ranking of PR #7 versus baseline reverses
 between the official bf16 embedding and exact Q4_K embedding policies. Neither
 comparison reaches the upstream same-weight KL target. The numerical merge gate remains open; completed runs, lower fixture NLL
 and exact chunk agreement must not be reported as an independent parity pass.
+
+## Follow-up: FP4 midpoint parity
+
+The independent CPU trace exposed a separate compressed-KV quantizer defect.
+Fast division by an E4M3 scale can move exact FP4 halfway values across the
+round-to-nearest-even boundary. Activation quantization and packed-KV encoding
+now compare values directly against scaled midpoints; E4M3 scale selection uses
+the same approach instead of dividing the block maximum by six. This preserves
+fast math elsewhere and removes the problematic division from these small kernels.
+Exhaustive scale/midpoint regressions fail before the fix and pass afterward.
+See [the precision-isolation record](METAL_REFERENCE_REPRO.md#precision-isolation-2026-11-01-utc)
+for the real-model reproduction, reference-policy controls, and remaining gates.

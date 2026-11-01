@@ -143,3 +143,96 @@ overlap target is not a substitute. Differences due to the CPU adaptations and
 engine behavior still need to be isolated before interpreting this as a specific
 kernel defect or accepting the rounding change. The reference uses the quantized
 model, not original FP weights; an official CUDA-kernel comparison remains separate.
+
+## Precision isolation (2026-11-01 UTC)
+
+The earlier tables predate the FP4 midpoint correction. Repeating the same CPU
+configuration is deterministic, but changing its batch length is a separate test:
+with two tokens versus the first two rows of the 128-token run, the original CPU
+reference changes logits by up to 5.352 (bf16 embedding) / 12.356 (exact embedding).
+The corresponding native two-token trace matches its 128-token prefix exactly.
+Do not mistake same-shape reproducibility for a batch-independent oracle.
+
+Explicit `--precision-adaptation` options isolate the following differences. None
+is enabled by default, and any such run is marked `diagnostic: true` in its JSON.
+The pinned downloaded source is still checked unchanged; these options monkeypatch
+individual primitives/boundaries in memory. They are comparison experiments, not
+an assertion that the engine implements the official CUDA arithmetic exactly.
+
+| Option | Change and reason |
+| --- | --- |
+| `hc` | Round the collapsed hyper-connection input to bf16. With exact fp32 Q4_K embeddings, the official function otherwise preserves fp32 through the first normalization. Native Metal/CUDA explicitly round here. The first native attention input then matches exactly. |
+| `woa` | Retain exact expanded Q4_K grouped-output weights and compute its einsum in fp32 before bf16 rounding. The original teacher's exception casts these weights to bf16. |
+| `routing` | Apply routed-expert weights after the rounded down-projection. Both existing native backends do this; the official 1017 forward applies weights before rounding the down-projection input. This is a shared engine/reference contract difference, not a Metal-only defect. |
+| `attention` | Use an independent PyTorch online softmax with bf16 probabilities, eight-key blocks and the native short-causal partition policy. The existing teacher uses fp32 probabilities; the official kernel and native paths round them. Restricted to the <=128-token diagnostic fixture. |
+| `rowwise` | Execute CPU linear/grouped projections one query row at a time, including sidecars, so CPU BLAS does not choose different reductions when sequence/expert batch lengths change. This is slower and does not emulate Metal's dot-product order. |
+
+Restore gains remain folded into independently decoded weights in the reference;
+native VQ code factors row gains after its dot product. FP32 reduction order and
+rounding thresholds therefore remain distinct even with all options enabled.
+
+For stage isolation, set `DS4_V41_PARITY_DUMP=1` on the native scoring command and
+use a fresh `--score-out` prefix. In addition to the existing MoE `x/y` dumps, this
+writes `hi/ax/ao/h` for the residual input, normalized attention input, attention
+output and final residual. Chunked dumps append rows in token order. Each is raw
+fp32; `hi/h` have shape `[tokens,4,5120]`, the others `[tokens,5120]`.
+The command-batch flush used by diagnostics preserves the active Metal batch;
+the old synchronization closed it and made scoring fail at the final batch end.
+
+Run the CPU reference with `--dump-layers DIR` to capture these boundaries and
+attention/compressor intermediates. `--replay-stage-inputs NATIVE_PREFIX` replaces
+attention and MoE inputs with the saved native arrays, with strict shape checks.
+Such runs are marked `full_model: false`: their logits are never an acceptance
+result. This separates a local kernel error from differences propagated through
+previous layers. Keep each precision option explicit in the recorded command.
+
+The fixed-input trace found a real Metal error in compressed-KV quantization:
+at layer 2, the compressor's pooled and normalized values matched exactly, but
+`.5859375 / .234375` was rounded above the exact FP4 midpoint `2.5` under fast math.
+The cache stored `.703125` instead of the ties-to-even result `.46875`, and layers
+2–7 reused that bad value. The new quantizer compares against scaled midpoints
+without dividing; scale selection likewise avoids division by six at E4M3 ties.
+Saved real-model compressed KV now matches the CPU reference exactly at all four
+source layers (2, 8, 14 and 20).
+
+`./ds4_test --metal-v41` includes all 126 positive finite E4M3 scales, positive and
+negative FP4 midpoints, both adjacent fp32 values, and scale-selection midpoints.
+Before the fix, activation and packed-KV tests failed (maximum error 480), with
+480 scale-code mismatches. Afterward, both 193,536-value comparisons are exact,
+scale-code mismatches are zero, and the existing primitive suite passes.
+
+With all five controls enabled, full 40-layer CPU runs at 2 and 8 tokens have
+byte-identical first-two-token logits and residuals at every layer. The 8-token run
+completed in 59.2 s with 6.70 GiB peak physical footprint, normal pressure and no
+swap growth. A 128-token attempt preserved that prefix through its 28 completed
+layers, then the global compression-growth guard stopped it. It produced no full
+logits and is not a completed validation result.
+
+A low-memory native replay is available when full-model residency is impractical:
+
+```sh
+make -f Makefile -f tests/repro/metal_attention_replay.mk -j6 ds4-metal-attention-replay
+./ds4-metal-attention-replay "$MODEL_PATH" "$NATIVE_PREFIX" "$REPLAY_OUT" 2 1
+```
+
+Use the watchdog around this command too. It accepts 2..128 tokens and chunks 1..8,
+requires complete `.ax_Lnn.bin` inputs and a fresh output prefix, and runs only
+attention. It writes `qr/qrn/q/wkv/o/ao` fp32 arrays and packed compressed KV (288
+bytes per completed group). The local 1017 model maps 4.44 GiB of backbone weights;
+expert computation, Engram and adapters are represented by the frozen inputs.
+This tool is diagnostic and never generates full-model logits. At two tokens,
+all 244 output files match byte for byte between chunks 1 and 2.
+
+After fixing FP4 packing, the largest residual fixed-input differences originate
+in query projection rounding. Against an independent fp64 dot product rounded to
+bf16, the 102,400 low-rank query components differ at 19 positions in Metal and 23
+in the rowwise CPU calculation (27 positions differ between CPU and Metal).
+Normalizing the same native query inputs matches the fp64-rounded result exactly.
+Global `--strict-fp` leaves all query, normalized-query and final attention outputs
+unchanged in this replay, so enabling it is not justified by this discrepancy.
+This short probe does not establish a long-context or full-model quality result.
+
+Full-model post-fix numerical validation is still required. A concurrent ComfyUI
+workload caused the native watchdog to abort on compression growth; that partial
+run is not a result. Keep PR #7 a draft until native chunk checks and independent
+numerical validation pass. `fable5.md` remains untouched and maintainer-owned.

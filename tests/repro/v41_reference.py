@@ -104,7 +104,7 @@ def install_sidecars(net, directories):
     return dict(gain_layers=len(gains), bias_layers=len(biases), amp_layers=len(amps))
 
 
-def install_streaming(net, weights, dump, embedding_dtype):
+def install_streaming(net, weights, dump, embedding_dtype, adaptations=(), replay=None):
     stats = dict(parameters=0, experts=0)
 
     def hook(mod, prefix, skip=(), layer=None):
@@ -126,7 +126,7 @@ def install_streaming(net, weights, dump, embedding_dtype):
                     raise ValueError(f'{full}: shape {tuple(value.shape)} != {expected}')
                 # Keep exact dequantized weights, as the upstream teacher's
                 # --exact-weights does. Official wo_a uses bf16 einsum directly.
-                if not quant or (prefix == 'embed' and embedding_dtype == 'bf16') or '.wo_a.' in full:
+                if not quant or (prefix == 'embed' and embedding_dtype == 'bf16') or ('.wo_a.' in full and 'woa' not in adaptations):
                     value = value.to(dtype if dtype in (torch.float32, torch.bfloat16) else torch.bfloat16)
                 if leaf == 'weight' and hasattr(target, '_reference_gain'):
                     value = value * target._reference_gain[:, None]
@@ -159,10 +159,55 @@ def install_streaming(net, weights, dump, embedding_dtype):
             hook(expert, f'layers.{i}.ffn.experts.{e}')
         hook(layer, f'layers.{i}', ('engram.', 'ffn.experts.'), i)
     hook(net.norm, 'norm'); hook(net.head, 'head')
+    if replay:
+        def replace_input(kind, layer):
+            def replace(module, inputs):
+                value = np.fromfile(f'{replay}.{kind}_L{layer:02d}.bin', dtype='<f4')
+                value = torch.from_numpy(value.copy()).reshape(inputs[0].shape).to(inputs[0].dtype)
+                return (value, *inputs[1:])
+            return replace
+        for i, layer in enumerate(net.layers):
+            layer.attn.register_forward_pre_hook(replace_input('ax', i))
+            layer.ffn.register_forward_pre_hook(replace_input('x', i))
+    if dump:
+        def capture(kind, layer, before=False):
+            def save(module, inputs, output=None):
+                value = inputs[0] if before else output
+                value.detach().float().numpy().tofile(dump / f'{kind}_L{layer:02d}.bin')
+            return save
+        for i, layer in enumerate(net.layers):
+            layer.register_forward_pre_hook(capture('hi', i, True))
+            layer.attn.register_forward_pre_hook(capture('ax', i, True))
+            layer.attn.register_forward_hook(capture('ao', i))
+            layer.ffn.register_forward_pre_hook(capture('x', i, True))
+            layer.ffn.register_forward_hook(capture('y', i))
+            if layer.attn.is_kv_source:
+                c = layer.attn.compressor
+                c.wkv.register_forward_hook(capture('ckv', i))
+                if c.compress_ratio > 1:
+                    c.wgate.register_forward_hook(capture('csc', i))
+                c.norm.register_forward_pre_hook(capture('pool', i, True))
+                c.norm.register_forward_hook(capture('latent', i))
+        import model as M
+        current = [0]
+        def set_layer(i):
+            def set(module, inputs): current[0] = i
+            return set
+        for i, layer in enumerate(net.layers):
+            layer.attn.register_forward_pre_hook(set_layer(i))
+        original_sparse = M.sparse_attn
+        def sparse(q, kv, sink, indices, scale):
+            q.float().numpy().tofile(dump / f'q_L{current[0]:02d}.bin')
+            kv.float().numpy().tofile(dump / f'kv_L{current[0]:02d}.bin')
+            out = original_sparse(q, kv, sink, indices, scale)
+            out.float().numpy().tofile(dump / f'o_L{current[0]:02d}.bin')
+            return out
+        M.sparse_attn = sparse
     return stats
 
 
 def main():
+    global F
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument('--reference', type=Path, required=True)
     ap.add_argument('--gguf', type=Path, required=True)
@@ -175,12 +220,19 @@ def main():
     ap.add_argument('--threads', type=int, default=6)
     ap.add_argument('--embedding-dtype', choices=('bf16', 'exact'), default='bf16',
                     help='bf16 preserves official dtype; exact matches the teacher --exact-weights and native Q4_K lookup')
+    ap.add_argument('--precision-adaptation', action='append', default=[], choices=['hc', 'woa', 'routing', 'attention', 'rowwise'])
+    ap.add_argument('--replay-stage-inputs', type=Path, help='diagnostic only: read native .ax/.x stage inputs')
     ap.add_argument('--dump-layers', type=Path)
     a = ap.parse_args()
     if a.ntok < 2 or a.threads < 1 or not 0 <= a.layers <= 40:
         ap.error('require ntok >= 2, threads >= 1, and layers between 0 and 40')
+    if 'attention' in a.precision_adaptation and a.ntok > 128:
+        ap.error('attention precision ablation supports only the short <=128-token causal fixture')
     if a.out.exists():
         raise FileExistsError(a.out)
+    source_sha256 = {str(f): hashlib.sha256(f.read_bytes()).hexdigest() for f in
+        [Path(__file__), Path(__file__).with_name('v41_reference_weights.py'),
+         Path(__file__).with_name('v41_reference_precision.py'), SCRIPTS/'v41_patches.py', SCRIPTS/'v41_file_parity.py']}
     model_file = a.reference / 'inference/model.py'
     assert hashlib.sha256(model_file.read_bytes()).hexdigest() == OFFICIAL_MODEL_SHA, 'official model revision differs'
     sources = json.loads(Path(__file__).with_name('v41_reference_sources.json').read_text())
@@ -192,6 +244,9 @@ def main():
     sys.path.insert(0, str(a.reference / 'inference'))
     import model as M
     P.patch_linear(M); P.patch_sparse_attn(M)
+    from v41_reference_precision import install
+    install(M, a.precision_adaptation)
+    F = M.F  # Include sidecar matmuls in the optional rowwise experiment.
     M.sample = lambda logits, temperature=1: logits.argmax(dim=-1)
     cfg = json.loads((a.reference / 'inference/config.json').read_text())
     cfg.update(max_batch_size=1, max_seq_len=max(128, a.ntok), vision_n_layers=0, dspark_block_size=0)
@@ -217,7 +272,7 @@ def main():
     plugins = install_sidecars(net, a.sidecar)
     if a.dump_layers:
         a.dump_layers.mkdir(parents=True, exist_ok=False)
-    stats = install_streaming(net, weights, a.dump_layers, a.embedding_dtype)
+    stats = install_streaming(net, weights, a.dump_layers, a.embedding_dtype, a.precision_adaptation, a.replay_stage_inputs)
     original_head = net.head.forward
     net.head.forward = lambda x, full_logits=True: original_head(x, True)
     ids = [int(x) for x in a.ids.read_text().split()][:a.ntok]
@@ -230,11 +285,11 @@ def main():
     with a.out.open('xb') as f:
         f.write(struct.pack('<ii', *values.shape)); values.astype('<f4').tofile(f)
     nll = F.cross_entropy(logits[0, :-1].float(), torch.tensor(ids[1:], dtype=torch.int64), reduction='none')
-    report = dict(tokens=len(ids),layers=args.n_layers,full_model=args.n_layers==40,seconds=time.monotonic()-started,
+    report = dict(tokens=len(ids),layers=args.n_layers,full_model=args.n_layers==40 and not a.replay_stage_inputs,
+                  diagnostic=bool(a.layers or a.replay_stage_inputs or a.precision_adaptation),seconds=time.monotonic()-started,
                   mean_nll=nll.mean().item(),nll=nll.tolist(),stats=stats,plugins=plugins,
                   torch=torch.__version__,numpy=np.__version__,arguments=vars(a),official_model_sha256=OFFICIAL_MODEL_SHA)
-    report['source_sha256'] = {str(f): hashlib.sha256(f.read_bytes()).hexdigest() for f in
-        [Path(__file__), Path(__file__).with_name('v41_reference_weights.py'), SCRIPTS/'v41_patches.py', SCRIPTS/'v41_file_parity.py']}
+    report['source_sha256'] = source_sha256
     a.out.with_suffix(a.out.suffix+'.json').write_text(json.dumps(report,default=str,indent=2)+'\n')
     print(json.dumps({k:v for k,v in report.items() if k not in ('nll','source_sha256','arguments')}),flush=True)
 
