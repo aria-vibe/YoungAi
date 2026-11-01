@@ -55,7 +55,7 @@ request zero; CUDA replay retains its existing ratio.
 ```sh
 make -j6 ds4 ds4-server ds4_test
 make linecount
-./ds4_test --metal-upload --metal-v41 --server --engine-units --rax --tp-allreduce
+./ds4_test --metal-upload --metal-v41 --bwd-attn --server --engine-units --rax --tp-allreduce
 make test
 ```
 
@@ -104,7 +104,20 @@ draft initialization; the server's `prompt_ms` includes time through first emiss
 The earlier raw logs show 17.1 s vs 12.3 s inside prefill, not draft initialization.
 
 Compare fixed teacher-forced IDs at chunks 1 and 8 and run upload-only/arithmetic-only
-ablations. Batch agreement is not independent quality validation. The inherited
+ablations. With the same model and optional sidecar/posttrain/Engram arguments:
+
+```sh
+for chunk in 1 8; do
+  ./ds4 --metal -m "$MODEL_PATH" --mem-budget-mb 110000 \
+    --score-ids tests/repro/metal_score_ids.txt --v41-chunk "$chunk" \
+    --score-out "/tmp/metal-score-$chunk.logits" \
+    --score-nll "/tmp/metal-score-$chunk.nll" \
+    --score-topk 20 "/tmp/metal-score-$chunk.topk"
+done
+cmp /tmp/metal-score-1.logits /tmp/metal-score-8.logits
+```
+
+Batch agreement is not independent quality validation. The inherited
 `caliper_ref.sh` expects a 43-layer V4 reference and `--logprob-vectors` uses V4
 fixtures. A matching V4.1 reference-forward/logprob comparison remains a merge gate;
 missing weights/fixtures or skipped suites must be reported, never treated as passes.
