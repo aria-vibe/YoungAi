@@ -39,8 +39,8 @@ contract so new callers cannot depend on late host writes.
 ## Arithmetic and model-free validation
 
 The Q4_K verification kernel shares packed weights/scales across 2–8 rows and uses
-the single-row lane/block traversal and SIMD reduction. Reassociation is disabled locally in both Q4_K kernels, with within-expression
-FMA contraction enabled: otherwise compiler choices can change the result with NT
+the single-row lane/block traversal and SIMD reduction. Reassociation is disabled
+locally in both Q4_K kernels, with within-expression FMA contraction enabled: otherwise compiler choices can change the result with NT
 even when the source expression is identical. Packed weights/scales and the current
 activation row are shared across the two output rows; activation arrays do not grow
 with NT, avoiding register spills at larger batches.
@@ -49,7 +49,8 @@ The skip flag remains grid-wide (`skip[0]`).
 
 Attention receives split size/cap from the host. `ratio > 0` explicitly selects
 causal per-row visibility; `ratio == 0` preserves frozen index fixtures, independently
-of the half-prefill precision switch. Frozen backward fixtures request zero.
+of the half-prefill precision switch. Metal replay and frozen backward fixtures
+request zero; CUDA replay retains its existing ratio.
 
 ```sh
 make -j6 ds4 ds4-server ds4_test

@@ -1,5 +1,5 @@
 /* Model-free regressions. Keep this file usable on the parent revision: the
- * same tests must expose the old upload race and autorelease lifetime leak. */
+ * same tests must expose the old upload race. */
 #include "test_internal.h"
 #if !defined(DS4_NO_GPU) && defined(__APPLE__)
 /* Uploads inside a command batch must not overwrite bytes that an earlier GPU

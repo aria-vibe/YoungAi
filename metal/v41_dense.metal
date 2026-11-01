@@ -114,9 +114,9 @@ kernel void kernel_v41_gemv_q4k_ll(constant v41_gemv_args &a [[buffer(0)]], devi
                 acc2[3] += yh[2 * i + 9] * (q2[i] & 0xF000);
             }
             sumf[row] += float(dh[0]) * ((acc1[0] + 1.f / 256.f * acc1[1]) * sc8[0] +
-                                         (acc1[2] + 1.f / 256.f * acc1[3]) * sc8[1] * 1.f / 16.f +
-                                         (acc2[0] + 1.f / 256.f * acc2[1]) * sc8[4] +
-                                         (acc2[2] + 1.f / 256.f * acc2[3]) * sc8[5] * 1.f / 16.f) -
+                                                                  (acc1[2] + 1.f / 256.f * acc1[3]) * sc8[1] * 1.f / 16.f +
+                                                                  (acc2[0] + 1.f / 256.f * acc2[1]) * sc8[4] +
+                                                                  (acc2[2] + 1.f / 256.f * acc2[3]) * sc8[5] * 1.f / 16.f) -
                          float(dh[1]) * (sumy[0] * sc8[2] + sumy[1] * sc8[3] + sumy[2] * sc8[6] + sumy[3] * sc8[7]);
             q1 += rowb / 2; sc += rowb / 2; dh += rowb / 2;
         }
@@ -185,10 +185,10 @@ kernel void kernel_v41_gemv_q4k_w(constant v41_gemv_args &a [[buffer(0)]], devic
                     acc2[3] += yh[2 * i + 9] * (qhi[row][i] & 0xF000);
                 }
                 sumf[t][row] += float(dm[row][0]) * ((acc1[0] + 1.f / 256.f * acc1[1]) * sc8[0] +
-                (acc1[2] + 1.f / 256.f * acc1[3]) * sc8[1] * 1.f / 16.f +
-                (acc2[0] + 1.f / 256.f * acc2[1]) * sc8[4] +
-                (acc2[2] + 1.f / 256.f * acc2[3]) * sc8[5] * 1.f / 16.f) -
-                float(dm[row][1]) * (sumy[0] * sc8[2] + sumy[1] * sc8[3] + sumy[2] * sc8[6] + sumy[3] * sc8[7]);
+                                         (acc1[2] + 1.f / 256.f * acc1[3]) * sc8[1] * 1.f / 16.f +
+                                         (acc2[0] + 1.f / 256.f * acc2[1]) * sc8[4] +
+                                         (acc2[2] + 1.f / 256.f * acc2[3]) * sc8[5] * 1.f / 16.f) -
+                         float(dm[row][1]) * (sumy[0] * sc8[2] + sumy[1] * sc8[3] + sumy[2] * sc8[6] + sumy[3] * sc8[7]);
             }
         }
     }

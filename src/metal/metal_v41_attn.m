@@ -38,7 +38,8 @@ int ds4_gpu_v41_sparse_attn_tensor(ds4_gpu_tensor *o, const ds4_gpu_tensor *q, c
         if (!S) S = 1u;
         static v41_scratch g_attn_part;
         id<MTLBuffer> pb = v41_grow(&g_attn_part, (uint64_t)n_tok * n_head * S * (head_dim + 2u) * 4u, "v41 attn split");
-        if (pb) {
+        if (!pb) return 0; /* A fallback would silently change the row's arithmetic. */
+        {
             a.pad = S;
             v41_bind b1[] = { V41_A(a), V41_B(pb, 0), V41_T(q), V41_T(kv_win), V41_T(kv_comp), V41_T(idx), V41_T(posd) };
             if (!v41_launch("kernel_v41_sparse_attn_split", b1, 7, MTLSizeMake(n_tok, n_head / 8u, S), MTLSizeMake(256, 1, 1))) return 0;
