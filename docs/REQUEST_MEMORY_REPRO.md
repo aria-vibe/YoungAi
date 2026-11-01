@@ -43,8 +43,9 @@ python3 tests/repro/metal_api.py --url http://127.0.0.1:19010 --out /tmp/questio
 python3 tests/repro/metal_api.py --url http://127.0.0.1:19010 --out /tmp/lifetime --suite lifetime
 ```
 
-Use `--cuda` for CUDA. Compare completed output hashes, workspace rows, cleanup
-allocations, cache reuse, and disconnect recovery. Record skips and failures
+For CUDA, use the maintainer's `speed-bench/pr6_verify_spark.sh` from current
+`restructure`; the watchdog above is macOS-only. Compare completed output hashes,
+workspace rows, cleanup allocations, cache reuse, and disconnect recovery. Record skips and failures
 separately. Keep raw logs and timing reports outside the source tree; report the
 exact configuration and results in the PR. Full-model Metal numeric parity is a
 separate gate and is not implied by the memory checks.
