@@ -99,19 +99,6 @@ int ds4_gpu_tensor_write(ds4_gpu_tensor *tensor, uint64_t offset, const void *da
         if (!tensor || (!data && bytes != 0)) return 0;
         DS4MetalTensor *obj = ds4_gpu_tensor_obj(tensor);
         if (offset > obj.bytes || bytes > obj.bytes - offset) return 0;
-        if (bytes && (g_batch_cb || [g_pending_cbs count] != 0)) {
-            /* A host memcpy here can overwrite input of an earlier, unexecuted
-             * dispatch (notably V4.1's reused posg buffer during DSpark). Snapshot
-             * the upload and order its copy on the same GPU queue as the readers. */
-            ds4_gpu_tensor *upload = ds4_gpu_tensor_alloc(bytes);
-            if (!upload) return 0;
-            DS4MetalTensor *u = ds4_gpu_tensor_obj(upload);
-            memcpy([u.buffer contents], data, (size_t)bytes);
-            [g_transient_buffers addObject:u.buffer]; /* retain until queued work completes */
-            const int ok = ds4_gpu_tensor_copy(tensor, offset, upload, 0, bytes);
-            ds4_gpu_tensor_free(upload);
-            return ok;
-        }
         if (bytes != 0) {
             memcpy((uint8_t *)[obj.buffer contents] + obj.offset + offset, data, (size_t)bytes);
         }

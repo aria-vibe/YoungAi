@@ -155,10 +155,7 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
     const uint64_t *isig = imgs ? imgs->sig_of : NULL;
     uint32_t reused = 0;
     ds4_v41_state st;
-    const bool metal = e->backend == DS4_BACKEND_METAL;
-    if (metal) {
-        if (!v41_kvreuse_alloc(&st, prompt, np, ctx, ck, isig, &reused)) return 1;
-    } else if (!v41_state_alloc(&st, ck < np ? ck : np, ctx, DS4_MTP_MAX_BLOCK + 2u)) return 1;
+    if (!v41_kvreuse_alloc(&st, prompt, np, ctx, ck, isig, &reused)) return 1;
     const uint32_t cap = ck < st.cap_tok ? ck : st.cap_tok;
     st.head_last_only = 1;   /* 预填块只算末位 logits(core_v41.h) */
     st.half_prefill = 1;     /* 推理路: 预填快核(core_v41.h) */
@@ -205,7 +202,6 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
          * BOS/角色/think 几个 token, 09-20 实撞 79 vs 75), 事后重新分词拼不回引擎真吃的序列; 教师锚/取料要的是这一份。 */
         if (g_ds4_v41_emit_trace) for (uint32_t i = 0; i < np; i++) fprintf(stderr, "[ptok] %u %d\n", i, prompt[i]);
         bool ok = true, aborted = false;
-        if (!metal) reused = v41_kvreuse_restore(&st, prompt, np, isig);
         st.vimg = imgs;   /* 预填块按位置盖视觉嵌入(core_v41_forward.c); 预填完清掉 */
         for (uint32_t c0 = reused; ok && c0 < np; ) {
             ok = v41_prefill_chunk(e, &st, prompt, np, &c0, cap);   /* 分块 / CED / 窗口尾规则在 core_v41_forward.c, 与并发路同一份 */
@@ -249,7 +245,7 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
          * 不接受的位置全部回滚。所以它是纯粹的省时间, 不是近似 —— 门也就是逐字节同。
          * ★采样下(2026-09-28)★: 接受 ⇔ 均匀数 < 目标分布给草稿的概率, 拒绝从残差抽(设备核里做); 吐出 token 的边缘分布 = 纯解码采样的分布,
          * 但同 seed 下两条路的具体 token 不同(用了不同的硬币) —— 门是分布级(tests/cuda_sample_selftest.c), 不是逐字节。 */
-        if (e->backend == DS4_BACKEND_METAL) {
+        {
             if (!v41_state_decode_shrink(&st, dspark ? DS4_MTP_MAX_BLOCK + 1u : 1u)) break;
             const uint64_t freed = ds4_gpu_v41_scratch_release();
             fprintf(stderr, "[v41] decode buffers: %u rows, released %.1f MiB backend scratch\n", st.cap_tok, (double)freed / (1024.0 * 1024.0));
@@ -468,9 +464,9 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
     free(rowbuf); free(hist.tok); free((void *)hist.brk); free(fed);
     if (am) ds4_gpu_tensor_free(am);
     v41_state_free(&st);
-    if (e->backend == DS4_BACKEND_METAL) {
+    {
         const uint64_t freed = ds4_gpu_v41_scratch_release();
-        fprintf(stderr, "[v41] request cleanup: rc=%d scratch_freed=%.2f MiB metal_allocated=%.2f MiB\n",
+        fprintf(stderr, "[v41] request cleanup: rc=%d scratch_freed=%.2f MiB device_allocated=%.2f MiB\n",
                 rc, (double)freed / 1048576., (double)ds4_gpu_current_allocated_bytes() / 1048576.);
     }
     return rc;
