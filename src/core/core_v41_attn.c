@@ -335,7 +335,7 @@ bool v41_attn_cache(ds4_engine *e, ds4_v41_state *st, uint32_t il) {
     }
     /* 稀疏注意力(窗口 128 + topk 压缩行, sink 进分母) → bf16 → 逆 rope */
     if (!ds4_gpu_v41_sparse_attn_tensor(st->o, st->q, st->win[il], (ng && topk) ? comp : NULL, (ng && topk) ? st->idx : NULL, m->map, m->size,
-                                        l->attn_sinks->abs_offset, n, st->pos0, SWA, ng, topk, iratio, NH, HD,
+                                        l->attn_sinks->abs_offset, n, st->pos0, SWA, ng, topk, st->tsave && st->tsave->replay ? 0u : iratio, NH, HD,
                                         (float)(1.0 / sqrt((double)HD)), 0, 1, st->win_from[il], posd, st->graph_pos_cap)) return false;   /* 窗口范围也随位置走, 纯窗口层同样要 posd; win_from 钳掉 CED 没写过的环槽 */
     /* ★本批的 n 行进环★(decode.md D1; 原来是"整段左移两发 256 KB 拷贝", 每层每步白搬 512 KB):
      * 注意力已经算完 —— 这一步之前环里装的还是历史 [pos0-SWA, pos0-1], 正是上面要读的;

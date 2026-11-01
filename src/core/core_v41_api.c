@@ -246,7 +246,10 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
          * ★采样下(2026-09-28)★: 接受 ⇔ 均匀数 < 目标分布给草稿的概率, 拒绝从残差抽(设备核里做); 吐出 token 的边缘分布 = 纯解码采样的分布,
          * 但同 seed 下两条路的具体 token 不同(用了不同的硬币) —— 门是分布级(tests/cuda_sample_selftest.c), 不是逐字节。 */
         ds4_v41_draft dr;
+        const double draft_begin = now_sec();
         const bool spec = dspark && v41_draft_alloc(e, &dr);
+        fprintf(stderr, "[v41] startup: prefill=%.3fs before_draft=%.3fs draft_init=%.3fs\n",
+                t1 - t0, draft_begin - t1, now_sec() - draft_begin);
         /* ★采样 + 投机: 草稿按塔的分布抽(硬币流 1), 验证核读塔 logits 做拒绝采样(接受 ⇔ u < min(1,p/q), 拒绝从 max(0,p−q) 抽)★(2026-09-29)
          * 判据不是在线 t/s(采样每趟另一篇文本, 同 seed 也不同, ±3 t/s 噪声比两方案的差大, 曾被它骗成"点质量占优"), 是取料路的接受率陪审团
          * (同一篇文本逐位置解析算, d1 accjury 档): 首位期望接受率 温 1.0 CFO 0.693 → 0.744, 大盘 0.634 → 0.757, 温 0.6 CFO 0.834 → 0.842

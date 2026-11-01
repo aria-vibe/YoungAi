@@ -123,3 +123,5 @@ tests/asst/fake/
 /ds4-seg
 /ds4_image_test
 /ds4_seg_test
+
+/ds4-metal-q4-bench
