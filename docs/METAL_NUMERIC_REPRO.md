@@ -119,5 +119,9 @@ cmp /tmp/metal-score-1.logits /tmp/metal-score-8.logits
 
 Batch agreement is not independent quality validation. The inherited
 `caliper_ref.sh` expects a 43-layer V4 reference and `--logprob-vectors` uses V4
-fixtures. A matching V4.1 reference-forward/logprob comparison remains a merge gate;
-missing weights/fixtures or skipped suites must be reported, never treated as passes.
+fixtures. The local CPU reference now runs the pinned official V4.1 forward with the same
+quantized weights; see [METAL_REFERENCE_REPRO.md](METAL_REFERENCE_REPRO.md) for
+setup, scope and measured results. The ranking of PR #7 versus baseline reverses
+between the official bf16 embedding and exact Q4_K embedding policies. Neither
+comparison reaches the upstream same-weight KL target. The numerical merge gate remains open; completed runs, lower fixture NLL
+and exact chunk agreement must not be reported as an independent parity pass.
