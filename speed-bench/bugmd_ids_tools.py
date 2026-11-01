@@ -20,6 +20,9 @@
                                           同一份 top-K 按产品 min_p 门重算: 偏离 top-1 与出口 tok 的期望次数, 原始对截断后;
                                           分清"环是截断造的吸收态"还是"模型自己锁死"。
   cyclescan <最短段长> <trace...>         按 token 精确周期找死环(P ≤ 256, 段长 ≥ max(3P, 最短段长)), 扫全部历史请求数误报/漏报。
+  anchor2ptf <锚.bin> <ids> <out.ptf> [K=64] [前缀长度,…]  FP 全 logits 锚 → PTF1 top-K 表(训练器 teacher=fp: 的格式); 可另写几条前缀。
+  ptfpick <api.ptf> <out.seqs> [每隔=10]  从段 B 一轮的官方 API 表里隔条取序列, 给 v41_teacher.py --seqs 打 FP 表。
+  ptfcmp <api.ptf> <fp.ptf> [kl0.tsv]     同一批序列上官方 API top-20(训练靶)对 FP 原件(尺子参考)逐位比; 给 kl0.tsv 并排报学生。
 """
 import struct
 import sys
@@ -430,6 +433,117 @@ def cmd_ptfcheck(anchor_path, ptf_path, seq_index, row0, kk="64"):
           % (seq_index, n, row0, same, n, 100.0 * same / max(n, 1), dsum / max(n, 1), dmax, p1t / max(n, 1), p1a / max(n, 1), kls / max(n, 1)))
 
 
+def read_ptf(path):
+    """PTF1 表(可多段首尾相接) → [(ids, top_id[L-1,K], top_p[L-1,K], rest[L-1])]"""
+    import numpy as np
+    f = open(path, "rb"); recs = []
+    while True:
+        hd = f.read(12)
+        if len(hd) < 12: break
+        magic, K, N = struct.unpack("<III", hd)
+        assert magic == 0x31465450, "不是 PTF1 段"
+        for _ in range(N):
+            L = struct.unpack("<I", f.read(4))[0]
+            ids = np.frombuffer(f.read(L * 4), dtype=np.int32)
+            ti = np.frombuffer(f.read((L - 1) * K * 4), dtype=np.int32).reshape(L - 1, K)
+            tp = np.frombuffer(f.read((L - 1) * K * 4), dtype=np.float32).reshape(L - 1, K)
+            recs.append((ids, ti, tp, np.frombuffer(f.read((L - 1) * 4), dtype=np.float32)))
+    return recs
+
+
+def cmd_anchor2ptf(anchor_path, ids_path, out_path, kk="64", prefixes=""):
+    """FP 全 logits 锚(<i32 S><i32 V><f32 S×V>, v41_judge.sh 的 teacher_*.bin)→ PTF1 top-K 表(训练器 teacher=fp: 吃的格式)。
+    10-28 段 B 天花板: 尺子自己的 FP 读数当训练靶, 不另跑一趟原件。ids 文件 = 锚对应的那串 id(空白分隔), 长度必须等于 S, 否则停。
+    prefixes = "33,…": 另写几条"整串的前 k 位"(因果前向, 前缀的各行与整串同一批行)。为什么要单独一条: 训练器按整条序列的哈希查表
+    (core_ptrain_fp.c pt_fpmap_slot), 一道题的序列是尺子的前缀也查不到, 实撞"教师表里没有第 0 题的序列(33 位)"。"""
+    import numpy as np
+    K = int(kk); ids = np.array(open(ids_path).read().split(), dtype=np.int32); pre = [int(x) for x in prefixes.split(",") if x]
+    with open(anchor_path, "rb") as f: S, V = struct.unpack("<ii", f.read(8))
+    if S != len(ids): sys.exit("★锚 %d 行 ≠ ids %d 个, 不是同一串★" % (S, len(ids)))
+    lg = np.memmap(anchor_path, dtype=np.float32, mode="r", offset=8, shape=(S, V))
+    ti = np.zeros((S - 1, K), np.int32); tp = np.zeros((S - 1, K), np.float32); rest = np.zeros(S - 1, np.float32)
+    for i0 in range(0, S - 1, 512):
+        x = np.asarray(lg[i0:min(S - 1, i0 + 512)], dtype=np.float64); x -= x.max(1, keepdims=True); p = np.exp(x); p /= p.sum(1, keepdims=True)
+        top = np.argpartition(-p, K, axis=1)[:, :K]; pt = np.take_along_axis(p, top, 1); o = np.argsort(-pt, 1)
+        n = len(x); ti[i0:i0 + n] = np.take_along_axis(top, o, 1); tp[i0:i0 + n] = np.take_along_axis(pt, o, 1); rest[i0:i0 + n] = np.clip(1 - tp[i0:i0 + n].sum(1), 0, 1)
+    if any(k < 2 or k > S for k in pre): sys.exit("★前缀长度要在 2..%d★" % S)
+    with open(out_path, "wb") as f:
+        f.write(struct.pack("<III", 0x31465450, K, 1 + len(pre)))
+        for L in [S] + pre:
+            f.write(struct.pack("<I", L)); f.write(ids[:L].tobytes())
+            f.write(ti[:L - 1].tobytes()); f.write(tp[:L - 1].tobytes()); f.write(rest[:L - 1].tobytes())
+    print("%s → %s: 整串 %d 位%s, top-%d; top-1 均 %.4f, 余量均 %.4f" % (anchor_path.split("/")[-1], out_path, S, "".join(" + 前 %d 位" % k for k in pre), K, tp[:, 0].mean(), rest.mean()))
+
+
+def cmd_ptfpick(ptf_path, out_path, every="10"):
+    """从一份 PTF1 表(段 B 一轮的 teacher.ptf = 官方 API top-20)里每隔 every 条取一条, 写成 v41_teacher.py --seqs 的输入(一行一条 id 串)。
+    均匀隔条取是为了各种语言都摊到(① 的种子按语言连着排)。"""
+    recs = read_ptf(ptf_path); every = int(every)
+    pick = recs[::every]
+    with open(out_path, "w") as f:
+        for ids, *_ in pick: f.write(" ".join(map(str, ids.tolist())) + "\n")
+    print("%s: %d 条里取 %d 条(每 %d 条一条), 共 %d 位 → %s" % (ptf_path.split("/")[-1], len(recs), len(pick), every, sum(len(r[0]) for r in pick), out_path))
+
+
+def cmd_ptfcmp(api_ptf, fp_ptf, kl0_tsv=""):
+    """★训练靶 vs 尺子参考(2026-10-28)★: 同一批序列上, 官方 API 的 top-20 表(段 B 的训练靶)对参考前向 FP 原件的 top-K 表(判决尺的参考)逐位比。
+    为什么: 段 B 往 API 练、拿 FP 判; 两者在代码裸续写上若差得不小, "训练料 KL 降、编程尺不动" 就有了解释。10-26 只在一条对话思考轨迹上量过(KL 0.0065)。
+    口径与训练器同(ds4_gpu_bwd_kl_topk_tensor): 在 API 的 top-20 + 余量桶上算 KL(API‖FP); API 候选不在 FP top-K 里时 FP 概率取它 top-K 的最小值(上界, KL 只会少算), 单报这类位数。
+    API 表的 one-hot 行(种子开头 / 切分对不上的位, 不是分布)跳过。给了 kl0.tsv(同一轮 --restore-b 第 0 步逐位 KL = KL(API‖学生))就在同一批位上并排报学生。"""
+    import math
+    import numpy as np
+    A = read_ptf(api_ptf); Fm = {tuple(r[0].tolist()): r for r in read_ptf(fp_ptf)}
+    kid = kkl = None
+    if kl0_tsv:
+        z = np.loadtxt(kl0_tsv, dtype=np.float64); kid = z[:, 0].astype(np.int64); kkl = z[:, 1]
+    same = 0; kl_af = []; kl_fa = []; smin = []; miss_n = 0; miss_m = 0.0; stu = []; nseq = nstu = 0
+    sxy = sxx = 0.0; top1a = []; top1f = []   # 温度: 同一位上两边都有的候选, 去均值后 log p_API 对 log p_FP 的斜率(= T_FP / T_API, 1 = 同温)
+    for ids, ai, ap, ar in A:
+        fr = Fm.get(tuple(ids.tolist()))
+        if fr is None: continue
+        nseq += 1; _, fi, fp, frr = fr
+        onehot = (ap[:, 0] > 0.999) & (ap[:, 1:].sum(1) < 1e-6) & (ar < 1e-6)
+        rows = [i for i in range(len(ids) - 1) if not onehot[i]]
+        if not rows: continue
+        ks = None
+        if kid is not None:   # 学生: kl0.tsv 是训练答案位的目标 id 流, 找这条从第一个分布行起的目标 id 串
+            t0 = rows[0]; tgt = ids[t0 + 1:].astype(np.int64); w = tgt[:24]
+            cand = np.flatnonzero(kid[:len(kid) - len(tgt) + 1] == w[0])
+            for c in cand:
+                if np.array_equal(kid[c:c + len(w)], w) and np.array_equal(kid[c:c + len(tgt)], tgt): ks = c - t0; break
+            nstu += ks is not None
+        for i in rows:
+            pa = ap[i].astype(np.float64); fmap = dict(zip(fi[i].tolist(), fp[i].astype(np.float64).tolist())); fmin = float(fp[i].min())
+            pf = np.array([fmap.get(t, -1.0) for t in ai[i].tolist()])
+            miss = pf < 0; miss_n += int(miss.sum()); miss_m += float(pa[miss].sum()); pf[miss] = fmin
+            ra = max(float(ar[i]), 1e-12); rf = max(1.0 - float(pf.sum()), 1e-12)
+            pa_c = np.clip(pa, 1e-12, 1); pf_c = np.clip(pf, 1e-12, 1)
+            kl_af.append(float((pa_c * np.log(pa_c / pf_c)).sum() + ra * math.log(ra / rf)))
+            kl_fa.append(float((pf_c * np.log(pf_c / pa_c)).sum() + rf * math.log(rf / ra)))
+            smin.append(float(np.minimum(pa, pf).sum() + min(ra, rf)))
+            same += int(ai[i][int(pa.argmax())] == fi[i][int(fp[i].argmax())])
+            both = ~miss & (pa > 0)
+            if both.sum() >= 2:
+                x = np.log(pf_c[both]); y = np.log(pa_c[both]); x -= x.mean(); y -= y.mean(); sxy += float(x @ y); sxx += float(x @ x)
+            top1a.append(float(pa.max())); top1f.append(float(fp[i].max()))
+            stu.append(kkl[ks + i] if ks is not None else float("nan"))
+    kl_af = np.array(kl_af); kl_fa = np.array(kl_fa); smin = np.array(smin); stu = np.array(stu); n = len(kl_af)
+    q = lambda x: "均 %.5f 中位 %.5f p95 %.5f" % (x.mean(), np.median(x), np.percentile(x, 95))
+    print("API 表 %d 条, 对上 FP 表 %d 条, 分布位 %d" % (len(A), nseq, n))
+    print("  Same top(API top-1 == FP top-1) %.2f%%; Σmin(top-20∪余量) %s" % (100 * same / n, q(smin)))
+    print("  KL(API‖FP) %s  ← 与训练器同方向同口径" % q(kl_af))
+    print("  KL(FP‖API) %s" % q(kl_fa))
+    print("  API 候选不在 FP top-%d 里: %d 个(%.2f 个/位), 这些候选的 API 概率合计均 %.4f/位" % (fp.shape[1], miss_n, miss_n / n, miss_m / n))
+    print("  温度: 位内去均值 log p_API 对 log p_FP 斜率 %.4f(1 = 同温; >1 = API 更尖); top-1 概率均 API %.4f / FP %.4f"
+          % (sxy / max(sxx, 1e-12), np.mean(top1a), np.mean(top1f)))
+    if kid is not None:
+        ok = ~np.isnan(stu); s = stu[ok]; t = kl_af[ok]
+        print("  学生(kl0.tsv, KL(API‖学生)) 对上 %d/%d 条 %d 位: %s;  同一批位 KL(API‖FP) 均 %.5f ⇒ 学生是 FP 的 %.1f 倍" % (nstu, nseq, len(s), q(s), t.mean(), s.mean() / max(t.mean(), 1e-12)))
+        for th in (0.05, 0.2):
+            m = t > th
+            print("  KL(API‖FP) > %.2f 的位: 占 %.1f%%, 学生 KL 在这些位上占 %.1f%%" % (th, 100 * m.mean(), 100 * s[m].sum() / max(s.sum(), 1e-12)))
+
+
 def cmd_ptfstat(ptf_path, think_end="128822", eos="1", qmark="33"):
     """每份 FP 教师落盘就看教师在决策位给了多少(2026-10-22 用户: "每一份结束能看下指标, 早点发现问题"): 不用 GPU, 只读 PTF1 top-K 表。
     每条序列: 末位(目标 EOS)的 p / 含 </think> 的条上 </think> 位的 p / 非决策位上 EOS·</think> 的尾巴(top-K 里可见的 p, 不可见记 0 = 下界) / 问号位。
@@ -684,7 +798,7 @@ if __name__ == "__main__":
     cmds = {"extract": cmd_extract, "cut": cmd_cut, "cmp-emit": cmd_cmp_emit, "cmp-topk": cmd_cmp_topk,
             "eos-scan": cmd_eos_scan, "rows": cmd_rows, "loopstat": cmd_loopstat, "faith": cmd_faith,
             "anchor-faith": cmd_anchor_faith, "tokprobe": cmd_tokprobe, "minp": cmd_minp, "agree": cmd_agree,
-            "ids2seqs": cmd_ids2seqs, "ptfcheck": cmd_ptfcheck, "ptfstat": cmd_ptfstat,
+            "ids2seqs": cmd_ids2seqs, "ptfcheck": cmd_ptfcheck, "ptfstat": cmd_ptfstat, "ptfpick": cmd_ptfpick, "ptfcmp": cmd_ptfcmp, "anchor2ptf": cmd_anchor2ptf,
             "cyclescan": cmd_cyclescan, "temper": cmd_temper}
     if len(sys.argv) < 2 or sys.argv[1] not in cmds:
         sys.exit(__doc__ + "  rows <rows.txt> <ids> <n_prompt> <入口位置> [tokenizer.json] [窗口=12]   --row-out 的分桶命中率 + 入口逐行解码\n")

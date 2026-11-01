@@ -119,7 +119,7 @@ static bool pt_pack_forward(ds4_engine *e, pt_run *r) {
     pt_pack *pk = &r->pk; ds4_v41_state *B = &r->st; v41_tsave *sv = &r->save;
     const ds4_model *md = &e->model;
     const uint32_t R = pk->R, E = DS4_N_EMBD, HC = DS4_N_HC, TK = DS4_N_INDEXER_TOP_K;
-    pt_state_reset(B);
+    pt_state_reset(B); r->cont_s = NULL;   /* 合批各题位置从 0 起、环头压在块区上: 状态不再能给前缀形态接力 */
     B->n = R; B->pos0 = 0; B->graph = 0; B->ced_skip = 0; B->head_last_only = 0; B->stop_early = 0; B->idx_owner = -1; B->cand_owner = -1;
     bool ok = true;
     {   /* 行: 各题 token 首尾相接, 位置各自从 0 起; pre_mix = one-hot(第 0 路), 与 v41_forward 同 */
@@ -192,7 +192,7 @@ bool pt_pack_step(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *co
     ds4_gpu_tensor *glog[PT_PACK_MAX];
     memset(glog, 0, sizeof glog);
     for (uint32_t i = 0; ok && i < nb; i++) {
-        ok = pt_loss_rows(c, r, B->logits, pk->r0[i] + ss[i]->sa0 - 1u, ss[i], &loss_each[i], &ntok_each[i], &glog[i]);
+        ok = pt_loss_rows(c, r, B->logits, pk->r0[i] + ss[i]->sa0 - 1u + ss[i]->l0, ss[i], ss[i]->l0, &loss_each[i], &ntok_each[i], &glog[i]);   /* 头 l0 位只当上下文 */
         r->dec_slot[i] = r->dec_last;
     }
     const double q2 = pt_tick(c);
@@ -200,7 +200,7 @@ bool pt_pack_step(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *co
     if (ok && grad) {   /* 出口: 各题答案行的 g_xn = glog·W_head(其余行 0) → RMSNorm → hc_pre, 整批 R 行; 再逐层往下(按题分段的在层里) */
         ok = ds4_gpu_tensor_fill_f32(r->gxn, 0.f, (uint64_t)R * E);
         for (uint32_t i = 0; ok && i < nb; i++) {
-            const uint32_t m = ss[i]->m, row = pk->r0[i] + ss[i]->sa0 - 1u;
+            const uint32_t m = ss[i]->m - ss[i]->l0, row = pk->r0[i] + ss[i]->sa0 - 1u + ss[i]->l0;
             ds4_gpu_tensor *gv = pt_rows(r->gxn, row, m, E);
             ok = gv && ds4_gpu_bwd_matmul_t_tensor(gv, mdl->map, mdl->size, e->weights.output->type, e->weights.output->abs_offset, E, V, glog[i], m, 0);
             if (gv) ds4_gpu_tensor_free(gv);
@@ -238,7 +238,16 @@ bool pt_run_list(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *con
     }
     /* 装包: 从长到短, 每题进第一个装得下的包(行数 ≤ cap、题数 ≤ PT_PACK_MAX)。梯度是各题之和, 怎么分包不改数学(只差浮点加法次序) */
     uint32_t *ix = xmalloc((size_t)(n + 1) * 4), *bin = xmalloc((size_t)(n + 1) * 4), *brow = xmalloc((size_t)(n + 1) * 4), *bcnt = xmalloc((size_t)(n + 1) * 4), nbin = 0, nx = 0;
-    for (uint32_t k = 0; k < n; k++) if (pt_runnable(r, ss[k])) ix[nx++] = k;   /* 教师没给表 / 超长的题: 与 pt_step_sample 一样跳过 */
+    /* 前缀形态的长题(sn > 批态行数, ctxlen 内)不进包: 合批各题位置从 0 起、没有前缀缓存, 它们单题过(pt_step_sample 里预填前缀) */
+    for (uint32_t k = 0; k < n; k++) {
+        if (!pt_runnable(r, ss[k]) || ss[k]->sn <= r->st.cap_tok) continue;
+        double l = 0; uint32_t t = 0;
+        if (!pt_step_sample(e, c, r, ss[k], grad, &l, &t)) { free(ix); free(bin); free(brow); free(bcnt); return false; }
+        *loss_sum += l; *ntok += t;
+        if (loss_each) { loss_each[k] = l; ntok_each[k] = t; }
+        if (dec_each) dec_each[k] = r->dec_slot[0];
+    }
+    for (uint32_t k = 0; k < n; k++) if (pt_runnable(r, ss[k]) && ss[k]->sn <= r->st.cap_tok) ix[nx++] = k;   /* 教师没给表 / 超长的题: 与 pt_step_sample 一样跳过 */
     for (uint32_t a = 1; a < nx; a++) for (uint32_t b = a; b > 0 && ss[ix[b]]->sn > ss[ix[b - 1]]->sn; b--) { const uint32_t t = ix[b]; ix[b] = ix[b - 1]; ix[b - 1] = t; }
     for (uint32_t a = 0; a < nx; a++) {
         const uint32_t len = ss[ix[a]]->sn;
@@ -282,10 +291,20 @@ bool pt_pack_warm(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_data *d, u
             if (R + s->sn > r->st.cap_tok) continue;
             ps[np++] = s; R += s->sn;
         }
+        if (!np) {   /* 没有一题装得进包(全是前缀形态的长题, 10-31 t001 实撞: 12 行 aider 请求, 前缀 2388 位起步, 0 题的包走 pt_pack_step 直接失败) → 跳过, 峰值由下面最长题那趟量 */
+            fprintf(stderr, "ds4: [ptrain] 预热第 %d 包: 没有装得下 %u 位的题, 跳过(全走前缀形态)\n", pass + 1, r->st.cap_tok);
+            continue;
+        }
         if (R > *rows) *rows = R;
         le[0] = 0; nt[0] = 0;
         ok = np == 1 ? pt_step_sample(e, c, r, ps[0], 1, &le[0], &nt[0]) : pt_pack_step(e, c, r, ps, np, 1, le, nt);
         fprintf(stderr, "ds4: [ptrain] 预热第 %d 包: %u 题 %u 行\n", pass + 1, np, R);
+    }
+    if (ok && n && ss[0]->sn > r->st.cap_tok) {   /* 前缀形态的最长一题也走一趟: 前缀预填 + 尾窗反传的峰值(预填的暂存按块长长到顶) */
+        double le = 0; uint32_t nt = 0;
+        ok = pt_step_sample(e, c, r, ss[0], 1, &le, &nt);
+        fprintf(stderr, "ds4: [ptrain] 预热前缀形态最长题: %u 位(前缀 %u + 尾窗 %u)\n", ss[0]->sn, r->pfx, ss[0]->sn - r->pfx);
+        if (ss[0]->sn > *rows) *rows = ss[0]->sn;
     }
     free(ss);
     return ok;

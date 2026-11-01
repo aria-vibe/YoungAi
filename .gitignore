@@ -124,4 +124,14 @@ tests/asst/fake/
 /ds4_image_test
 /ds4_seg_test
 
+# unsloth 口径基准: LCB 私有用例 290 MB, 本机 bench_prep.py 从 HF 现生成, 不进仓库
+gguf-tools/bench/data/lcb_tests.jsonl
+# 六项题集本身不进仓库(GPQA 许可要求不公开明文题目; 其余几份也都能从 HF 原数据现生成): bench_prep.py 重新生成
+gguf-tools/bench/data/aime25.jsonl
+gguf-tools/bench/data/gpqa_diamond.jsonl
+gguf-tools/bench/data/hmmt_feb26.jsonl
+gguf-tools/bench/data/ifeval.jsonl
+gguf-tools/bench/data/lcb_v6.jsonl
+gguf-tools/bench/data/mmlu_pro.jsonl
+
 /ds4-metal-q4-bench

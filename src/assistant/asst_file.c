@@ -106,7 +106,26 @@ static void try_path(const char *cand, size_t n, ds4_buf *out, int *k, char seen
     snprintf(seen[*k], ASST_PATH, "%s", rel);
     ds4_buf_puts(out, (*k)++ ? "," : "["); ds4_json_escape(out, rel);
 }
-char *asst_file_mentioned(const char *answer) {
+/* 回答里写得像工作区文件(词尾 ASCII 段 + 产出类扩展名)却不存在的: 校验相的一条事实(asst_verify.c)。只认模型可能产出的扩展名, bing.com / v1.0 这类不算;
+ * 这是启发式, 所以只拿它"摆事实", 模型可以说明为什么那不是文件 */
+static void try_missing(const char *cand, size_t n, ds4_buf *out, int *k, char seen[][ASST_PATH], int cap) {
+    static const char *EXT[] = { "html", "htm", "svg", "png", "jpg", "jpeg", "gif", "webp", "pdf", "docx", "xlsx", "pptx", "md", "txt", "csv", "json", "mp4", "py", "js", "sh", "ts", "wav", "mp3", "zip", NULL };
+    while (n && cand[n - 1] == '.') n--;
+    if (n < 3 || n >= ASST_PATH || *k >= cap) return;
+    const char *dot = NULL; for (size_t i = 0; i < n; i++) if (cand[i] == '.') dot = cand + i; else if ((unsigned char)cand[i] < 0x20) return;   /* 文件名可以是中文(附近美食报告.md), 只要求扩展名是认识的 */
+    if (!dot || dot == cand || cand[0] == '-' || memmem(cand, n, "://", 3)) return;
+    const size_t el = n - (size_t)(dot - cand) - 1; bool known = false;
+    for (int i = 0; EXT[i]; i++) if (strlen(EXT[i]) == el && !strncasecmp(dot + 1, EXT[i], el)) known = true;
+    if (!known) return;
+    char in[ASST_PATH], path[ASST_PATH]; memcpy(in, cand, n); in[n] = 0;
+    if (!strncmp(in, "sandbox:", 8)) memmove(in, in + 8, strlen(in + 8) + 1);
+    struct stat st;
+    if (asst_path_resolve(in, path, sizeof path) && !stat(path, &st)) return;   /* 存在(工作区里或外) → 不是"不存在" */
+    for (int i = 0; i < *k; i++) if (!strcmp(seen[i], in)) return;
+    snprintf(seen[*k], ASST_PATH, "%s", in);
+    ds4_buf_puts(out, (*k)++ ? "," : "["); ds4_json_escape(out, in);
+}
+static char *scan_answer(const char *answer, void (*fn)(const char *, size_t, ds4_buf *, int *, char[][ASST_PATH], int)) {
     enum { CAP = 10 };
     static char seen[CAP][ASST_PATH];   /* 只在工人线程里调(运行结束), 不重入 */
     ds4_buf out = {0}; int k = 0;
@@ -116,11 +135,13 @@ char *asst_file_mentioned(const char *answer) {
         const unsigned char *s = p;
         while (*p && !cjk_punct(p) && !strchr(" \t\r\n`'\"()[]<>{}|,;*", *p)) p++;
         const size_t n = (size_t)(p - s);
-        try_path((const char *)s, n, &out, &k, seen, CAP);
+        fn((const char *)s, n, &out, &k, seen, CAP);
         size_t a = n; while (a && path_ch(s[a - 1])) a--;   /* 词尾的 ASCII 路径段 */
-        if (a > 0 && a < n) try_path((const char *)s + a, n - a, &out, &k, seen, CAP);
+        if (a > 0 && a < n) fn((const char *)s + a, n - a, &out, &k, seen, CAP);
     }
     if (!k) { ds4_buf_free(&out); return NULL; }
     ds4_buf_putc(&out, ']');
     return ds4_buf_take(&out);
 }
+char *asst_file_mentioned(const char *answer) { return scan_answer(answer, try_path); }
+char *asst_file_mentioned_missing(const char *answer) { return scan_answer(answer, try_missing); }

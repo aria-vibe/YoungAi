@@ -27,6 +27,7 @@ static const ds4_test_entry test_entries[] = {
     {"--metal-upload", "metal-upload", "ordered upload snapshots and staging reuse (no model)", test_metal_upload, 0},
     {"--metal-v41", "metal-v41", "DeepSeek V4.1 Metal primitives vs src/common golden + finite differences (no model)", test_metal_v41_group, 0},
 #endif
+    {"--bwd-attn", "bwd-attn", "sparse-attention backward vs finite differences, 64 heads, pos0 = 0/2/6 (ctxlen prefix form; both backends, no model)", test_v41_bwd_attn, 0},
     {"--metal-tensor-equivalence", "metal-tensor-equivalence", "fast/quality Metal prompt-logit and greedy equivalence", test_metal_mpp_equivalence, 1},
     {"--asr", "asr", "speech recognition (Moonshine, src/model/asr) vs ONNX golden: encoder + per-step logits (SKIP without gguf/asr model)", test_asr_units, 0},
 #endif

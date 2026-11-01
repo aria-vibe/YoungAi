@@ -136,6 +136,7 @@ typedef struct {
     void *ejob;                 /* engram 取行后台任务(core_v41_engram.c 私有): 前向一开始发, 到 engram 层再收 */
     ds4_gpu_tensor *ampA[DS4_MAX_LAYER], *ampB[DS4_MAX_LAYER];   /* 反修放大器 A[K][D] / B[K][D](f32, 设备常驻), 无=NULL */
     uint32_t ampK[DS4_MAX_LAYER];
+    ds4_gpu_tensor *ampS[DS4_MAX_LAYER];   /* 带路由的放大器(10-29 段 B 试验件): 每个专家一组秩系数 S[NE][K](ampr_Lnn.bin), 无=NULL; 归属同 ampA */
     uint8_t amp_shared;         /* 1 = ampA/ampB 是进程级插件缓存的张量(core_v41_amp.c), 释放时只减引用不 free; 0 = 自己的(草稿态的塔件) */
     ds4_gpu_tensor *ampT;       /* [cap][Kmax] 中间 T = x·B(每个状态自己的, 按 cap 开) */
     int stop_early;             /* 反修钩子说"取完了": 本次前向跳过余下层与出口(core_v41_forward.c), 调用方不读 logits */
@@ -292,6 +293,8 @@ extern const char *g_ds4_v41_pt_dir;    /* --posttrain <dir>: 三文件部署第
 extern ds4_v41_moe_hook_fn g_ds4_v41_hook;   /* 反修钩子(ds4_engine_v41_set_moe_hook), 无=NULL */
 extern void *g_ds4_v41_hook_ud;
 extern int g_ds4_v41_hook_layer;   /* 钩子只在这一层回调(-1=每层); 见 ds4_engine_v41_set_moe_hook_layer */
+extern ds4_v41_logits_fn g_ds4_v41_logits_hook;   /* --score-ids 出口 logits 回调(ds4_engine_v41_set_logits_hook), 无=NULL */
+extern void *g_ds4_v41_logits_ud;
 bool v41_attention_kv_only(ds4_engine *e, ds4_v41_state *st, uint32_t il);   /* CED 分界层: 只写全局 KV */
 extern const ds4_model *g_ds4_v41_model;   /* 引擎打开时指向 e->model(core_engine_open.c): 路由偏置侧车要按层找 exp_probs_b 张量(core_v41_amp.c) */
 bool v41_amp_load(ds4_v41_state *st, const char *dir, const char *pt_dir);   /* core_v41_amp.c: ②反修目录 + ③后训练目录 */

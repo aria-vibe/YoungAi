@@ -106,6 +106,11 @@ void ds4_engine_v41_set_moe_hook(ds4_v41_moe_hook_fn fn, void *ud) { g_ds4_v41_h
  * 39 层的拷贝全是白做的。实测 512 token 一块从 33 秒降到个位数。 */
 int g_ds4_v41_hook_layer = -1;
 void ds4_engine_v41_set_moe_hook_layer(int il) { g_ds4_v41_hook_layer = il; }
+/* --score-ids 出口 logits 回调(2026-10-21, 反修端到端择优): 每块读回主机的全词表 logits 行先交给调用方, 文件可以不写。
+ * 为什么不走文件: 一趟 15360 行的 f32 logits 是 7.9 GB, 择优每层要跑 3~4 趟 —— 统一内存上写它就是在掏 GPU 的内存(09-08 崩机)。 */
+ds4_v41_logits_fn g_ds4_v41_logits_hook = NULL;
+void *g_ds4_v41_logits_ud = NULL;
+void ds4_engine_v41_set_logits_hook(ds4_v41_logits_fn fn, void *ud) { g_ds4_v41_logits_hook = fn; g_ds4_v41_logits_ud = ud; }
 /* 服务接入的预填进度回调(2026-09-19): 服务端一条 15k token 的提示要预填两分钟, 流式客户端没有心跳就断线。
  * 只在生成路的预填块间回调, --score-ids 那条不回(它没有客户端在等)。 */
 static ds4_v41_progress_fn g_v41_progress = NULL;

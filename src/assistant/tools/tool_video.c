@@ -64,6 +64,8 @@ static const char CLOCK_JS[] =
     " };\n"
     "}";
 
+const char *asst_ff_clock_js(void) { return CLOCK_JS; }   /* view_file 复用同一份预载(时钟 + 错误收集), 不抄第二份 */
+
 /* ---------------- 子进程: 管道里读帧 → 编码 → mp4 ---------------- */
 typedef struct { int fd, w, h, nframes; const char *path, *trash; const asst_vaudio *aud; char fdir[2 * ASST_PATH + 8], frel[ASST_PATH]; } venc_job;   /* fdir = 工作区 + "/" + frel, 两段各可到 ASST_PATH */
 

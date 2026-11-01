@@ -22,6 +22,8 @@
 #   posttrain  只发 ③(10-22): 核 PT_SRC 齐 40 层 + base.fnv → 核远端 POSTTRAIN_DOMAIN 侧车与 PT_ZD 逐字节同 → 传 <POSTTRAIN>/ 一个目录。
 #           不走 stage/small: 那两条会顺手从 $V41 摆全部侧车, 而本机的侧车目录可能已经重解过、和线上不是同一份(10-22 实撞: spark 的
 #           编程侧车目录与线上 0/70 同, 线上那份 = .1018 = ③ 训练时挂的那份), 一传就把线上的换掉, ③ 从此配不上
+#   restore 只发还原侧车(10-30): 摆层文件 + 清洗 manifest(只留段 A 与段 B 现役一行) → 远端逐字节同就跳过 → 传 → 再逐字节核一遍。
+#           侧车每轮重训层文件大小不变, 所以核的是 sha256 不是大小。在 spark 上跑, 网络走 Mac 的 17897 隧道(见下)
 #   docs    只发文档(10-22): README.md / README.zh-CN.md / README_ASSETS / install.sh 一个提交; 不碰侧车、二进制、③。Mac 上就能跑(~/hfenv)
 #   split   备份原件(真复制+哈希核对+只读) → 切 40 份 → SHA256SUMS → 拼回核对与原件逐字节同; 切过(SHA256SUMS 在)就跳过
 #   stage   在 gguf/hf_upload/<仓库名>/ 摆好发布目录。大文件用硬链接(同一文件系统, 不多占一个字节);
@@ -49,7 +51,7 @@ fsize(){ stat -c %s "$1" 2>/dev/null || stat -f %z "$1"; }   # GNU 与 BSD/macOS
 # 同一天在 Mac 上直接传两次都没上去: LFS 300 s 一行输出没有、被卡死检测杀掉, 远端零文件; Xet 11 分钟走到 61 MB 后连接全断不再动。
 # 文档那几个文本文件小, Mac 上直接传没问题(10-11 起一直这么传)。
 NOXET=(env HF_HUB_DISABLE_XET=1)
-CMD="${1:?用法: $0 split|stage-base|stage|base|sidecars|small|vision|tts|big|verify|posttrain|docs <用户名/仓库名>}"
+CMD="${1:?用法: $0 split|stage-base|stage|base|sidecars|small|vision|tts|big|verify|posttrain|restore|docs <用户名/仓库名>}"
 REPO="${2:?缺仓库名, 例: wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017}"
 V41="$ROOT/gguf/v41"
 LOG(){ echo "[hfpub $(date '+%m-%d %H:%M:%S')] $*"; }
@@ -68,10 +70,13 @@ PT_WANT=$(ins_var POSTTRAIN)          # 空 = 这一版底座不发 ③
 PT_DOMAIN=$(ins_var POSTTRAIN_DOMAIN)
 PT_SRC="$V41/posttrain/fp-formal2-A-B-M-L0-39-lr2e-4-e2-1022/ckpt_e02"
 PT_ZD="$V41/DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-code_fit_n15360-engine.1018"
+# 还原侧车(spark 默认挂的那份: ② 式增益 + ③ 式秩 64 修正一个目录, 修正之后按轮向官方 API 学, 见 restore_B_api_round_spark.sh)。
+# 不在 install.sh 的 sidecar_of 表里(--domain 选不到), 用户靠 install.sh "除分块外整仓下载"拿到, 传 ds4-server --zchain 用
+RS_NAME="DeepSeek-V4.1-Flash-1017-vq8sh14-q4k-mtpnative-grrb-restore_fit_n15360-engine"
 pt_sidecar(){ sed -n "s/^ *$PT_DOMAIN) *echo \"\(DeepSeek-[^\"]*-engine\)\";;\$/\1/p" "$INSTALL"; }   # POSTTRAIN_DOMAIN 在仓库里的侧车目录名
 BASE_HF="$ROOT/hf/$(ins_var BASE_REPO | sed 's#.*/##')"   # 出厂权重目录 = BASE_REPO 斜杠后半截(LICENSE-DeepSeek 从这里拷)
 STAGE="$ROOT/gguf/hf_upload/${REPO#*/}"
-README_ASSETS="web/logo.jpg docs/img/arch.png docs/img/arch-en.png docs/img/studio-agent.png docs/img/studio-agent-en.png docs/TECHNICAL.md docs/TECHNICAL.zh-CN.md docs/pwa.md"
+README_ASSETS="web/logo.jpg docs/img/quant_compare.png docs/img/quant_compare-en.png docs/img/arch.png docs/img/arch-en.png docs/img/studio-agent.png docs/img/studio-agent-en.png docs/img/pelican-official.png docs/img/pelican-local.png docs/img/pelican-local-1030.png docs/TECHNICAL.md docs/TECHNICAL.zh-CN.md docs/pwa.md"
 
 # 基座那一半: 分块 + SHA256SUMS + 视觉侧车。stage 在它之上再摆 README/侧车/bin/③
 stage_base() {
@@ -125,9 +130,13 @@ check_pt() {
     [ -d "$PT_ZD" ] || die "缺 ③ 训练时挂的侧车 $PT_ZD(配对核对要比它)"
 }
 
-# 远端 POSTTRAIN_DOMAIN 侧车与 PT_ZD 逐字节同吗(只读元数据: 小文件比 git blob sha1, LFS 比 sha256; 不参与数值)
-pt_pair_remote() {
-    "$(dirname "$HF")/python" - "$REPO" "$(pt_sidecar)" "$PT_ZD" <<'PYEOF'
+# 远端 POSTTRAIN_DOMAIN 侧车与 PT_ZD 逐字节同吗
+pt_pair_remote() { remote_same "$(pt_sidecar)" "$PT_ZD"; }
+
+# remote_same <仓库里的子目录> <本地目录>: 两边文件一一对上且逐字节同才退 0(只读元数据: 小文件比 git blob sha1, LFS 比 sha256; 不参与数值)。
+# 比大小不够: 侧车每轮重训, 层文件字节数一个不变, 只比大小会把"没传上去"当成"已同"
+remote_same() {
+    "$(dirname "$HF")/python" - "$REPO" "$1" "$2" <<'PYEOF'
 import hashlib, os, sys
 from huggingface_hub import HfApi
 repo, sub, loc = sys.argv[1:4]
@@ -402,6 +411,28 @@ case "$CMD" in
         --commit-message "Post-training file (rank-64 correction on every MoE layer, distilled from the original weights); pairs with the $PT_DOMAIN sidecar, load with ds4-server --posttrain" \
         || { tail -c 600 "$PLOG" | tr '\r' '\n' | grep -v '^\s*$' | tail -5; die "$PT_WANT 上传失败(完整输出 $PLOG; 重跑同一条就是续传)"; }
     LOG "POSTTRAIN_DONE $PT_WANT $(( $(date +%s) - t0 ))s https://huggingface.co/$REPO/tree/main/$PT_WANT";;
+  restore)   # 还原侧车: 只摆能部署的层文件 + 清洗过的 manifest; 目录里的 amp_prev_* 回滚备份不发
+    need_login
+    S="$V41/$RS_NAME"; D="$STAGE/$RS_NAME"
+    [ "$(ls "$S"/amp_L[0-9][0-9].bin 2>/dev/null | wc -l)" = 40 ] && ls "$S"/gr_L*.bin >/dev/null 2>&1 && grep -q '^# 完成' "$S/manifest.txt" \
+        || die "还原侧车 $S 不齐(要 40 层 amp + gr 层文件 + manifest 的 '# 完成' 行)"
+    rm -rf "$D"; mkdir -p "$D" && ln -f "$S"/gr_L*.bin "$S"/rb_L*.bin "$S"/amp_L[0-9][0-9].bin "$D/" || die "摆 $D 失败"
+    # manifest = 段 A 原样(到 "# 完成" 行) + 段 B 现役那一行。本机每轮自学习追加一行 "# 段 B …", 没过门的紧跟一行 "# 回退 …";
+    # 现役 = 最后一个后面没紧跟回退的 "# 段 B" 行。整份发出去是几十行试错记录, 读者分不清装着的是哪一轮
+    awk '/^# 段 B/ {if (c != "") k = c; c = $0; nb = NR; next} /^# 回退/ && NR == nb + 1 {c = ""; next}
+         !done {print} /^# 完成/ {done = 1} END {if (c != "") k = c; if (k == "") exit 1; print k}' "$S/manifest.txt" > "$D/manifest.tmp" \
+        || die "$S/manifest.txt 里找不到现役段 B 行"
+    # 解算器把教师锚等路径记成绝对路径(仓库根开头); 去掉仓库根 = 仓库内相对路径, 读者照样对得上是哪份文件
+    sed "s#$ROOT/##g" "$D/manifest.tmp" > "$D/manifest.txt" && rm -f "$D/manifest.tmp"
+    ! grep -nE '/home/|/Users/' "$D/manifest.txt" || die "manifest 写死了本机用户目录, 改掉再发"
+    LOG "manifest 末行(段 B 现役): $(tail -1 "$D/manifest.txt")"
+    if remote_same "$RS_NAME" "$D"; then LOG "远端 $RS_NAME 已与本机逐字节同, 跳过"; exit 0; fi
+    t0=$(date +%s); LOG "$RS_NAME ($(ls "$D" | wc -l) 个文件) ← $S"
+    run_with_stall_guard "$STALL_S" "$PLOG" ${NOXET[@]+"${NOXET[@]}"} "$HF" upload "$REPO" "$D" "$RS_NAME" --repo-type model \
+        --commit-message "Restore sidecar: gains + router biases + rank-64 correction, correction trained further against the official API; pass the directory to ds4-server --zchain" \
+        || { tail -c 600 "$PLOG" | tr '\r' '\n' | grep -v '^\s*$' | tail -5; die "$RS_NAME 上传失败(完整输出 $PLOG; 重跑同一条就是续传)"; }
+    remote_same "$RS_NAME" "$D" || die "传完远端与本机仍不逐字节同(远端多出旧文件? 看上一行)"
+    LOG "RESTORE_DONE $(( $(date +%s) - t0 ))s https://huggingface.co/$REPO/tree/main/$RS_NAME";;
   docs)
     need_login; check_docs
     D="$STAGE-docs"; rm -rf "$D"; mkdir -p "$D"   # 只放这一组; 每次重摆, 免得上次留下的东西混进提交
@@ -410,7 +441,7 @@ case "$CMD" in
     cp -f "$INSTALL" "$D/install.sh"
     LOG "上传文档 → $REPO: $(cd "$D" && find . -type f | sort | tr '\n' ' ')"
     run_with_stall_guard "$STALL_S" "$PLOG" ${NOXET[@]+"${NOXET[@]}"} "$HF" upload "$REPO" "$D" . --repo-type model \
-        --commit-message "README: base + code sidecar + post-training file; install.sh --posttrain" \
+        --commit-message "README and technical notes (with screenshots), install.sh" \
         || { tail -c 600 "$PLOG" | tr '\r' '\n' | grep -v '^\s*$' | tail -5; die "文档上传失败(完整输出 $PLOG)"; }
     LOG "DOCS_DONE https://huggingface.co/$REPO";;
   verify)

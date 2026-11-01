@@ -78,6 +78,9 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
  * 反传训练 ③ 的低秩放大器 → 落 amp_Lnn.bin + base.fnv(引擎 --posttrain 直接挂)。配置是 key=value 文本, 字段见 core_ptrain_data.c。
  * 只接 --zchain ②, 不接 --posttrain(起点恒为 ①+②)。返回 0 = 落盘成功。 */
 int ds4_engine_ptrain(ds4_engine *e, const char *spec);
+/* --restore-b <配置>(2026-10-28, 反修段 B 的还原训练; src/core/core_restoreb.c): 靶 = 官方 API 逐位 top-20, 只在量化丢掉能量的缺口位
+ * (第 0 步逐位 KL 的 rb_gap 分位以上)出梯度; 起点 rb_init 可扩秩。借 ③ 的装料/反传/落盘件, ③ 本身不动。返回 0 = 落盘成功。 */
+int ds4_engine_restoreb(ds4_engine *e, const char *spec);
 /* --draft-train <配置>(2026-10-07, 草稿器蒸馏; src/core/core_draft_kd*.c): 让 DSpark 三塔改盯部署底座 —— 教师强制走底座自己采样的真实请求续写,
  * 块内各位对底座同位置分布做 KL, 反传训三塔 MoE 出口的低秩件 + 出口对齐件; 落 tower_Tn.bin + exit.dspa + base.fnv, 引擎 --draft-amp <目录> 直接挂。
  * 底座/塔原权重/头全冻结, 验证侧不动 ⇒ 只动接受率。配置是 key=value 文本(字段见 core_draft_kd.c)。返回 0 = 落盘成功。 */
@@ -194,6 +197,11 @@ typedef int (*ds4_v41_moe_hook_fn)(void *ud, int il, int pos0, int n, int D, int
 void ds4_engine_v41_set_moe_hook(ds4_v41_moe_hook_fn fn, void *ud);
 /* 只在第 il 层回调(-1 = 每层)。取料的 D2H 发生在回调之前, 只要一层时不设它 = 每块白拷 39 层。 */
 void ds4_engine_v41_set_moe_hook_layer(int il);
+/* --score-ids 的出口 logits 回调(2026-10-21, 反修端到端择优): 每块前向完、logits 读回主机后回调一次, 行 [row0, row0+nrow) 的
+ * 全词表 f32 logits(未 softmax, 行主序 [nrow][vocab]); 回调返回非 0 = 这趟停车。设了回调时 out_path 可以给 NULL(不落文件);
+ * 回调只在这一块的生命期内有效, 要留的数据自己拷。CED 块 / 钩子早停的块没有 logits, 不回调。NULL = 不回调。 */
+typedef int (*ds4_v41_logits_fn)(void *ud, int row0, int nrow, const float *logits, int vocab);
+void ds4_engine_v41_set_logits_hook(ds4_v41_logits_fn fn, void *ud);
 
 #ifdef __cplusplus
 }

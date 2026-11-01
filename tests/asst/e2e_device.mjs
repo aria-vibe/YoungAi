@@ -178,7 +178,7 @@ ok(await page.evaluate(() => pendingFiles.join()) === "inbox/合同.docx" && awa
 await page.evaluate(() => { inputEl.value = "转成 PDF"; inputEl.disabled = false; return send(); });
 await page.waitForFunction(() => view && view.items.filter(i => i.kind === "end").length >= 2, null, { timeout: 15000 }).catch(() => {});
 msgs = readMsgs();
-const u1 = msgs.filter(m => m.role === "user")[1];
+const u1 = msgs.filter(m => m.role === "user" && !(typeof m.content === "string" && m.content.startsWith("[verify before answering")))[1];   /* 校验相的事实消息也是 user 角色(10-23), 不算用户发的第二条 */
 ok(u1 && /^\[设备: 手机 · [^\]]* · 上次定位: 30\.27410,120\.15510 ±35 m(?: [^\]]*?)? \(0 分钟前\)\]\n\[附件: inbox\/合同\.docx \(1 KB\)\]\n转成 PDF$/.test(u1.content), "第二条消息的事实行带上次定位 + 附件行: " + JSON.stringify(u1 && u1.content));
 ok(await page.evaluate(() => pendingFiles.length) === 0, "发送后附件清空");
 await ctx.close();
@@ -396,6 +396,33 @@ const tasksDir = path.join(ASST, "tasks");
   ok(/已放弃/.test(await p7.locator(".plan.closed").last().textContent()) && await p7.locator(".plan.closed button").count() === 0, "卡上: 已放弃, 按钮收起");
   for (const f of readdirSync(tasksDir)) { try { if (JSON.parse(readFileSync(path.join(tasksDir, f), "utf8")).text.startsWith("e2e 计划")) rmSync(path.join(tasksDir, f), { force: true }); } catch (_) {} }   /* 测试建的计划任务文件; 会话由收尾挪进 trash */
   await ctx7.close();
+}
+
+/* ---- 校验相(10-23, docs/assistant_verify.md): 假模型写一页带脚本错误的网页就想收口(还点名一个不存在的 pdf) → 框架摆事实(第 1 条) → 它 view_file → edit_file 修 → 收口 → 第 2 条(改过了, 标 last) → 终稿; 页面上两条灰色系统气泡, 不是用户气泡 ---- */
+{
+  const ctxV = await browser.newContext({ locale: "zh-CN" });
+  const pv = await ctxV.newPage(); pv.on("pageerror", e => console.log("pageerror:", e.message));
+  await pv.goto(`http://127.0.0.1:${PORT}/#chat`); await login(pv); await sleep(300);
+  await pv.evaluate(() => { selectSession(null); inputEl.value = "e2e 校验: 写一页"; inputEl.disabled = false; return send(); });
+  await pv.waitForFunction(() => view && view.items.some(i => i.kind === "end"), null, { timeout: 60000 }).catch(() => {});
+  const vsid = await pv.evaluate(() => view.sid);
+  const vits = await pv.evaluate(() => view.items.map(i => ({ kind: i.kind, name: i.name, ok: i.ok, round: i.round, text: i.text, content: i.content })));
+  const vnotes = vits.filter(i => i.kind === "vnote");
+  ok(vnotes.length === 2 && vnotes[0].round === 1 && vnotes[1].round === 2 && /check 1 of 2/.test(vnotes[0].text) && /e2e_verify\.html \(\d+ B, write_file, not looked at since\)/.test(vnotes[0].text) && /Named in your answer but not in the workspace: e2e_missing\.pdf/.test(vnotes[0].text), "两条校验事实: 第 1 条列产物 + 点名缺失: " + JSON.stringify(vnotes.map(v => v.text && v.text.slice(0, 160))));
+  ok(vnotes[1] && /check 2 of 2/.test(vnotes[1].text) && /changed since the last check/.test(vnotes[1].text) && /last check in this run/.test(vnotes[1].text), "第 2 条: 改过了 + 标最后一次");
+  ok(["write_file", "view_file", "edit_file"].every(n => vits.some(i => i.kind === "tool" && i.name === n && i.ok)), "做 → 核(view_file) → 修(edit_file) 三步都走了: " + JSON.stringify(vits.filter(i => i.kind === "tool").map(i => i.name)));
+  const vlast = vits.filter(i => i.kind === "asst").pop();
+  ok(vlast && /核过了/.test(vlast.content) && vits.some(i => i.kind === "end"), "终稿是校验之后的那条: " + JSON.stringify(vlast && vlast.content));
+  await pv.waitForFunction(() => document.querySelectorAll("#chat .vnote").length >= 2, null, { timeout: 5000 }).catch(() => {});   /* 渲染有 90 ms 合并窗口 */
+  const vcounts = { vnote: await pv.locator("#chat .vnote").count(), user: await pv.locator("#chat .msg.user").count() };
+  ok(vcounts.vnote === 2 && vcounts.user === 1, "页面: 两条灰色系统气泡, 用户气泡只有一条(事实消息不算用户说的): " + JSON.stringify(vcounts));
+  const vmsgs = readFileSync(path.join(ASST, "sessions", vsid, "messages.jsonl"), "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l));
+  ok(vmsgs.filter(m => m.role === "user" && typeof m.content === "string" && m.content.startsWith("[verify before answering")).length === 2, "messages.jsonl 里两条 user 角色的事实消息(模型可见即已记录)");
+  const vaudit = readFileSync(path.join(ASST, "audit.jsonl"), "utf8").split("\n").filter(Boolean).map(l => JSON.parse(l)).filter(a => a.session === vsid && a.tool === "verify");
+  ok(vaudit.length === 2 && vaudit[0].decision === "note", "审计里 verify 两条");
+  if (SHOTS) { mkdirSync(SHOTS, { recursive: true }); await sleep(300); await pv.screenshot({ path: path.join(SHOTS, "verify-notes.png"), fullPage: true }); }
+  rmSync(path.join(ASST, "workspace", "e2e_verify.html"), { force: true }); rmSync(path.join(ASST, "workspace", ".view"), { recursive: true, force: true });
+  await ctxV.close();
 }
 
 /* ---- 语音输入(10-14, 用户: 照微信): 最右圆钮 麦克风 ⇄ 键盘 / 有字变发送; 按住说话 → 上滑取消 / 太短丢 / 松手识别完直接发 ----

@@ -5,6 +5,8 @@
  * 只能离线逐层流式打分(v41_teacher.py, 与判决尺同一条参考前向), 所以分两步:
  *   ① dumpids=<文件>: 装料后把每道题的教师序列(tids)去重写出去(一行一串 id), 退出 —— 外面拿 v41_teacher.py --seqs 打 top-K;
  *   ② teacher=fp:<表>: 读回 top-K 表, 每道题按整条教师序列逐 id 对上才填表; 任一道对不上就停车, 不回退到部署态教师(回退 = 两种教师混在一趟里, 查不出来)。
+ *   前缀形态的原文段(pt_sample.fpkey ≠ 0, 10-26): 键 = 整篇序列, 导一条、填整篇所有段 —— 表序列只要以该段的 tids 开头(因果前向, 前缀相同则各行相同), 行号同 ta0−1。
+ *   表可以不是本地 FP 教师打的: 官方 API 开 logprobs 的 top-20(api_teacher.py ptf, 与 HF 原件 Same top 96.7% / KL 0.0065, fable5 10-26), 格式同一份。
  * 有了 FP 教师, one-hot 行(text 原文段 / 不带材料的问答 / 保持料)全部改成向 FP 蒸馏: 整篇文档的 EOS、思考收口的 </think> 都在 FP 的分布里,
  * 而保持料若仍钉在部署态自己, 等于把被压的 EOS 钉死(保持料的回答都以 EOS 收尾)。
  *
@@ -16,7 +18,7 @@
 
 #define PT_FP_MAGIC 0x31465450u   /* 'PTF1' 小端 */
 
-static uint64_t pt_ids_fnv(const int32_t *ids, uint32_t n) {
+uint64_t pt_ids_fnv(const int32_t *ids, uint32_t n) {
     uint64_t h = 1469598103934665603ull ^ n;
     for (uint32_t i = 0; i < n; i++) { h ^= (uint64_t)(uint32_t)ids[i]; h *= 1099511628211ull; }
     return h;
@@ -42,12 +44,13 @@ bool pt_dump_ids(const pt_cfg *c, const pt_data *d) {
     uint32_t n = 0, mx = 0; uint64_t tot = 0;
     for (uint32_t i = 0; i < d->ns; i++) {
         const pt_sample *s = &d->s[i];
-        uint32_t *v = pt_fpmap_slot(&m, pt_ids_fnv(s->tids, s->tn));
-        if (*v != UINT32_MAX) continue;   /* 同一串教师序列(重复题)只写一次 */
+        const int32_t *ids = s->fpkey ? d->docids[s->doc] : s->tids; const uint32_t n_ids = s->fpkey ? d->docn[s->doc] : s->tn;   /* 整篇 / 自己的窗 */
+        uint32_t *v = pt_fpmap_slot(&m, s->fpkey ? s->fpkey : pt_ids_fnv(s->tids, s->tn));
+        if (*v != UINT32_MAX) continue;   /* 同一串教师序列(重复题 / 同一篇的各段)只写一次 */
         *v = i;
-        for (uint32_t t = 0; t < s->tn; t++) fprintf(f, t ? " %d" : "%d", s->tids[t]);
+        for (uint32_t t = 0; t < n_ids; t++) fprintf(f, t ? " %d" : "%d", ids[t]);
         fputc('\n', f);
-        n++; tot += s->tn; if (s->tn > mx) mx = s->tn;
+        n++; tot += n_ids; if (n_ids > mx) mx = n_ids;
     }
     fclose(f); free(m.k); free(m.v);
     fprintf(stderr, "ds4: [ptrain] dumpids: %u 条教师序列(料 %u 题去重)共 %llu 位, 最长 %u → %s; 下一步 v41_teacher.py <HF> --seqs 这个文件 --topk %u\n",
@@ -94,10 +97,11 @@ bool pt_teacher_fp(const pt_cfg *c, pt_data *d) {
     uint32_t filled = 0, miss = 0; uint64_t rows = 0;
     for (uint32_t i = 0; i < d->ns; i++) {
         pt_sample *s = &d->s[i];
-        const uint32_t *v = pt_fpmap_slot(&m, pt_ids_fnv(s->tids, s->tn));
+        const uint32_t *v = pt_fpmap_slot(&m, s->fpkey ? s->fpkey : pt_ids_fnv(s->tids, s->tn));
         const uint8_t *rec = *v != UINT32_MAX ? b + at[*v] : NULL;
         uint32_t L = 0; if (rec) memcpy(&L, rec, 4);
-        if (!rec || L != s->tn || memcmp(rec + 4, s->tids, (size_t)s->tn * 4)) {
+        /* 自己的窗做键: 整条逐 id 同; 整篇做键: 表序列以 tids 开头(L ≥ tn)即可, 多出的尾巴是同篇后面段的行 */
+        if (!rec || (s->fpkey ? L < s->tn : L != s->tn) || memcmp(rec + 4, s->tids, (size_t)s->tn * 4)) {
             if (miss < 5) fprintf(stderr, "ds4: [ptrain] ★教师表里没有第 %u 题的序列(%u 位, %s)★\n", i, s->tn, d->ch[s->chunk].name);
             miss++; continue;
         }

@@ -33,25 +33,32 @@ int ds4_engine_v41_score_ids(ds4_engine *e, const int *ids, int n_ids, const cha
     const uint32_t cap = ck < n ? ck : n;
     ds4_v41_state st;
     if (!v41_state_alloc(&st, cap, n, 0)) return 1;   /* 打分路: 每个位置都要 logits, 按 cap 开 */
-    st.dump_prefix = (n <= 64u && cap == n) ? out_path : NULL;   /* 单块小样本自动落逐层 x/y, 对拍定位用 */
+    /* 单块样本自动落逐层 x/y(<out>.x_Lnn.bin / .y_Lnn.bin, f32 [n][5120]), 对拍定位用。上限原来是 64 位(09-12 P2 短样本);
+     * 10-25 放到一块的容量: FP 教师 600 位之后回看失灵, 要在 2000 位的序列上按层、按位置段对拍才能定位在哪一层, 64 位看不到。
+     * 一块 2048 位 × 40 层 × 2 份 × 20 KB = 3.3 GB 文件, 只在给了 --score-out 且整条一块时落。 */
+    st.dump_prefix = (n <= DS4_V41_CHUNK && cap == n) ? out_path : NULL;
     st.no_engram = no_engram;
     st.half_prefill = 1;   /* 打分量的是推理路的数(NLL 门), 与生成同核 */
     if (no_engram) fprintf(stderr, "[v41] ★no-engram★ 对拍口径, 跳过 engram 层\n");
     if (ck < n) fprintf(stderr, "[v41] 分块 %u(%u 块)\n", ck, (n + ck - 1) / ck);
     ds4_score_aux *aux = ds4_score_aux_open(g_v41_score_nll, g_v41_score_topk_path,
                                             g_v41_score_topk, g_v41_score_rms, n, DS4_N_VOCAB, "v41");
-    const int aux_nll = aux && g_v41_score_nll;   /* 只开了 rms 时 aux 非空但没算 NLL, 冒烟 PPL 仍要自己算 */
-    /* 小出口开着时默认仍写全词表 logits(老对拍口径不变); --score-no-logits 才关掉它。 */
+    /* 只开了 rms 时 aux 非空但没算 NLL, 冒烟 PPL 仍要自己算。只走回调、不落文件时也不算: 回调方自己算它要的行,
+     * 这里逐行扫 12.9 万个 exp(15360 行 ≈ 2e9 次)是白做的几秒, 而端到端择优每层要跑三四趟。 */
+    const int aux_nll = (aux && g_v41_score_nll) || (g_ds4_v41_logits_hook && !out_path);
+    /* 小出口开着时默认仍写全词表 logits(老对拍口径不变); --score-no-logits 才关掉它。
+     * out_path 为 NULL = 调用方只要回调(ds4_engine_v41_set_logits_hook), 不落文件 —— 没回调也没小出口就是一趟白跑, 拒。 */
     FILE *fo = NULL;
-    if (!g_v41_score_skip_logits) {
+    if (!g_v41_score_skip_logits && out_path) {
         fo = fopen(out_path, "wb");
         if (!fo) { fprintf(stderr, "ds4: 写不了 %s\n", out_path); ds4_score_aux_close(aux); v41_state_free(&st); return 1; }
         int hd[2] = { (int)n, (int)DS4_N_VOCAB };
         fwrite(hd, 4, 2, fo);
-    } else if (!aux) {
-        fprintf(stderr, "ds4: --score-no-logits 却没给 --score-nll/--score-topk, 这趟什么都不会产 -- aborting\n");
+    } else if (!aux && !g_ds4_v41_logits_hook) {
+        fprintf(stderr, "ds4: %s却没给 --score-nll/--score-topk, 这趟什么都不会产 -- aborting\n", out_path ? "--score-no-logits " : "不落 logits 文件、没设回调, ");
         v41_state_free(&st); return 1;
     }
+    if (!out_path) out_path = "(回调)";   /* 下面的日志行要打它 */
     float *lg = xmalloc((size_t)cap * DS4_N_VOCAB * 4);
     /* --score-rms: 出口 RMSNorm 前的隐状态整块读回来算 inv。一块 512×5120×4 = 10 MB,
      * 相对这一块本来就要读的 logits(512×129280×4 = 265 MB)是零头。 */
@@ -85,6 +92,9 @@ int ds4_engine_v41_score_ids(ds4_engine *e, const int *ids, int n_ids, const cha
         }
         if (!ok) break;
         if (fo) fwrite(lg, 4, (size_t)nc * DS4_N_VOCAB, fo);
+        if (g_ds4_v41_logits_hook && g_ds4_v41_logits_hook(g_ds4_v41_logits_ud, (int)c0, (int)nc, lg, (int)DS4_N_VOCAB) != 0) {
+            fprintf(stderr, "ds4: [logits 回调] 行 %u+%u 要求停车\n", c0, nc); ok = false; break;
+        }
         for (uint32_t i = 0; i < nc; i++) {   /* teacher-forcing: 第 c0+i 位预测 ids[c0+i+1] */
             const uint32_t row_i = c0 + i;
             const float *row = lg + (size_t)i * DS4_N_VOCAB;
@@ -105,7 +115,7 @@ int ds4_engine_v41_score_ids(ds4_engine *e, const int *ids, int n_ids, const cha
     } else if (ok && !aux_nll) fprintf(stderr, "[v41] 完成 S=%u V=%u → %s  ★PPL(本段 %u token) = %.4f★  %.1fs\n", n, DS4_N_VOCAB, out_path, n,
                     n > 1 ? exp(nll / (double)(n - 1)) : 0.0, now_sec() - t0);
     else if (ok) fprintf(stderr, "[v41] 完成 S=%u V=%u%s  %.1fs\n", n, DS4_N_VOCAB,
-                         fo ? " (logits 已写)" : " (只出小文件)", now_sec() - t0);
+                         fo ? " (logits 已写)" : g_ds4_v41_logits_hook ? " (只回调)" : " (只出小文件)", now_sec() - t0);
     v41_state_free(&st);
     return ok ? 0 : 1;
 }

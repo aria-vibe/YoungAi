@@ -1,0 +1,9 @@
+{"task": "aime25", "id": "9", "why": "答 None 金 62 撞上限", "round": "t003", "date": "2026-10-31", "metric": "AIME25"}
+{"task": "hmmt_feb26", "id": "27", "why": "答 None 金 74^\\circ 撞上限", "round": "t003", "date": "2026-10-31", "metric": "截断率"}
+{"task": "hmmt_feb26", "id": "7", "why": "答 None 金 (3+\\sqrt{6}) 撞上限", "round": "t003", "date": "2026-10-31", "metric": "HMMT Feb26"}
+{"task": "gpqa_diamond", "id": "g160", "why": "答 A 金 B", "round": "t003", "date": "2026-10-31", "metric": "GPQA-D"}
+{"task": "mmlu_pro", "id": "4609", "why": "答 A 金 B", "round": "t003", "date": "2026-10-31", "metric": "MMLU-Pro"}
+{"task": "mmlu_pro", "id": "11344", "why": "答 A 金 D", "round": "t003", "date": "2026-10-31", "metric": "六项均分"}
+{"task": "ifeval", "id": "1546", "why": "违指令", "round": "t003", "date": "2026-10-31", "metric": "IFEval"}
+{"task": "lcb_v6", "id": "abc399_e", "why": "no code block 撞上限", "round": "t003", "date": "2026-10-31", "metric": "LCB v6"}
+{"task": "aider", "id": "go/exercises/practice/bottle-song", "why": "单测挂", "round": "t003", "date": "2026-10-31", "metric": "Aider"}

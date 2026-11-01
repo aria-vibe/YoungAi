@@ -1,3 +1,13 @@
+> **开发理念**
+>
+> 天下没有免费的午餐。量化省下的体积，一定会在别处付出代价。
+>
+> 我采用平权量化，目的是让每一个个人、每一个行业、每一个国家拿到的都是同一个一致的底座；
+> 个性化的能力通过外挂实现（侧车、后训练文件），谁需要谁挂。
+> 如果单纯为了指标好看而伤了边际能力，那不是我想要的。
+>
+> 下一步的目标：实现自进化还原。
+
 <p align="center">
   <img src="web/logo.jpg" width="96" alt="YoungAi logo">
 </p>
@@ -11,11 +21,37 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/fodelf/YoungAi"><b>GitHub 仓库 · fodelf/YoungAi</b></a> ·
   <a href="https://fodelf.github.io/YoungAi/"><b>项目网站 · 使用指南</b></a> ·
   <a href="https://github.com/fodelf/YoungAi/blob/restructure/README.md">English</a> · <b>中文</b> ·
   <a href="https://huggingface.co/wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017">Hugging Face</a> ·
   <a href="https://github.com/fodelf/YoungAi/blob/restructure/docs/TECHNICAL.zh-CN.md">技术细节</a>
 </p>
+
+![DeepSeek V4.1 Flash 1017 的 1 位量化按 Unsloth 基准对比：本项目 vs Unsloth UD-IQ1_S / IQ1_M、ISTA-DASLab GSQ-RCO IQ1_M](docs/img/quant_compare.png)
+
+**这张图里我们这边的数据集很小，只看量级，别当排名。** 每项基准只给了 50 分钟、单路串行，跑到的是随机子集，每题 1 个样本，
+一共 205 个答案（AIME25 18、HMMT 11、GPQA 27、MMLU-Pro 73、IFEval 61、LiveCodeBench 15）。Unsloth 的数用的是全部题目，每题最多 16 个样本。
+我们的误差棒从 ±3.5 到 ±13.4 个点。六项均分 82.5 ± 3.6，GSQ-RCO 81.8、UD-IQ1_S 83.5、UD-IQ1_M 85.6。
+AIME25 偏低（77.8 ± 9.8，对方 92–95），HMMT 偏高（72.7 ± 13.4，对方 54–63），这个样本量下两边都不算定论。
+Aider Polyglot 没跑：官方 harness 要 Docker，我们的 Spark 上没有。
+
+**这些指标不代表模型的实际能力。** 看下面的鹈鹕测试就知道：同一个模型、同一道题，基准分几乎没变，画出来的东西差一截。
+
+同一句提示"创建一个HTML，内容是SVG绘制一个鹈鹕骑自行车的2D动画"，同一个 agent 流程（dsh）：
+
+| 官方 DeepSeek V4.1 Flash（510 GB 原件，官方 API） | 本项目 10-27：还原侧车，自学习之前 | 本项目 10-30：自学习留下 8 轮之后 |
+|:---:|:---:|:---:|
+| ![官方实现](docs/img/pelican-official.png) | ![本项目 10-27](docs/img/pelican-local.png) | ![本项目 10-30](docs/img/pelican-local-1030.png) |
+
+两趟本机都是 113.6 GB 平权量化底座 + 还原侧车、一台机器，中间只换了侧车里的修正部分；各跑一趟，不是挑出来的。
+
+- **10-27**：第一稿渲染后、模型看图自查时的一帧，我们在这里停了这趟。喉囊画成圆球挂在短喙下，身子、翅膀、脖子糊成一团。
+- **10-30**：终稿。模型自己写、自己看截图、看到问题自己改，72 次工具调用（38 分钟）后自己收手。长喙和沿着喙挂下来的喉囊有了；
+  差距还在：脖子没有立起来，喉囊偏小，身子看着更像鸭子。
+
+两趟之间，同一把尺：编程 Same top 84.3% → 85.0%（KL 0.252 → 0.230），通用英文 81.4% → 82.0%（KL 0.621 → 0.586）。
+侧车怎么学的见下面的[模型](#模型)一节。
 
 ![YoungAi 工作台：助理在全网找最便宜的 DGX Spark](docs/img/studio-agent.png)
 
@@ -25,17 +61,18 @@ DGX Spark 或 Apple Silicon 的 Mac，1M 上下文。开源，MIT 协议；纯 C
 
 ## 模型
 
-113.6 GB 的基座，加一个 41 MB 的侧车、一个 101 MB 的后训练文件，下一个字和 510 GB 官方原件一致的比例
-（Same top）到了 **84.8%**：
+113.6 GB 的基座，加一个 145 MB 的还原侧车，编程上下一个字和 510 GB 官方原件一致的比例（Same top）到了 **85.1%**：
 
 | | 体积 | 编程 | 通用英文 |
 |---|---:|---:|---:|
 | ① 基座 | 113.6 GB | 78.4% | 76.8% |
 | ① + ② 编程侧车 | + 41 MB | 82.0% | 79.7% |
-| **① + ② + ③ 后训练** | **+ 101 MB** | **84.8%** | **82.4%** |
+| ① + ② + ③ 后训练 | + 101 MB | 84.8% | 82.4% |
+| **① + 还原侧车（Spark 上默认）** | **+ 145 MB** | **85.1%** | **82.2%** |
 
 "一致"指同一段文字上，我们的模型和原件挑出的最可能的下一个 token 相同。编程用的是 30 种语言、15,360 个 token 的
-留出代码，通用英文是 WikiText-2。平均 KL 同步降下来：编程 0.446 → 0.318 → 0.230，通用英文 0.803 → 0.673 → 0.574。
+留出代码，通用英文是 WikiText-2。各行平均 KL：编程 0.446 → 0.318 → 0.230 → 0.227，通用英文 0.803 → 0.673 → 0.574 → 0.590。
+还原侧车对 ② + ③：编程 Same top 领先、编程 KL 持平；通用英文低 0.2 个点（512 个 token 里差 1 个），在我们守的 80% 底线之上。
 
 **113.6 GB 能做到这个数，靠三件事：**
 
@@ -45,11 +82,11 @@ DGX Spark 或 Apple Silicon 的 Mac，1M 上下文。开源，MIT 协议；纯 C
 2. **侧车 41 MB。** 给每个路由专家的每一行权重乘一个增益、给路由器加一点偏置，对着出厂原件解出来。
    金融 / 编程 / 法律 / 医疗 / 科研各一份，聊天框下拉切换，不到 1 秒。
 3. **后训练 101 MB。** 每层 MoE 的输出加一个秩 64 的修正，老师就是 510 GB 的出厂原件，学它逐位的下一个 token 分布。
-   料是 330 篇公开文档整篇（代码、法律、医疗、科研）和 282 段官方 API 采的思考过程，一台 Spark 训练 67 分钟；
    判决用的代码和训练料一个 24 token 的片段都不重合。通用英文跟着涨 2.7 个点，说明它修的是量化本身的误差，不是背题。
-   量化带来的两个毛病也一起动了：决策题里多出来的问号从原件的 2 倍降到 1.2–1.3 倍；思考该收口时不收口，现在修过了一点头（见[局限](#局限)）。
 
-后训练还有空间。这一份只用了约 600 条、每条不到 1,000 token 的料，料的量、长度和秩都还没往上加。
+**还原侧车**把两样东西放进一个目录：像 ② 那样的增益和路由偏置（40 MB），像 ③ 那样的秩 64 修正（105 MB）。
+修正部分接着向官方 API 现写的源文件学。训练料和两把尺没有任何 16 个 token 长的重合片段，只有两行 Dockerfile 样板句例外。
+用法：把这个目录传给 `ds4-server --zchain`。
 
 上下文 1M token，满载 KV 缓存 0.89 GB。测法和完整结果表见[技术细节第五章](docs/TECHNICAL.zh-CN.md#五实测结果)，
 后训练怎么做见[技术细节 4.3](docs/TECHNICAL.zh-CN.md#43-后训练文件)。
@@ -135,6 +172,7 @@ Mac 的数经 `ds4-server` 量，两趟取好的一趟。两边提示不同，�
 **DGX Spark**（Linux aarch64 + CUDA 13 运行库，SSD 空闲约 320 GB）。上网工具要火狐，Spark 上的 Ubuntu 自带。
 
 ```sh
+# YoungAi —— GitHub 仓库 fodelf/YoungAi
 git clone https://github.com/fodelf/YoungAi.git ~/ds4-main && cd ~/ds4-main
 make cuda-spark
 ./ds4-train --host 0.0.0.0 --port 8000      # 浏览器打开 http://主机:8000/
@@ -152,6 +190,7 @@ make cuda-spark
 **Mac**（Apple Silicon，128 GB 内存，SSD 空闲约 325 GB）：直接起模型服务。工作台的"下载""加载"按钮只在 Spark 上跑过。
 
 ```sh
+# YoungAi —— GitHub 仓库 fodelf/YoungAi
 git clone https://github.com/fodelf/YoungAi.git ~/ds4-main && cd ~/ds4-main
 make                                                            # Metal 版
 bash gguf-tools/scripts/hf_install.sh download --dir ~/youngai   # 约 317 GB，断点续传
@@ -192,7 +231,7 @@ bash install.sh --posttrain          # 再挂后训练文件（配编程侧车�
 - 我们在 DGX Spark 上做端到端验证。Mac 整模型的数来自贡献者的 M5 Max；我们手上的 Mac 只有 16 GB，只跑 GPU 核测试。
 - 一台机器一份模型：后台任务和你聊天是排队跑，不是并行。
 - 要登录或有验证码的网站，助理打不开；它会说哪些没打开，不会去猜。
-- 侧车和后训练文件只在留出文本上评过分，没在端到端任务上评过。
+- 各领域侧车和后训练文件只在留出文本上评过分。还原侧车另外跑过本页顶部的任务基准，用的是小子集。
 - 后训练文件让长思考收口得比原件早：在两条 1 万–3 万 token 的真实长思考上，收口的概率是原件的 1.6–2 倍，难题可能少想几步。
   不想要就别挂（`install.sh` 不带 `--posttrain`，或去掉 `ds4-server` 的 `--posttrain`）。
 - 工作台的"后训练"开关只列本机训出来的后训练文件，从 Hugging Face 下的那一份要用 `install.sh --posttrain` 或 `ds4-server --posttrain` 挂。
@@ -220,7 +259,7 @@ bash install.sh --posttrain          # 再挂后训练文件（配编程侧车�
 
 ## 作者 · 致谢 · 许可证
 
-吴文周 · 310066827@qq.com。欢迎来信交流、反馈复现结果或谈合作；Bug 和 PR 提到 [GitHub](https://github.com/fodelf/YoungAi)。
+吴文周 · 310066827@qq.com。欢迎来信交流、反馈复现结果或谈合作；Bug 和 PR 提到 [GitHub 仓库 · fodelf/YoungAi](https://github.com/fodelf/YoungAi)。
 
 本项目起步于 [antirez/ds4](https://github.com/antirez/ds4)（DwarfStar，Salvatore Sanfilippo 为 DeepSeek V4 写的推理引擎）
 的分叉；GGUF、q4_K 等布局和大量核经验来自 [llama.cpp 与 GGML](https://github.com/ggml-org/llama.cpp)，GGML 的版权声明

@@ -33,7 +33,7 @@ import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from v41_hf_io import (FP4_TABLE, build_index, load_raw, dq_fp8, dq_fp4, has_vq, load_vq, load_q4k,
-                       prefetch_start, prefetch_ready, prefetch_drop)
+                       prefetch_start, prefetch_ready, prefetch_drop, _mm, tensor_nbytes, _VIEW)
 import v41_patches as P
 from v41_cli import parse_args
 
@@ -154,6 +154,9 @@ def main():
         args.max_batch_size, a.ntok = TS.shape_of(a.seqs)
     if a.ntok > args.max_seq_len:
         args.max_seq_len = a.ntok
+    if a.index_topk > 0:   # 诊断夹具(10-25): 索引器可见压缩位数覆盖, 见 v41_cli.py
+        print(f"[★诊断★] index_topk {args.index_topk} → {a.index_topk}", flush=True)
+        args.index_topk = a.index_topk
     print(f"[配置] {args.n_layers} 层 / dim {args.dim} / {args.n_routed_experts} 专家 "
           f"top-{args.n_activated_experts} / max_seq_len {args.max_seq_len}", flush=True)
 
@@ -166,6 +169,35 @@ def main():
     # ---- 修 buffers(meta 建模后算出来的常量全丢了, 见 v41_patches.fix_buffers) ----
     nfix, nfreq = P.fix_buffers(M, net, args, tok, dev)
     print(f"[buffer] 修 {nfix} 个(其中 freqs_cis {nfreq} 个重算), engram 哈希态重建", flush=True)
+    # 索引器诊断旗(10-25, 见 v41_cli.py): 选中位落盘要知道层号(官方 Indexer 不存 layer_id), 这里补上
+    for li, layer in enumerate(net.layers):
+        ixr = getattr(getattr(layer, "attn", None), "indexer", None)
+        if ixr is not None:
+            ixr.layer_id = li
+    if a.dump_idx:
+        P.IDX_DUMP = Path(a.dump_idx); P.IDX_DUMP.mkdir(parents=True, exist_ok=True)
+        print(f"[★诊断★] 索引器选中位 → {a.dump_idx}/idx_Lnn.bin", flush=True)
+    if a.index_fp32:
+        P.IDX_FP32 = True
+        print("[★诊断★] 索引分数 fp32(官方口径是 bf16)", flush=True)
+    if a.act_quant:
+        P.ACT_QUANT = True
+        print("[★诊断★] 量化权重的 linear 先按官方口径 act_quant(fp8 per-32 ue8m0)", flush=True)
+    if a.force_idx:
+        P.IDX_FORCE = Path(a.force_idx)
+        print(f"[★诊断★] 索引器选择换成 {a.force_idx}/idx_Lnn.bin", flush=True)
+    if a.kernel_check:
+        P.KCHECK = {}
+        P.patch_kernel_check(M)
+        print("[★诊断★] 三个 tilelang 核每次调用旁跑 torch 参考, 前向结束报差", flush=True)
+    balloon = None
+    if a.balloon_gb > 0:   # 诊断: 人为占住 GPU 内存(统一内存 = 整机), 引用留到前向结束
+        balloon = torch.empty(int(a.balloon_gb * 2 ** 30), dtype=torch.uint8, device=dev)
+        balloon.fill_(1)
+        print(f"[★诊断★] GPU 占位 {a.balloon_gb:.0f} GB(MemAvailable 现在 "
+              f"{[int(l.split()[1]) // 1024 for l in open('/proc/meminfo') if l.startswith('MemAvailable')][0]} MB)", flush=True)
+    if a.verify_load:
+        P.VERIFY_ROWS = [0, 0]   # engram 流式行也核(GPU 上那份 vs CPU 独立解), 见 StreamEngramEmbed.forward
 
     # --no-engram(对拍夹具): 直接摘模块, Transformer.forward 里 `if layer.engram is not None` 自然跳过
     if a.no_engram:
@@ -189,11 +221,19 @@ def main():
     # (v41_amp_hooks.install_online), 那一遍必须装原始权重。关掉时 stat 也不计,
     # 否则"被路由到的专家矩阵数"会翻倍, 路由对照就废了。
     qmode = {"on": True}
+    idx_ffn = None   # --ffn-from(诊断, 10-25): ffn 整段换个目录装, 平常前向就生效(与 --fp-dir 的只在靶那一遍不同)
+    if a.ffn_from:
+        idx_ffn = build_index(Path(a.ffn_from))
+        print(f"[★诊断★] layers.N.ffn.* 从 {a.ffn_from} 装({len(idx_ffn)} 个张量), 其余从主目录", flush=True)
 
     def pick(full):
         """这个张量从哪份索引装: qmode 关(= 反修在算靶的 FP 那一遍)时, ffn 前缀走教师索引。
         ★只有 ffn★: 靶的挂点是 MoE 块出口, 块内 routed(VQ) 与 shared(FP4) 两处误差都要算进靶
         (部署时块出口就是这个差); attn/norm/gate 不在块内, 两遍都用学生态, 保证 x 同一个。"""
+        if idx_ffn is not None and full.startswith("layers.") and ".ffn." in full:
+            part = ".ffn.experts." in full and "routed" or (".ffn.shared_experts." in full and "shared") or "other"
+            if not a.ffn_part or a.ffn_part == part:
+                return idx_ffn
         if not qmode["on"] and full.startswith("layers.") and ".ffn." in full:
             return idx_fp
         return idx
@@ -269,6 +309,31 @@ def main():
             par = torch.nn.Parameter(t, requires_grad=False)
             par._was_quant = sn in ix or is_vq or is_q4k   # 原本是 fp4/fp8/VQ/q4_K => linear 按 kernel 口径出 bf16
             setattr(owner, leaf, par)
+            if a.verify_load and ".ffn.experts." not in full and not is_vq and not is_q4k:
+                verify_param(ix, full, sn, par)
+
+    vstat = [0, 0]
+
+    def verify_param(ix, full, sn, par):
+        """--verify-load: 绕开预读/GPU, 从 mmap 直接取字节在 CPU 上解一遍, 与 GPU 上那份逐位比(见 v41_cli.py)。"""
+        p_, off_, dt_, shp_ = ix[full]
+        raw_ = torch.from_numpy(np.ascontiguousarray(_mm(p_)[off_:off_ + tensor_nbytes(dt_, shp_)]))
+        if dt_ in _VIEW:
+            raw_ = raw_.view(_VIEW[dt_])
+        raw_ = raw_.view(*shp_)
+        if sn in ix:
+            ps, offs, dts, shps = ix[sn]
+            sraw = torch.from_numpy(np.ascontiguousarray(_mm(ps)[offs:offs + tensor_nbytes(dts, shps)])).view(*shps)
+            ref = dq_fp4(raw_, sraw, tbl.cpu()) if dt_ == "I8" else dq_fp8(raw_, sraw)
+        else:
+            ref = raw_.float()
+        ref = ref.to(par.dtype).float()
+        g = par.detach().float().cpu()
+        vstat[0] += 1
+        nd = int((g != ref).sum().item())
+        if nd:
+            vstat[1] += 1
+            print(f"[★verify★] {full} GPU≠CPU 元素 {nd}/{g.numel()} maxdiff {(g - ref).abs().max().item():.3g}", flush=True)
 
     def swap_ffn(ffn, li):
         """反修在 hook 里切 qmode 后调用: 把 ffn 里【层级装的】权重(shared_experts / gate)按当前
@@ -281,6 +346,11 @@ def main():
         for full in names_of(mod, prefix, skip):
             sub, _, leaf = full.rpartition(".")
             owner = net.get_submodule(sub) if sub else net
+            if a.verify_load and ".ffn.experts." in full and int(full.split(".ffn.experts.")[1].split(".")[0]) % 32 == 0:
+                # 诊断: routed 专家抽 1/32, 在算完、卸载前核(抓"装上后被改写"); 只核 FP4 原件(VQ/q4_K 的 CPU 解法不在 Python 里)
+                ix_ = pick(full)
+                if full in ix_ and ix_[full][2] != "Q4_K" and getattr(owner, leaf).device.type != "meta":   # 没被路由到的专家还在 meta 上
+                    verify_param(ix_, full, full.rsplit(".", 1)[0] + ".scale", getattr(owner, leaf))
             setattr(owner, leaf, torch.nn.Parameter(
                 torch.empty(0, device="meta"), requires_grad=False))
 
@@ -497,8 +567,16 @@ def main():
     print(f"[前向] {len(ids)} token", flush=True)
     t1 = time.time()
     out_ids, logits, mainh = net(x)
+    if a.verify_load:
+        print(f"[verify] 核对 {vstat[0]} 个非专家张量(GPU 上那份 vs CPU 独立解), 不同 {vstat[1]} 个; "
+              f"engram 流式行 {P.VERIFY_ROWS[0]} 次取行, 不同 {P.VERIFY_ROWS[1]} 次", flush=True)
+    del balloon
     torch.cuda.synchronize()
     print(f"[完成] {time.time()-t1:.1f}s, logits {tuple(logits.shape)}", flush=True)
+    if P.KCHECK is not None:
+        print("[kernel-check] 站点 | 调用数 | 核 vs torch 参考: 最大差 / 不同元素 / 总元素 | 输入最大|x|")
+        for site, st in sorted(P.KCHECK.items()):
+            print(f"  {site:36} | {st[0]:5d} | {st[1]:.3g} / {st[2]} / {st[3]} | {st[4]:.3g}", flush=True)
     if a.dump_mainh:
         # DSpark 夹具的 FP 侧原料: 官方 forward 里 main_hiddens.append(h.mean(dim=2)) 在目标层拼出来的那份,
         # 第 p 行 = 位置 p(与引擎 --dspark-capture 落的 <out>.fix 第 p 对吃的 main_hidden(p) 同一个位置)。

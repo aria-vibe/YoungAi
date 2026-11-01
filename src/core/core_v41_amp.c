@@ -127,8 +127,8 @@ static int v41_rb_load(const char *dir) {
  * 出错会怎样: 漏标 amp_shared 就会把共享张量当自己的 free, 下一个状态读到释放掉的显存(不报错, 出胡话)。 */
 static struct {
     int valid; char amp[2056], pt[2056]; float scale;
-    ds4_gpu_tensor *A[DS4_MAX_LAYER], *B[DS4_MAX_LAYER]; uint32_t K[DS4_MAX_LAYER];
-    uint32_t n_arm, kmax;
+    ds4_gpu_tensor *A[DS4_MAX_LAYER], *B[DS4_MAX_LAYER], *S[DS4_MAX_LAYER]; uint32_t K[DS4_MAX_LAYER];
+    uint32_t n_arm, kmax, n_route;
     int refs;   /* 正拿着这些指针的状态数; >0 时不能丢 */
 } g_pc;
 
@@ -141,12 +141,13 @@ void v41_amp_cache_drop(void) {
     for (uint32_t il = 0; il < DS4_MAX_LAYER; il++) {
         if (g_pc.A[il]) ds4_gpu_tensor_free(g_pc.A[il]);
         if (g_pc.B[il]) ds4_gpu_tensor_free(g_pc.B[il]);
+        if (g_pc.S[il]) ds4_gpu_tensor_free(g_pc.S[il]);
     }
     memset(&g_pc, 0, sizeof g_pc);
 }
 /* 状态拿缓存的指针; ampT 是每个状态自己的(按 cap 开) */
 static bool pc_attach(ds4_v41_state *st) {
-    for (uint32_t il = 0; il < DS4_MAX_LAYER; il++) { st->ampA[il] = g_pc.A[il]; st->ampB[il] = g_pc.B[il]; st->ampK[il] = g_pc.K[il]; }
+    for (uint32_t il = 0; il < DS4_MAX_LAYER; il++) { st->ampA[il] = g_pc.A[il]; st->ampB[il] = g_pc.B[il]; st->ampS[il] = g_pc.S[il]; st->ampK[il] = g_pc.K[il]; }
     st->amp_shared = 1; g_pc.refs++;
     if (!g_pc.n_arm) return true;
     st->ampT = ds4_gpu_tensor_alloc((uint64_t)st->cap_tok * g_pc.kmax * 4);
@@ -159,7 +160,7 @@ static bool pc_attach(ds4_v41_state *st) {
  * 认领了缓存的张量, 释放时会把别的状态还在用的显存 free 掉。 */
 bool v41_amp_disown(ds4_v41_state *st) {
     if (!st->amp_shared) return true;
-    for (uint32_t il = 0; il < DS4_MAX_LAYER; il++) if (st->ampA[il] || st->ampB[il]) return false;
+    for (uint32_t il = 0; il < DS4_MAX_LAYER; il++) if (st->ampA[il] || st->ampB[il] || st->ampS[il]) return false;
     st->amp_shared = 0;
     if (g_pc.refs > 0) g_pc.refs--;
     return true;
@@ -272,6 +273,27 @@ static int amp_read_layer(const char *dir, uint32_t il, float **A, float **B, fl
     return (int)K;
 }
 
+/* 带路由的放大器系数 ampr_Lnn.bin({NE, K, 1} + f32 S[NE][K], 10-29 段 B 试验件, 见 src/cuda/cuda_amp_route.inc.cu): 只认 ② 目录、且这层没有 ③ 拼进来的秩
+ * (S 的 K 是 ② 自己那份的秩; 拼了 ③ 再乘就错位)。返回 1 挂上 / 0 没这个文件 / <0 有文件但对不上(停车, 不悄悄当成不带路由)。 */
+static int amp_route_read(const char *dir, uint32_t il, uint32_t k2, uint32_t k3, ds4_gpu_tensor **S, double *mb) {
+    *S = NULL;
+    if (!dir || !dir[0]) return 0;
+    char p[4200]; snprintf(p, sizeof p, "%s/ampr_L%02u.bin", dir, il);
+    FILE *f = fopen(p, "rb");
+    if (!f) return 0;
+    int32_t hd[3] = { 0, 0, 0 };
+    const size_t nel = (size_t)DS4_N_EXPERT * k2;
+    float *buf = NULL;
+    bool ok = fread(hd, 4, 3, f) == 3 && hd[0] == (int32_t)DS4_N_EXPERT && hd[1] == (int32_t)k2 && hd[2] == 1 && k2 > 0 && k3 == 0;
+    if (ok) { buf = xmalloc(nel * 4); ok = fread(buf, 4, nel, f) == nel; }
+    fclose(f);
+    if (ok) ok = (*S = ds4_gpu_tensor_alloc(nel * 4)) != NULL && ds4_gpu_tensor_write(*S, 0, buf, nel * 4);
+    free(buf);
+    if (!ok) { fprintf(stderr, "ds4: ★带路由系数 %s 对不上(要 NE %u、K = 本层 ② 的秩 %u、f32、这层没有 ③ 的秩; 头 %d/%d/%d)★\n", p, DS4_N_EXPERT, k2, hd[0], hd[1], hd[2]); return -1; }
+    *mb += (double)nel * 4 / 1e6;
+    return 1;
+}
+
 bool v41_amp_load(ds4_v41_state *st, const char *dir, const char *pt_dir) {
     if (pc_same(dir, pt_dir)) return pc_attach(st);   /* 装过同一组: 不读盘不上传 */
     v41_amp_cache_drop();
@@ -305,6 +327,9 @@ bool v41_amp_load(ds4_v41_state *st, const char *dir, const char *pt_dir) {
         free(A2); free(B2); free(A3); free(B3);
         if (!ok) { fprintf(stderr, "ds4: L%02u 放大器上传失败\n", il); g_pc.valid = 1; v41_amp_cache_drop(); return false; }   /* 半装的张量随缓存一起放 */
         g_pc.K[il] = K;
+        const int kr = amp_route_read(dir, il, (uint32_t)k2, (uint32_t)k3, &g_pc.S[il], &mb);
+        if (kr < 0) { g_pc.valid = 1; v41_amp_cache_drop(); return false; }
+        g_pc.n_route += (uint32_t)kr;
         if (!n_arm || K < kmin) kmin = K;
         if (K > kmax) kmax = K;
         n_arm++;
@@ -317,8 +342,8 @@ bool v41_amp_load(ds4_v41_state *st, const char *dir, const char *pt_dir) {
     }
     g_pc.valid = 1; g_pc.scale = g_ds4_v41_amp_scale; g_pc.n_arm = n_arm; g_pc.kmax = kmax;
     snprintf(g_pc.amp, sizeof g_pc.amp, "%s", dir ? dir : ""); snprintf(g_pc.pt, sizeof g_pc.pt, "%s", pt_dir ? pt_dir : "");
-    if (n_arm) fprintf(stderr, "ds4: [反修] 挂上 %u 层放大器 (K %u~%u, %s 盘上合计 %.1f MB, 步长 β=%.4g) ← ② %s%s%s\n",
-                       n_arm, kmin, kmax, tyname, mb, (double)g_ds4_v41_amp_scale, dir && dir[0] ? dir : "(无)",
+    if (n_arm) fprintf(stderr, "ds4: [反修] 挂上 %u 层放大器 (K %u~%u, %s 盘上合计 %.1f MB, 步长 β=%.4g%s) ← ② %s%s%s\n",
+                       n_arm, kmin, kmax, tyname, mb, (double)g_ds4_v41_amp_scale, g_pc.n_route ? ", 带路由" : "", dir && dir[0] ? dir : "(无)",
                        pt_dir && pt_dir[0] ? " + ③ " : "", pt_dir && pt_dir[0] ? pt_dir : "");
     return pc_attach(st);
 }
@@ -369,8 +394,9 @@ void v41_amp_free(ds4_v41_state *st) {
         if (!st->amp_shared) {   /* 自己的(草稿态塔件, core_v41_draft_amp.c); 共享的归缓存, 下面只减引用 */
             if (st->ampA[il]) ds4_gpu_tensor_free(st->ampA[il]);
             if (st->ampB[il]) ds4_gpu_tensor_free(st->ampB[il]);
+            if (st->ampS[il]) ds4_gpu_tensor_free(st->ampS[il]);
         }
-        st->ampA[il] = st->ampB[il] = NULL; st->ampK[il] = 0;
+        st->ampA[il] = st->ampB[il] = st->ampS[il] = NULL; st->ampK[il] = 0;
     }
     if (st->amp_shared) { st->amp_shared = 0; if (g_pc.refs > 0) g_pc.refs--; }
     if (st->ampT) { ds4_gpu_tensor_free(st->ampT); st->ampT = NULL; }
@@ -379,6 +405,11 @@ void v41_amp_free(ds4_v41_state *st) {
 /* y[n][D](bf16 格点) += x[n][D]·(B·A) → 舍 bf16 */
 bool v41_amp_apply(ds4_v41_state *st, uint32_t il) {
     if (!st->ampA[il]) return true;
+    if (st->ampS[il] && !st->draft) {   /* 带路由: 本层路由 st->sel/rw 此刻还是 v41_moe 刚算的 */
+        if (!ds4_gpu_v41_amp_route_apply_tensor(st->y, st->xn, st->ampA[il], st->ampB[il], st->ampS[il], st->sel, st->rw, st->ampT, st->n,
+                                                DS4_N_EMBD, st->ampK[il], DS4_N_EXPERT_USED, DS4_N_EXPERT)) return false;
+        return ds4_gpu_v41_round_bf16_tensor(st->y, (uint64_t)st->n * DS4_N_EMBD) != 0;
+    }
     /* 草稿态(塔件)走小批两发小核(cuda_draft_attn.inc.cu): cuBLAS 小 n 一发 ~0.2 ms, 草稿一轮 8 发把接受率的收益吃光(10-07 dkspeed 分账); 主干照旧 */
     if (st->draft ? !ds4_gpu_draft_amp_apply_tensor(st->y, st->xn, st->ampA[il], st->ampB[il], st->ampT, st->n, DS4_N_EMBD, st->ampK[il])
                   : !ds4_gpu_v41_amp_apply_tensor(st->y, st->xn, st->ampA[il], st->ampB[il], st->ampT, st->n, DS4_N_EMBD, st->ampK[il])) return false;

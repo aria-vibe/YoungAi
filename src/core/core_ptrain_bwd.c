@@ -26,7 +26,9 @@ bool pt_run_alloc(ds4_engine *e, const pt_cfg *c, pt_run *r) {
     memset(r, 0, sizeof *r);
     const uint32_t cap = c->maxlen, K = c->rank, E = DS4_N_EMBD, HC = DS4_N_HC;
     const bool multi = c->layer_lo < DS4_N_LAYER - 1u;   /* 末层以外也训 ⇒ 逐层反传(core_ptrain_layer.c) */
-    if (!v41_state_alloc(&r->st, cap, cap + 8u, 0)) return false;   /* logits 每个位置都要(答案位那几行算 KL) */
+    /* 行缓冲(x/hc/logits/窗口块区)按 cap = maxlen; 组级缓存(comp_kv/index_k)按 ctx = max(ctxlen, maxlen)+8 —— 前缀形态整条样本的压缩行都要留着, 便宜 */
+    const uint32_t ctx_total = c->ctxlen > cap ? c->ctxlen : cap;
+    if (!v41_state_alloc(&r->st, cap, ctx_total + 8u, 0)) return false;   /* logits 每个位置都要(答案位那几行算 KL) */
     /* 训练态的 A/B 下面自己开, 不占插件缓存的引用: 占着, 轮末探针挂 (②, ckpt_eNN) 时缓存换不了组, 探针批态装不上插件 → 停车(10-22 实撞) */
     if (!v41_amp_disown(&r->st)) { fprintf(stderr, "ds4: [ptrain] ② 带低秩放大器, 本版不接按秩拼接训练\n"); v41_state_free(&r->st); return false; }
     r->K = K;
@@ -109,22 +111,24 @@ void pt_run_free(pt_run *r) {
 
 /* 损失 = 本题答案位的平均 KL(不带材料的题: 表是 one-hot ⇒ 交叉熵); 梯度再除以批大小 ⇒ 一批 = 各题平均的平均(长答案不压过短答案)。
  * KL 核就地写梯度(读完 logits 就盖掉), 读回损失 = 同步, 之后才能覆盖教师表。 */
-bool pt_loss_rows(const pt_cfg *c, pt_run *r, ds4_gpu_tensor *logits, uint32_t row, const pt_sample *s, double *loss, uint32_t *ntok, ds4_gpu_tensor **glog) {
-    const uint32_t m = s->m, V = DS4_N_VOCAB, TK = c->topk;
+bool pt_loss_rows(const pt_cfg *c, pt_run *r, ds4_gpu_tensor *logits, uint32_t row, const pt_sample *s, uint32_t off, double *loss, uint32_t *ntok, ds4_gpu_tensor **glog) {
+    const uint32_t m = s->m - off, V = DS4_N_VOCAB, TK = c->topk;   /* off = 落在前缀里的答案位(没有 logits 行), 表从第 off 位起 */
     const float scale = 1.0f / ((float)m * (float)c->batch);
     *glog = pt_rows(logits, row, m, V);
-    bool ok = *glog && ds4_gpu_tensor_write(r->tid, 0, s->top_id, (uint64_t)m * TK * 4) && ds4_gpu_tensor_write(r->tp, 0, s->top_p, (uint64_t)m * TK * 4) &&
-              ds4_gpu_tensor_write(r->trest, 0, s->top_rest, (uint64_t)m * 4) &&
+    bool ok = *glog && ds4_gpu_tensor_write(r->tid, 0, s->top_id + (size_t)off * TK, (uint64_t)m * TK * 4) &&
+              ds4_gpu_tensor_write(r->tp, 0, s->top_p + (size_t)off * TK, (uint64_t)m * TK * 4) &&
+              ds4_gpu_tensor_write(r->trest, 0, s->top_rest + off, (uint64_t)m * 4) &&
               ds4_gpu_bwd_kl_topk_tensor(*glog, r->loss, logits, row, m, V, r->tid, r->tp, r->trest, NULL, TK, scale) &&
               ds4_gpu_tensor_read(r->loss, 0, r->loss_h, (uint64_t)m * 4);
     if (ok) { double l = 0; for (uint32_t k = 0; k < m; k++) l += r->loss_h[k]; *loss += l; *ntok += m; }
     r->dec_last = -1.0;
-    if (ok && r->dec_on) for (uint32_t k = 0; k < m; k++) {   /* 决策位读数(见 pt_run.dec_*): 第 k 行预测的目标 = 答案第 k 位 */
-        const int32_t y = s->sids[s->sa0 + k];
+    if (ok && r->dec_on) for (uint32_t k = 0; k < m; k++) {   /* 决策位读数(见 pt_run.dec_*): 第 k 行预测的目标 = 答案第 off+k 位 */
+        const size_t kk = (size_t)off + k;
+        const int32_t y = s->sids[s->sa0 + kk];
         if (y != r->dec_ids[0] && y != r->dec_ids[1]) continue;
         r->dec_kl += r->loss_h[k]; r->dec_n++;
         r->dec_last = (r->dec_last < 0 ? 0.0 : r->dec_last) + r->loss_h[k];
-        for (uint32_t q = 0; q < TK; q++) if (s->top_id[(size_t)k * TK + q] == y) { r->dec_tp += s->top_p[(size_t)k * TK + q]; break; }
+        for (uint32_t q = 0; q < TK; q++) if (s->top_id[kk * TK + q] == y) { r->dec_tp += s->top_p[kk * TK + q]; break; }
     }
     return ok;
 }
@@ -132,21 +136,64 @@ bool pt_loss_rows(const pt_cfg *c, pt_run *r, ds4_gpu_tensor *logits, uint32_t r
 bool pt_step_sample(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *s, int grad, double *loss_sum, uint32_t *ntok) {
     ds4_v41_state *st = &r->st;
     const ds4_model *mdl = &e->model;
-    const uint32_t E = DS4_N_EMBD, HC = DS4_N_HC, V = DS4_N_VOCAB, K = r->K, m = s->m, r0 = s->sa0 - 1u;
-    if (!s->top_id || s->sn > st->cap_tok) return true;   /* 教师没给表(续算块超长)的题不进 */
+    const uint32_t E = DS4_N_EMBD, HC = DS4_N_HC, V = DS4_N_VOCAB, K = r->K, cap = st->cap_tok;
+    if (!pt_runnable(r, s)) return true;   /* 教师没给表(续算块超长)/ 超出 ctxlen / 非 one-hot 的长题不进 */
+    /* ★前缀形态(10-25, core_ptrain.h pt_cfg.ctxlen)★: sn > cap 的 one-hot 样本, 前 pfx 位只做普通预填(全部层都跑 —— 解码器层的窗口也要前缀键;
+     * 不存档、不反传、出口只算末行), 最后 n 位存档 + 反传。pfx 对齐到最大压缩比(pt_pfx_align): 组界不跨前缀/尾窗。
+     * 损失只算尾窗里的目标: 第一个进损失的目标 token a0 = max(sa0, pfx+1), 表从第 off = a0−sa0 位起, 它的 logits 行 = a0−1−pfx。 */
+    /* 前缀尽量推到第一个目标前(sa0−1 向下对齐): 尾窗只放要算损失的行; 但尾窗不得超 cap, 所以下界 sn−cap(向上对齐) —— 对话题(sa0 小)走的是下界。
+     * 对齐粒度 pt_pfx_align()(最大压缩比): 前缀/尾窗的块界落在组界上, 见 core_ptrain.h */
+    /* 第一个要算损失的目标 = sa0 + l0(l0 = 只当上下文的头几位, 分支续写料的学生前缀, pt_sample.l0; 老料 0) */
+    uint32_t pfx = 0, n = s->sn;
+    const uint32_t f0 = s->sa0 + s->l0;
+    if (s->sn > cap) {
+        const uint32_t A = pt_pfx_align(), lo = (s->sn - cap + A - 1u) / A * A, hi = (f0 - 1u) / A * A;
+        pfx = hi > lo ? hi : lo;
+        n = s->sn - pfx;
+    }
+    r->pfx = pfx;
+    const uint32_t a0 = f0 > pfx + 1u ? f0 : pfx + 1u;
+    if (a0 > s->sa0 + s->m - 1u) return true;   /* 答案全落在前缀里(不该发生: one-hot 的 text 行 sa0 = 1; 末位可以是 sids[sn] 那个只当目标的 token) */
+    const uint32_t off = a0 - s->sa0, m = s->m - off, r0 = a0 - 1u - pfx;
     const double q0 = pt_tick(c);
-    pt_state_reset(st);
+    /* ★按篇接力(pt_run.cont_s)★: 上一道刚好是这道的前缀(整段 [0, pfx) 逐 id 同, 状态里也正好 pfx 个位置)⇒ 不清状态、不预填, 直接接着算尾窗。
+     * 同一篇 2.8 万位的轨迹切成 28 段时, 不接力每段都要从 0 重新预填(总量随篇长平方涨), 接力后每个位置只前向一次。 */
+    const bool cont = pfx && r->cont_s && r->cont_s->sn == pfx && st->n_past == pfx && !c->poison && !memcmp(r->cont_s->sids, s->sids, (size_t)pfx * 4);
+    r->cont_s = NULL;
+    if (!cont) pt_state_reset(st);
     st->ced_skip = 0; st->head_last_only = 0;
-    if (!v41_forward(e, st, s->sids, s->sn)) return false;
+    if (pfx && !cont) {
+        v41_tsave *keep = st->tsave;
+        /* 前缀块: 不存档; 出口只算末行(省 2048×129280 的 GEMM, 反正没人读)。★解码器回放关掉★: tsave=NULL + head_last_only 正好是生成路的
+         * 条件(core_v41_forward.c do_replay), 回放让解码器层每块只跑末 140 行、窗口钳窄 —— 推理的近似, 训练的上下文要每层每位都算满。
+         * 10-25 19:3x contcheck: 回放开着时从头预填与接力(全算)的段损失差 5.1e-3; 18:08/18:56 两趟 ctxlen 4096 的前缀都走了回放。 */
+        const int rp = g_ds4_v41_replay;
+        g_ds4_v41_replay = 0;
+        st->tsave = NULL; st->head_last_only = 1;
+        bool pok = true;
+        for (uint32_t c0 = 0; pok && c0 < pfx; ) {
+            const uint32_t nc = pfx - c0 < cap ? pfx - c0 : cap;
+            pok = v41_forward(e, st, s->sids + c0, nc);
+            c0 += nc;
+        }
+        g_ds4_v41_replay = rp;
+        st->tsave = keep; st->head_last_only = 0;
+        if (!pok) return false;
+    }
+    const uint64_t ringb = (uint64_t)DS4_N_SWA * DS4_N_HEAD_DIM * 4;
+    if (pfx) for (uint32_t il = 0; il < DS4_N_LAYER; il++)   /* 环头快照: 尾窗前向末尾的环提交会把它盖成尾窗末 128 键, 逐层重算前还原(core_ptrain_layer.c) */
+        if (r->ring_snap[il] && !ds4_gpu_tensor_copy(r->ring_snap[il], 0, st->win[il], 0, ringb)) return false;
+    if (!v41_forward(e, st, s->sids + pfx, n)) return false;
+    if (pfx) for (uint32_t il = 0; il < DS4_N_LAYER; il++)   /* 提交完的环头另存: 反传重算会把它还原成前缀那份, 反传完拷回来, 下一段才能接力 */
+        if (r->ring_post[il] && !ds4_gpu_tensor_copy(r->ring_post[il], 0, st->win[il], 0, ringb)) return false;
     const double q1 = pt_tick(c);
     ds4_gpu_tensor *glog = NULL;
-    bool ok = pt_loss_rows(c, r, st->logits, r0, s, loss_sum, ntok, &glog);
+    bool ok = pt_loss_rows(c, r, st->logits, r0, s, off, loss_sum, ntok, &glog);
     r->dec_slot[0] = r->dec_last;
     const double q2 = pt_tick(c);
     double q3 = q2, q4 = q2;
     if (ok && grad && c->layer_lo < DS4_N_LAYER - 1u) {
         /* 多层: 出口梯度铺回整段(答案位以外的行为 0) → RMSNorm → hc_pre 得末层输出处的 g_hc / g_pre, 再逐层往下 */
-        const uint32_t n = s->sn;
         ds4_gpu_tensor *gv = pt_rows(r->gxn, r0, m, E);
         ok = gv && ds4_gpu_tensor_fill_f32(r->gxn, 0.f, (uint64_t)n * E) &&
              ds4_gpu_bwd_matmul_t_tensor(gv, mdl->map, mdl->size, e->weights.output->type, e->weights.output->abs_offset, E, V, glog, m, 0) &&
@@ -179,6 +226,10 @@ bool pt_step_sample(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *
         r->tm[PT_TM_Q] += pt_tick(c) - q0; r->tm_n++;
     }
     if (!ok) fprintf(stderr, "ds4: [ptrain] 样本前向/反传失败(长 %u, 答案 %u 行)\n", s->sn, m);
+    if (ok && pfx) for (uint32_t il = 0; il < DS4_N_LAYER && ok; il++)
+        if (r->ring_post[il]) ok = ds4_gpu_tensor_copy(st->win[il], 0, r->ring_post[il], 0, ringb) != 0;
+    /* 前缀形态的样本(含第一段: 它没有前缀, 反传也不碰环头)跑完, 状态就是整段 [0, sn): 留给下一段接力。 poison 会把窗口填 NaN, 不接 */
+    if (ok && c->ctxlen > c->maxlen && !c->poison && st->n_past == s->sn) r->cont_s = s;
     return ok;
 }
 

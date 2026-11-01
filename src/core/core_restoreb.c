@@ -1,0 +1,480 @@
+/* core_restoreb.c — 反修 B 段的还原训练(2026-10-28, ./ds4 --restore-b <配置>)。
+ *
+ * 为什么另写一份(用户 10-28): "反修 b 段不是新的后训练, 不是把官方的语料再学一遍; 本质还是量化能力还原, 只是形式用了后训练的方式,
+ *   要找到以前能量的还原点"; "应该写一份新的反修 b 段的代码, 后训练代码不要动, 那个功能有用的"。
+ *   ⇒ 后训练 ③(core_ptrain*.c)一行不改, 这里只调它对外的件: 装料 pt_data_load / 官方 API 教师表 pt_teacher_fp / 训练态 pt_run_alloc /
+ *   预热 pt_pack_warm / Adam pt_opt_step / 落盘 pt_save_amp; 逐层反传 10-29 起走自己的一份(core_restoreb_bwd.c, 要在每层 g_y 上接逐层靶)。
+ * 和 ③ 不一样的地方:
+ *   ① 缺口加权(rb_gap=Q, 0~1): 第 0 步参数下逐位算料的答案位对教师(官方 top-20)的 KL, 全料 Q 分位以上的位权重 1, 其余位权重 rb_rest(缺省 0, 只为跟 10-28 a009~a011 能对上)。
+ *      为什么: 10-28 a002~a008 七轮, 训练料自己的 KLD 每轮降 9~17%, 编程尺却在所有位置上均匀地退一点 —— 学生本来就和原件一样的位
+ *      (官方自己的文字上中位 KL 0.0025)每位都在出梯度, 合起来就是拉着段 B 复述官方文本; 量化丢掉的能量集中在 KL 大的那一小撮位上。
+ *      秩 64 → 128 同一份料同一门(编程 +1.7 SE → +2.1 SE)证明不是容量问题, 是目标问题。
+ *   ② 料全训: ③ 的五取一留出清掉(门在外面: 编程尺 + wt2; 10-28 a003 的留出抽走了计划里唯一一条 shell 轨迹, 不训也不评)。
+ *   ③ 起点 rb_init=<目录> 的秩可以比本趟 rank 小: 前 K0 秩原样读入, 多出的秩 A=0、B 随机(y += x·B·A, 起点与现役逐位同)。
+ *   ④ 逐层靶(10-29, core_restoreb_aux.c): rb_dump=<目录> 只取料不训(当前链把料里最长那条整条前向, 每层 x / 放大器前的 y 落盘, 给 FP 原件 --force-x);
+ *      rb_aux=<同目录> 训练损失加 w·(1/层数)·Σ_l ‖xn·B·A − t_l‖²/‖t_l‖²(t = y_fp(x_q) − y_q), rb_auxw = w 相对出口 KL 的梯度范数(第 1 步定标:
+ *      rb_auxw=1 ⇒ 第 1 步两份梯度一样大; 0 ⇒ 只量不训, 当对照)。为什么见 core_restoreb_aux.c 头注释。
+ *   ⑤ 带路由(10-29, rb_route=1, rb_route_lr=<逐专家系数的 lr>): 段 B 变成 y += ((xn·B) ⊙ u)·A, u = 1 + Σ_j rw_j·S[e_j] —— 每个专家一组秩系数,
+ *      为什么见 src/cuda/cuda_amp_route.inc.cu 头注释。S 从 0 起(= 现役段 B), ckpt 多落 ampr_Lnn.bin。不与 ④ 同开(逐层项按不带路由的式子算)。
+ *   ⑥ 位置掩码(10-29, rb_mask=<文件>, 每行 "s e" = 目标位置 [s, e), 位置按样本序列的下标、BOS 是 0): 只有目标落在掩码里的答案位出梯度, 其余位权重 0。
+ *      为什么: 天花板那把留出是"没见过的 15 种语言", 混了换语言与换文档; 判决份每种语言 4 个窗(窗间在源语料里是跳着取的),
+ *      按窗练一半、留一半, 就是"同语言、没见过的上下文"能迁多少(restore_B_ceiling_spark.sh --winmask)。不与 rb_gap 同开。
+ *   ⑦ 冻秩(10-29, rb_freeze=<n>): 前 n 个秩(起点 rb_init 读进来的那份)每步更新前梯度清零 ⇒ Adam 更新量恒 0, 与起点逐位同; 只训多出来的秩。
+ *      为什么: 要量"参数少了是不是就背不下、只能学跨上下文的修正", 又不能丢掉现役段 B 已有的修正 —— 现役秩 64 冻住, 上面加 8 个秩训(rank=72)。
+ *   ⑧ 参数锚(10-31, rb_anchor=S, core_restoreb_init.c): 损失加 λ/2·Σ F_i·(θ_i − θ*_i)², θ* = 起点, F = 以前各轮攒的梯度平方均值(<ckpt>/fisher_Lnn.bin,
+ *      每轮都攒都落, 不给也攒); 拉回在 Adam 之后按位移做(θ ← θ − (F/(F̄·S))·(θ−θ*), 一般坐标漂出 S 步就被按住), 不走梯度(Adam 会归一掉, 见 core_restoreb_init.c 头)。
+ *      为什么: 每轮续训都把上一轮学到的冲掉一点, 回放旧料能按住但料无限长; 锚一份数据不带, 成本固定。
+ * 配置 = ③ 的 key=value(data / out / rank / lr / batch / topk / maxlen / ctxlen / teacher=fp:<表> 同义)+ 本模块的 rb_gap / rb_rest / rb_init / rb_dump / rb_aux / rb_auxw / rb_anchor;
+ *   本模块的几项摘出来, 其余原样写成 <out>/pt.cfg 交给 pt_cfg_load。teacher=fp: 必须给(教师只认官方表), init= 不许给(用 rb_init)。
+ * 产物与 ③ 同格式: <out>/ckpt_e01/amp_Lnn.bin + base.fnv; <out>/train.log 的 "step 0 … train_kl" / "step i … loss … gnorm" / "epoch 1 … train_kl"
+ *   与 ③ 同字段(train_kl = 全料答案位逐位平均 KL, 不加权), 另有一行 "gap …" 记阈值与选中的位数。
+ * 出错会怎样: 配置/料/教师表/起点任一不对就停车返回 1, 不落盘; 训练中可用内存跌破 RB_MEM_FLOOR_MB(3000 MB)停车(看门狗之前)。 */
+#include "core_restoreb.h"
+#include <sys/stat.h>
+#ifndef DS4_NO_GPU
+
+#define RB_MEM_FLOOR_MB 3000   /* 与 ③ 的 PT_MEM_FLOOR_MB 同值: 看门狗 2500 MB 动手, 多留 500 MB 给评估的零碎 */
+
+typedef struct {
+    float gap;               /* rb_gap: 缺口分位; 0 = 不加权(每位都出梯度, 与 ③ 的损失同式) */
+    float rest;              /* rb_rest: 缺口以外的位的权重(0~1, 缺省 0); 为什么要它见 rb_binarize */
+    char init[1024];         /* rb_init: 起点段 B 目录(amp_Lnn.bin + base.fnv); 空 = A=0 从零起 */
+    char dump[1024], aux[1024];   /* rb_dump: 只取料; rb_aux: 逐层靶目录(见头注释 ④) */
+    float auxw;              /* rb_auxw: 逐层项相对出口 KL 的梯度范数(第 1 步定标); 0 = 只量 */
+    int route; float route_lr;   /* rb_route / rb_route_lr: 带路由(见头注释 ⑤) */
+    char mask[1024];         /* rb_mask: 位置掩码文件(见头注释 ⑥) */
+    int freeze;              /* rb_freeze: 冻住前几个秩(见头注释 ⑦); 0 = 不冻 */
+    float anchor;            /* rb_anchor: 参数锚的 λ(见头注释 ⑧); 0 = 只攒 F 不拉 */
+} rb_cfg;
+
+/* 配置分两半: rb_* 自己收, 其余写 <out>/pt.cfg 交 pt_cfg_load(③ 不认的键它会拒, 所以不能整份交过去) */
+static bool rb_cfg_load(const char *spec, rb_cfg *b, pt_cfg *c, char *ptpath, size_t ptcap) {
+    memset(b, 0, sizeof *b);
+    FILE *f = fopen(spec, "r");
+    if (!f) { fprintf(stderr, "ds4: --restore-b 读不了配置 %s\n", spec); return false; }
+    char ln[4096], out[1024] = "", *rest = NULL; size_t nrest = 0;
+    FILE *mem = open_memstream(&rest, &nrest);
+    bool ok = mem != NULL;
+    while (ok && fgets(ln, sizeof ln, f)) {
+        char *p = ln; while (*p == ' ' || *p == '\t') p++;
+        if (!strncmp(p, "rb_gap=", 7)) { b->gap = (float)atof(p + 7); continue; }
+        if (!strncmp(p, "rb_rest=", 8)) { b->rest = (float)atof(p + 8); continue; }
+        if (!strncmp(p, "rb_init=", 8)) { snprintf(b->init, sizeof b->init, "%s", p + 8); b->init[strcspn(b->init, "\r\n")] = 0; continue; }
+        if (!strncmp(p, "rb_dump=", 8)) { snprintf(b->dump, sizeof b->dump, "%s", p + 8); b->dump[strcspn(b->dump, "\r\n")] = 0; continue; }
+        if (!strncmp(p, "rb_aux=", 7)) { snprintf(b->aux, sizeof b->aux, "%s", p + 7); b->aux[strcspn(b->aux, "\r\n")] = 0; continue; }
+        if (!strncmp(p, "rb_auxw=", 8)) { b->auxw = (float)atof(p + 8); continue; }
+        if (!strncmp(p, "rb_route=", 9)) { b->route = atoi(p + 9); continue; }
+        if (!strncmp(p, "rb_route_lr=", 12)) { b->route_lr = (float)atof(p + 12); continue; }
+        if (!strncmp(p, "rb_freeze=", 10)) { b->freeze = atoi(p + 10); continue; }
+        if (!strncmp(p, "rb_anchor=", 10)) { b->anchor = (float)atof(p + 10); continue; }
+        if (!strncmp(p, "rb_mask=", 8)) { snprintf(b->mask, sizeof b->mask, "%s", p + 8); b->mask[strcspn(b->mask, "\r\n")] = 0; continue; }
+        if (!strncmp(p, "init=", 5)) { fprintf(stderr, "ds4: --restore-b 不收 init=(起点用 rb_init=, 允许扩秩)\n"); ok = false; break; }
+        if (!strncmp(p, "out=", 4)) { snprintf(out, sizeof out, "%s", p + 4); out[strcspn(out, "\r\n")] = 0; }
+        fputs(ln, mem);
+    }
+    fclose(f);
+    if (mem) fclose(mem);
+    if (ok && (!out[0] || b->gap < 0.f || b->gap >= 1.f || b->rest < 0.f || b->rest > 1.f || b->auxw < 0.f || (b->route && (b->route_lr <= 0.f || b->aux[0])) || (b->mask[0] && b->gap > 0.f))) {
+        fprintf(stderr, "ds4: --restore-b 配置缺 out= / rb_gap 不在 [0,1) / rb_rest 不在 [0,1] / rb_auxw < 0 / rb_route 没给 rb_route_lr 或与 rb_aux 同开 / rb_mask 与 rb_gap 同开\n"); ok = false; }
+    if (ok) {
+        mkdir(out, 0755);
+        snprintf(ptpath, ptcap, "%s/pt.cfg", out);
+        FILE *g = fopen(ptpath, "w");
+        ok = g && fwrite(rest, 1, nrest, g) == nrest;
+        if (g) fclose(g);
+        if (!ok) fprintf(stderr, "ds4: --restore-b 写不了 %s\n", ptpath);
+    }
+    free(rest);
+    if (ok) ok = pt_cfg_load(c, ptpath);
+    if (ok && (b->freeze < 0 || (uint32_t)b->freeze >= c->rank || (b->freeze && !b->init[0]))) { fprintf(stderr, "ds4: --restore-b rb_freeze 要 0 ≤ n < rank 且给了 rb_init(冻的是起点那几个秩)\n"); ok = false; }
+    if (ok && (b->anchor < 0.f || (b->anchor > 0.f && !b->init[0]))) { fprintf(stderr, "ds4: --restore-b rb_anchor 要 ≥ 0, 且 > 0 时必须给 rb_init(锚的是起点)\n"); ok = false; }
+    if (ok && !c->teacher_fp[0]) { fprintf(stderr, "ds4: --restore-b 要 teacher=fp:<官方表>(还原的靶只认官方分布)\n"); ok = false; }
+    if (ok && c->layer_lo >= DS4_N_LAYER - 1u) { fprintf(stderr, "ds4: --restore-b 只接多层(layers 不能只有末层)\n"); ok = false; }
+    return ok;
+}
+
+/* 一个样本答案位的 KL(与 pt_loss_rows 同一个核、同一个缩放), 多一个逐位权重:
+ * mode 0 = 不加权; 1 = 不加权并把逐位 KL 记进 gw[off..](第 0 步定缺口); 2 = 按 gw 加权(训练步) */
+static bool rb_loss(const pt_cfg *c, pt_run *r, ds4_gpu_tensor *w, ds4_gpu_tensor *logits, uint32_t row, const pt_sample *s, uint32_t off,
+                    float *gw, int mode, double *loss, uint32_t *ntok, ds4_gpu_tensor **glog) {
+    const uint32_t m = s->m - off, V = DS4_N_VOCAB, TK = c->topk;
+    const float scale = 1.0f / ((float)m * (float)c->batch);
+    const bool wt = mode == 2 && gw;
+    *glog = pt_rows(logits, row, m, V);
+    bool ok = *glog && ds4_gpu_tensor_write(r->tid, 0, s->top_id + (size_t)off * TK, (uint64_t)m * TK * 4) &&
+              ds4_gpu_tensor_write(r->tp, 0, s->top_p + (size_t)off * TK, (uint64_t)m * TK * 4) &&
+              ds4_gpu_tensor_write(r->trest, 0, s->top_rest + off, (uint64_t)m * 4) &&
+              (!wt || ds4_gpu_tensor_write(w, 0, gw + off, (uint64_t)m * 4)) &&
+              ds4_gpu_bwd_kl_topk_tensor(*glog, r->loss, logits, row, m, V, r->tid, r->tp, r->trest, wt ? w : NULL, TK, scale) &&
+              ds4_gpu_tensor_read(r->loss, 0, r->loss_h, (uint64_t)m * 4);
+    if (ok) { double l = 0; for (uint32_t k = 0; k < m; k++) l += r->loss_h[k]; *loss += l; *ntok += m; }
+    if (ok && mode == 1) for (uint32_t k = 0; k < m; k++) gw[off + k] = r->loss_h[k];
+    /* 决策位读数(10-29, 段 B 第二层): 不反传的全料趟里把目标是 EOS / </think> 的位单独累计(pt_run.dec_*, 与 ③ pt_loss_rows 同式)。
+     * 为什么: 这几位每条轨迹只有 1~2 个, 对 train_kl 的贡献 ≈ 0, 不单列就看不见第二层到底有没有动它们 */
+    if (ok && r->dec_on && mode != 2) for (uint32_t k = 0; k < m; k++) {
+        const size_t kk = (size_t)off + k;
+        const int32_t y = s->sids[s->sa0 + kk];
+        if (y != r->dec_ids[0] && y != r->dec_ids[1]) continue;
+        r->dec_kl += r->loss_h[k]; r->dec_n++;
+        for (uint32_t q = 0; q < TK; q++) if (s->top_id[kk * TK + q] == y) { r->dec_tp += s->top_p[kk * TK + q]; break; }
+    }
+    return ok;
+}
+
+/* 一趟全料评估的决策位均值: train.log 一行 "decision eNN kl … n … tp …"(与 ③ 同字段), 屏幕一行; 料里一个决策位都没有(裸续写料)就不打 */
+static void rb_dec_log(pt_run *r, const char *tag, FILE *lf) {
+    if (!r->dec_n) { r->dec_on = 0; return; }
+    const double kl = r->dec_kl / r->dec_n, tp = r->dec_tp / r->dec_n;
+    fprintf(stderr, "ds4: [restore-b] %s 决策位(目标是 EOS/</think> 的 %u 位): KL %.4f, 教师给它 p %.3f\n", tag, r->dec_n, kl, tp);
+    if (lf) { fprintf(lf, "decision %s kl %.5f n %u tp %.4f\n", tag, kl, r->dec_n, tp); fflush(lf); }
+    r->dec_on = 0;
+}
+static void rb_dec_begin(ds4_engine *e, pt_run *r) {
+    r->dec_ids[0] = ds4_token_eos(e); r->dec_ids[1] = ds4_token_think_end(e);
+    r->dec_on = 1; r->dec_kl = r->dec_tp = 0.0; r->dec_n = 0;
+}
+
+static bool rb_is_dec(const pt_run *r, int32_t y) { return y == r->dec_ids[0] || y == r->dec_ids[1]; }
+/* 决策位(目标是 EOS / </think>)的损失权重 DEC_ONEHOT_W, 其余位 1(10-30 晚): API 不给这两位的分布, 教师表 one-hot p=1 = "在这一位必停", "这里别停"只有间接信号;
+ * d001~d004 四轮鹈鹕思考量 122k → 35k 字(官方 93k~120k)、工具轮 72 → 22、审美词 18 → 5 /万字、path 98 → 59~71 —— 决策位 KL 降了, 代价是越训越少想。
+ * 料里没有决策位(裸续写)就不加权(返回 false, 调用方照旧释放 gw), 第一层逐位不变 */
+#define DEC_ONEHOT_W 0.25f
+static bool rb_dec_weight(const pt_data *d, const uint32_t *ord, uint32_t n, float **gw, const pt_run *r, FILE *lf) {
+    uint32_t nd = 0, nt = 0;
+    for (uint32_t i = 0; i < n; i++) { const pt_sample *s = &d->s[ord[i]]; float *g = gw[ord[i]]; if (!g) continue; nt += s->m;
+        for (uint32_t j = 0; j < s->m; j++) { const bool dec = rb_is_dec(r, s->sids[s->sa0 + j]); g[j] = dec ? DEC_ONEHOT_W : 1.0f; nd += dec; } }
+    if (!nd) return false;
+    fprintf(stderr, "ds4: [restore-b] 决策位 %u 位(全料 %u 位)权重 %.2f, 其余位 1\n", nd, nt, (double)DEC_ONEHOT_W);
+    if (lf) { fprintf(lf, "decision_weight %.2f n %u of %u\n", (double)DEC_ONEHOT_W, nd, nt); fflush(lf); }
+    return true;
+}
+/* 诊断趟抽样(10-30): 第 0 步与轮末的全料逐位 KL 只是报数, 却各把全部长前缀走一遍(d005 两趟 ~50 min 占训练段 120 min 的四成)。不定缺口时按篇抽:
+ * 每 EVAL_DOC_STRIDE 篇评 1 篇, 带决策位的篇每 2 篇评 1 篇(决策位只在篇尾, 抽光就没数)。★按篇不按段★: 前缀形态按篇接力(rb_step cont), 篇内抽段把接力链
+ * 切断, 下一个被评的段从头重走前缀, 长篇等于走几遍(10-30 d006 首发实撞, 比全评还慢); 定缺口(gap/mask)要全料逐位 KL, 照旧全评 */
+#define EVAL_DOC_STRIDE 4
+static uint32_t rb_eval_set(const pt_data *d, const uint32_t *ord, uint32_t n, const pt_run *r, uint32_t *ev) {
+    uint8_t *dd = xmalloc_zeroed(d->ndoc + 1u, 1); uint32_t k = 0;
+    for (uint32_t i = 0; i < n; i++) { const pt_sample *s = &d->s[ord[i]]; for (uint32_t j = 0; j < s->m && !dd[s->doc]; j++) dd[s->doc] = rb_is_dec(r, s->sids[s->sa0 + j]); }
+    for (uint32_t i = 0; i < n; i++) { const uint32_t doc = d->s[ord[i]].doc; if (doc % EVAL_DOC_STRIDE == 0 || (dd[doc] && doc % 2 == 0)) ev[k++] = ord[i]; }
+    free(dd); return k;
+}
+
+/* 一个样本的前向 + 损失(+ 反传): pt_step_sample 的多层路照抄(前缀形态、按篇接力、环头快照同式), 只把损失换成 rb_loss。
+ * 为什么照抄不调用: pt_step_sample 里的损失没有逐位权重口, 而 ③ 的代码不动 */
+static bool rb_step(ds4_engine *e, const pt_cfg *c, pt_run *r, ds4_gpu_tensor *w, const pt_sample *s, float *gw, int mode, int grad,
+                    double *loss_sum, uint32_t *ntok, rb_auxstep *as, rb_route *rt) {
+    ds4_v41_state *st = &r->st;
+    const ds4_model *mdl = &e->model;
+    const uint32_t E = DS4_N_EMBD, HC = DS4_N_HC, V = DS4_N_VOCAB, cap = st->cap_tok;
+    if (as) as->m = 0;
+    if (!pt_runnable(r, s)) return true;
+    uint32_t pfx = 0, n = s->sn;
+    const uint32_t f0 = s->sa0 + s->l0;
+    if (s->sn > cap) {
+        const uint32_t A = pt_pfx_align(), lo = (s->sn - cap + A - 1u) / A * A, hi = (f0 - 1u) / A * A;
+        pfx = hi > lo ? hi : lo;
+        n = s->sn - pfx;
+    }
+    r->pfx = pfx;
+    const uint32_t a0 = f0 > pfx + 1u ? f0 : pfx + 1u;
+    if (a0 > s->sa0 + s->m - 1u) return true;
+    const uint32_t off = a0 - s->sa0, m = s->m - off, r0 = a0 - 1u - pfx;
+    /* 逐层靶: 答案位 [a0, a0+m) 由位置 [a0−1, a0−1+m)(窗口第 r0 行起)的隐状态预测, 取后者; 样本不是靶序列的前缀就只走 KL */
+    if (as && as->ax && rb_aux_covers(as->ax, s)) { as->r0 = r0; as->m = m; as->p0 = a0 - 1u; }
+    const bool cont = pfx && r->cont_s && r->cont_s->sn == pfx && st->n_past == pfx && !memcmp(r->cont_s->sids, s->sids, (size_t)pfx * 4);
+    r->cont_s = NULL;
+    if (!cont) pt_state_reset(st);
+    st->ced_skip = 0; st->head_last_only = 0;
+    if (pfx && !cont) {   /* 前缀块: 不存档、出口只算末行、解码器回放关掉(训练的上下文每层每位都算满, 见 pt_step_sample) */
+        v41_tsave *keep = st->tsave;
+        const int rp = g_ds4_v41_replay;
+        g_ds4_v41_replay = 0;
+        st->tsave = NULL; st->head_last_only = 1;
+        bool pok = true;
+        for (uint32_t c0 = 0; pok && c0 < pfx; ) { const uint32_t nc = pfx - c0 < cap ? pfx - c0 : cap; pok = v41_forward(e, st, s->sids + c0, nc); c0 += nc; }
+        g_ds4_v41_replay = rp;
+        st->tsave = keep; st->head_last_only = 0;
+        if (!pok) return false;
+    }
+    const uint64_t ringb = (uint64_t)DS4_N_SWA * DS4_N_HEAD_DIM * 4;
+    if (pfx) for (uint32_t il = 0; il < DS4_N_LAYER; il++)
+        if (r->ring_snap[il] && !ds4_gpu_tensor_copy(r->ring_snap[il], 0, st->win[il], 0, ringb)) return false;
+    if (!v41_forward(e, st, s->sids + pfx, n)) return false;
+    if (pfx) for (uint32_t il = 0; il < DS4_N_LAYER; il++)
+        if (r->ring_post[il] && !ds4_gpu_tensor_copy(r->ring_post[il], 0, st->win[il], 0, ringb)) return false;
+    ds4_gpu_tensor *glog = NULL;
+    bool ok = rb_loss(c, r, w, st->logits, r0, s, off, gw, mode, loss_sum, ntok, &glog);
+    if (ok && grad) {   /* 出口梯度铺回整段 → RMSNorm → hc_pre → 逐层往下(③ 的逐层反传原样调用) */
+        ds4_gpu_tensor *gv = pt_rows(r->gxn, r0, m, E);
+        ok = gv && ds4_gpu_tensor_fill_f32(r->gxn, 0.f, (uint64_t)n * E) &&
+             ds4_gpu_bwd_matmul_t_tensor(gv, mdl->map, mdl->size, e->weights.output->type, e->weights.output->abs_offset, E, V, glog, m, 0) &&
+             ds4_gpu_bwd_rms_norm_tensor(r->gx, r->gxn, st->x, mdl->map, mdl->size, e->weights.output_norm->abs_offset, E, n, DS4_RMS_EPS, 0) &&
+             ds4_gpu_tensor_fill_f32(r->ghc, 0.f, (uint64_t)n * HC * E) &&
+             ds4_gpu_bwd_hc_pre_tensor(r->ghc, r->gpre, r->gx, st->hc, st->pre_mix, E, HC, n);
+        if (ok) ok = rb_layers_bwd(e, c, r, n, as && as->m ? as : NULL, rt && rt->on ? rt : NULL);
+        if (gv) ds4_gpu_tensor_free(gv);
+    }
+    if (glog) ds4_gpu_tensor_free(glog);
+    if (!ok) fprintf(stderr, "ds4: [restore-b] 样本前向/反传失败(长 %u, 答案 %u 行)\n", s->sn, m);
+    if (ok && pfx) for (uint32_t il = 0; il < DS4_N_LAYER && ok; il++)
+        if (r->ring_post[il]) ok = ds4_gpu_tensor_copy(st->win[il], 0, r->ring_post[il], 0, ringb) != 0;
+    if (ok && c->ctxlen > c->maxlen && st->n_past == s->sn) r->cont_s = s;   /* 状态是整段 [0, sn): 留给同篇下一段接力 */
+    return ok;
+}
+
+/* 全料过一遍(不反传): 返回答案位逐位平均 KL; mode 1 时顺手把逐位 KL 记进各题的 gw */
+static bool rb_pass(ds4_engine *e, const pt_cfg *c, pt_run *r, ds4_gpu_tensor *w, const pt_data *d, const uint32_t *ord, uint32_t n,
+                    float **gw, int mode, double *kl) {
+    double ls = 0; uint32_t nt = 0;
+    r->cont_s = NULL;
+    for (uint32_t i = 0; i < n; i++)
+        if (!rb_step(e, c, r, w, &d->s[ord[i]], gw[ord[i]], mode, 0, &ls, &nt, NULL, NULL)) return false;
+    *kl = nt ? ls / nt : 0.0;
+    return true;
+}
+
+static int rb_cmpf(const void *a, const void *b) { const float x = *(const float *)a, y = *(const float *)b; return (x > y) - (x < y); }
+
+/* 第 0 步的逐位 KL → 权重: 阈值 = 全料逐位 KL 的 gap 分位, 以上 1, 以下 rest; 打一行账(选中几位、这些位的 KL 占总量多少)。
+ * rest 为什么不能是 0(10-28 a010/a011): 缺口位确实修好了(编程尺现役 KL 前 3% 的位 a010 降 0.040), 但其余 90% 的位没梯度钉着、
+ *   一起漂坏(编程尺 0~90% 分位每位 +0.002~+0.004; 没练过的官方料上同样 +6.6%), 编程尺上难位只占 KL 的一半, 合起来净退。
+ *   同一份 a011 料 rest 0 / 0.3 / 1: 编程尺 +2.9 / +1.4 / −0.1 SE, 最难 3% 的位反而 rest=1 修得最多(−0.025) ⇒ 脚本缺省已回 rb_gap=0(不加权)。 */
+static void rb_binarize(const pt_data *d, const uint32_t *ord, uint32_t n, float **gw, float gap, float rest, FILE *lf) {
+    uint64_t tot = 0;
+    for (uint32_t i = 0; i < n; i++) if (gw[ord[i]]) tot += d->s[ord[i]].m;
+    if (!tot) return;
+    float *all = xmalloc((size_t)tot * 4); uint64_t k = 0;
+    for (uint32_t i = 0; i < n; i++) if (gw[ord[i]]) { memcpy(all + k, gw[ord[i]], (size_t)d->s[ord[i]].m * 4); k += d->s[ord[i]].m; }
+    qsort(all, (size_t)tot, 4, rb_cmpf);
+    const float thr = all[(size_t)((double)gap * (double)(tot - 1))];
+    double sall = 0, ssel = 0; uint64_t nsel = 0;
+    for (uint64_t j = 0; j < tot; j++) sall += all[j];
+    for (uint32_t i = 0; i < n; i++) {
+        float *g = gw[ord[i]];
+        if (!g) continue;
+        for (uint32_t j = 0; j < d->s[ord[i]].m; j++) {
+            const bool on = g[j] >= thr && g[j] > 0.f;
+            if (on) { ssel += g[j]; nsel++; }
+            g[j] = on ? 1.f : rest;
+        }
+    }
+    free(all);
+    fprintf(stderr, "ds4: [restore-b] 缺口: 全料 %llu 位, 阈值 KL ≥ %.4f(%.0f%% 分位), 选中 %llu 位(%.1f%%), 这些位的 KL 占总量 %.1f%%; 其余位权重 %.2f\n",
+            (unsigned long long)tot, (double)thr, 100.0 * gap, (unsigned long long)nsel, 100.0 * (double)nsel / (double)tot, sall > 0 ? 100.0 * ssel / sall : 0.0, (double)rest);
+    if (lf) { fprintf(lf, "gap q %.3f thr %.5f sel %llu tot %llu klshare %.4f rest %.3f\n", (double)gap, (double)thr, (unsigned long long)nsel, (unsigned long long)tot, sall > 0 ? ssel / sall : 0.0, (double)rest); fflush(lf); }
+}
+
+/* 位置掩码(⑥): 读 "s e" 区间表, 每题答案位 j(目标在序列下标 sa0+j)落在某个区间里权重 1, 否则 0; 打一行账 */
+static bool rb_apply_mask(const pt_data *d, const uint32_t *ord, uint32_t n, float **gw, const char *path, FILE *lf) {
+    FILE *f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "ds4: ★[restore-b] 读不了掩码 %s★\n", path); return false; }
+    uint32_t cap = 0, nr = 0, (*rg)[2] = NULL, a, z;
+    while (fscanf(f, "%u %u", &a, &z) == 2) {
+        if (z <= a) continue;
+        if (nr == cap) { cap = cap ? cap * 2u : 64u; rg = realloc(rg, (size_t)cap * sizeof *rg); }
+        rg[nr][0] = a; rg[nr][1] = z; nr++;
+    }
+    fclose(f);
+    if (!nr) { fprintf(stderr, "ds4: ★[restore-b] 掩码 %s 一个区间都没有★\n", path); free(rg); return false; }
+    uint64_t on = 0, tot = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const pt_sample *s = &d->s[ord[i]];
+        float *g = gw[ord[i]];
+        if (!g) continue;
+        for (uint32_t j = 0; j < s->m; j++) {
+            const uint32_t p = s->sa0 + j;
+            bool in = false;
+            for (uint32_t k = 0; k < nr && !in; k++) in = p >= rg[k][0] && p < rg[k][1];
+            g[j] = in ? 1.f : 0.f; on += in; tot++;
+        }
+    }
+    free(rg);
+    fprintf(stderr, "ds4: [restore-b] 位置掩码 %s: %u 个区间, 答案位 %llu 里练 %llu 位(%.1f%%), 其余权重 0\n", path, nr, (unsigned long long)tot, (unsigned long long)on, tot ? 100.0 * on / tot : 0.0);
+    if (lf) { fprintf(lf, "mask ranges %u on %llu tot %llu\n", nr, (unsigned long long)on, (unsigned long long)tot); fflush(lf); }
+    return on > 0;
+}
+
+/* 打乱训练序: 按篇打乱、篇内段序不动(前缀形态按篇接力要同篇的段挨着过, 见 pt_run.cont_s) */
+static void rb_shuffle(const pt_data *d, uint32_t *ord, uint32_t n, uint64_t *rs) {
+    uint32_t *docs = xmalloc((size_t)(n + 1) * 4), nd = 0, *tmp = xmalloc((size_t)(n + 1) * 4), k = 0;
+    for (uint32_t i = 0; i < n; i++) { bool seen = false; for (uint32_t j = 0; j < nd && !seen; j++) seen = docs[j] == d->s[ord[i]].doc; if (!seen) docs[nd++] = d->s[ord[i]].doc; }
+    for (uint32_t i = nd; i > 1; i--) {
+        *rs ^= *rs >> 12; *rs ^= *rs << 25; *rs ^= *rs >> 27;
+        const uint32_t j = (uint32_t)((*rs * 2685821657736338717ull) % i), t = docs[i - 1]; docs[i - 1] = docs[j]; docs[j] = t;
+    }
+    for (uint32_t a = 0; a < nd; a++) for (uint32_t i = 0; i < n; i++) if (d->s[ord[i]].doc == docs[a]) tmp[k++] = ord[i];
+    memcpy(ord, tmp, (size_t)n * 4);
+    free(docs); free(tmp);
+}
+
+/* 逐层靶的读数(④): 练过的位 / 没练过的位各自 Σ‖xn·B·A − t‖² / Σ‖t‖²(还剩几成没补上), 每 3 块量 1 块(一块 cap 位 × 40 层 × 3 份读盘) */
+static bool rb_aux_log(rb_aux *ax, const pt_cfg *c, pt_run *r, const uint8_t *mask, const char *tag, FILE *lf) {
+    const uint32_t n = rb_aux_len(ax);
+    double rs[2] = { 0, 0 }, ts[2] = { 0, 0 };
+    for (uint32_t p = 1; p < n; ) {   /* 位置 0 是 BOS, 不预测任何训练位以外的东西也不在尺上 */
+        uint32_t q = p; while (q < n && mask[q] == mask[p]) q++;
+        if (!rb_aux_eval(ax, c, r, p, q, 3, &rs[mask[p]], &ts[mask[p]])) return false;
+        p = q;
+    }
+    const double tr = ts[1] > 0 ? rs[1] / ts[1] : 0, ho = ts[0] > 0 ? rs[0] / ts[0] : 0;
+    fprintf(stderr, "ds4: [restore-b] 逐层靶 %s: 练过的位剩 %.4f, 没练过的位剩 %.4f(1 = 一点没补)\n", tag, tr, ho);
+    if (lf) { fprintf(lf, "aux %s train %.5f held %.5f\n", tag, tr, ho); fflush(lf); }
+    return true;
+}
+
+int ds4_engine_restoreb(ds4_engine *e, const char *spec) {
+    if (!e || !spec || !ds4_engine_is_v41(e) || !e->metal_ready) { fprintf(stderr, "ds4: --restore-b 要 V4.1 模型 + GPU 后端\n"); return 1; }
+    if (g_ds4_v41_pt_dir) { fprintf(stderr, "ds4: --restore-b 不接 --posttrain\n"); return 1; }
+    rb_cfg b; pt_cfg c; char ptpath[1200];
+    if (!rb_cfg_load(spec, &b, &c, ptpath, sizeof ptpath)) return 1;
+    c.nopack = 1; c.expand = 0;   /* 逐题过(损失要逐位权重, 合批路的损失没有这个口); 不改写问法(料是原文段) */
+    pt_data d;
+    if (!pt_data_load(e, &c, &d)) { pt_data_free(&d); return 1; }
+    for (uint32_t i = 0; i < d.ns; i++) if (d.s[i].src == 0) d.s[i].eval = 0;   /* 料全训(门在外面) */
+    if (!pt_teacher_fp(&c, &d)) { pt_data_free(&d); return 1; }
+    pt_run r;
+    if (!pt_run_alloc(e, &c, &r)) { pt_data_free(&d); return 1; }
+    int rc = 1;
+    bool ok = true;
+    ds4_gpu_tensor *w = v41_alloc((uint64_t)r.st.cap_tok * 4, &ok);
+    uint32_t *ord = xmalloc((size_t)d.ns * 4 + 4), ntr = 0;
+    float **gw = xmalloc_zeroed(d.ns + 1u, sizeof *gw); uint32_t *ev = NULL;   /* ev: 诊断趟评的段(rb_eval_set), 早退路径上也要能 free */
+    char lp[1200]; snprintf(lp, sizeof lp, "%s/train.log", c.out);
+    FILE *lf = fopen(lp, "w");
+    rb_aux *ax = NULL; uint8_t *amask = NULL;
+    rb_route rt; memset(&rt, 0, sizeof rt); rt.lr = b.route_lr;
+    rb_anchor an; memset(&an, 0, sizeof an);
+    double aw = -1;   /* 逐层项的绝对权重: 第 1 步按两份梯度范数定(rb_auxw × ‖∇KL‖/‖∇逐层(w=1)‖), 之后不变 */
+    if (!ok || (b.init[0] && !rb_load_init(&c, &r, b.init))) goto out;
+    if (b.route && !rb_route_alloc(&rt, &c, &r, b.init)) goto out;
+    for (uint32_t i = 0; i < d.ns; i++) if (d.s[i].src == 0 && d.s[i].top_id && pt_runnable(&r, &d.s[i])) { ord[ntr++] = i; gw[i] = xmalloc_zeroed(d.s[i].m, sizeof **gw); }
+    if (!ntr) { fprintf(stderr, "ds4: [restore-b] 没有能训的题\n"); goto out; }
+    if (b.dump[0]) {   /* ④ 只取料: 料里最长那条(前缀形态的整篇)整条前向一遍, 落完就走 —— 不预热、不训 */
+        const pt_sample *lg = NULL;
+        for (uint32_t i = 0; i < ntr; i++) if (!lg || d.s[ord[i]].sn > lg->sn) lg = &d.s[ord[i]];
+        rc = rb_aux_dump(e, &r, lg->sids, lg->sn, b.dump) ? 0 : 1;
+        goto out;
+    }
+    if (!rb_anchor_alloc(&an, &c, &r, b.init, b.anchor)) goto out;   /* ⑧ 起点已读进 A/B, 此刻快照成 θ* */
+    if (b.aux[0]) {   /* 逐层靶: 标出哪些位置被训(样本序列是靶序列的前缀、答案位前一位), 其余是没练过的位 */
+        if (!(ax = rb_aux_open(b.aux, &c, &r))) goto out;
+        amask = xmalloc_zeroed(rb_aux_len(ax) + 1u, 1);
+        uint32_t nc = 0;
+        for (uint32_t i = 0; i < ntr; i++) {
+            const pt_sample *s = &d.s[ord[i]];
+            if (!rb_aux_covers(ax, s)) continue;
+            nc++;
+            for (uint32_t p = s->sa0 + s->l0; p < s->sa0 + s->m; p++) amask[p - 1u] = 1;
+        }
+        if (!nc) { fprintf(stderr, "ds4: ★[restore-b] 料里没有一道是逐层靶序列(%s/ids.txt)的前缀★\n", b.aux); goto out; }
+        fprintf(stderr, "ds4: [restore-b] 逐层靶接上 %u / %u 段, rb_auxw %.3g%s\n", nc, ntr, (double)b.auxw, b.auxw > 0.f ? "" : "(只量不训, 对照)");
+    }
+    {   /* 预热(③ 的预热原样调用): 最长一题完整走一趟前向 + 反传, 内存峰值开训前量出来; 这趟的梯度清掉 */
+        uint32_t lmax = 0;
+        if (!pt_pack_warm(e, &c, &r, &d, &lmax)) goto out;
+        for (uint32_t il = c.layer_lo; il <= c.layer_hi; il++)
+            if (!ds4_gpu_tensor_fill_f32(r.gA[il], 0.f, (uint64_t)r.K * DS4_N_EMBD) || !ds4_gpu_tensor_fill_f32(r.gB[il], 0.f, (uint64_t)r.K * DS4_N_EMBD)) goto out;
+        const long mem = pt_mem_mb();
+        fprintf(stderr, "ds4: [restore-b] 预热(最长 %u 行)后可用内存 %ld MB\n", lmax, mem);
+        if (mem >= 0 && mem < RB_MEM_FLOOR_MB) { fprintf(stderr, "ds4: ★[restore-b] 可用内存 %ld MB 低于 %d MB, 停车★\n", mem, RB_MEM_FLOOR_MB); goto out; }
+    }
+    double kl0 = 0, kl1 = 0;
+    if (b.freeze) fprintf(stderr, "ds4: [restore-b] 冻住前 %d 个秩(起点 %s), 只训后 %u 个\n", b.freeze, b.init, c.rank - (uint32_t)b.freeze);
+    rb_dec_begin(e, &r);
+    const bool full = b.mask[0] || b.gap > 0.f; ev = xmalloc_zeroed(ntr + 1u, sizeof *ev);
+    const uint32_t nev = full ? ntr : rb_eval_set(&d, ord, ntr, &r, ev); const uint32_t *eo = full ? ord : ev;
+    fprintf(stderr, "ds4: [restore-b] 训练 L%u-L%u 秩 %u, lr %.2g, batch %u, %u 轮, 料 %u 段(诊断趟评 %u 段); 第 0 步逐位 KL…\n", c.layer_lo, c.layer_hi, c.rank, (double)c.lr, c.batch, c.epochs, ntr, nev);
+    if (!rb_pass(e, &c, &r, w, &d, eo, nev, gw, 1, &kl0)) goto out;
+    if (lf) { fprintf(lf, "step 0 eval_kl 0.00000 train_kl %.5f hold_kl 0.00000\n", kl0); fflush(lf); }
+    rb_dec_log(&r, "e00", lf);
+    if (ax && !rb_aux_log(ax, &c, &r, amask, "e00", lf)) goto out;
+    {   /* 第 0 步逐位 KL 落 <out>/kl0.tsv(一行"目标 token id  KL"): 拿去和编程尺的缺口按 token 类对照(api_round.py tokclass) ——
+         * 料里的缺口和尺上的缺口不是同一类 token 时, 修好料的缺口也搬不到尺上(10-28: 尺的缺口 68% 在标识符上) */
+        char kp[1200]; snprintf(kp, sizeof kp, "%s/kl0.tsv", c.out);
+        FILE *kf = fopen(kp, "w");
+        for (uint32_t i = 0; kf && i < nev; i++) {   /* 只写诊断趟评过的段 */
+            const pt_sample *s = &d.s[eo[i]];
+            for (uint32_t j = 0; j < s->m; j++) fprintf(kf, "%d %.6f\n", s->sids[s->sa0 + j], (double)gw[eo[i]][j]);
+        }
+        if (kf) fclose(kf); else fprintf(stderr, "ds4: [restore-b] 写不了 %s(只少一份诊断, 训练照常)\n", kp);
+    }
+    if (b.mask[0]) { if (!rb_apply_mask(&d, ord, ntr, gw, b.mask, lf)) goto out; }
+    else if (b.gap > 0.f) rb_binarize(&d, ord, ntr, gw, b.gap, b.rest, lf);
+    else if (!rb_dec_weight(&d, ord, ntr, gw, &r, lf)) for (uint32_t i = 0; i < ntr; i++) { free(gw[ord[i]]); gw[ord[i]] = NULL; }   /* 不加权: 每位都出梯度 */
+    uint64_t rs = 0x2545F4914F6CDD1Dull ^ c.seed;
+    uint32_t step = 0;
+    const double t0 = now_sec();
+    for (uint32_t ep = 1; ep <= c.epochs; ep++) {
+        rb_shuffle(&d, ord, ntr, &rs);
+        r.cont_s = NULL;
+        for (uint32_t b0 = 0; b0 < ntr; b0 += c.batch) {
+            const uint32_t b1 = b0 + c.batch < ntr ? b0 + c.batch : ntr;
+            double ls = 0; uint32_t nt = 0;
+            /* 逐层项: rb_auxw = 0 只量; 没定标前(第 1 步)只量梯度范数(w=1), 这一步只有出口 KL; 定标后按 aw 加进梯度 */
+            const int cal = b.auxw > 0.f && aw >= 0;
+            rb_auxstep as = { ax, 0, 0, 0, cal ? aw / c.batch : 1.0, cal ? 1 : (b.auxw > 0.f ? 2 : 0), 0, 0, 0, 0, 0 };
+            for (uint32_t k = b0; k < b1; k++)
+                if (!rb_step(e, &c, &r, w, &d.s[ord[k]], gw[ord[k]], gw[ord[k]] ? 2 : 0, 1, &ls, &nt, ax ? &as : NULL, &rt)) goto out;
+            if (b.auxw > 0.f && aw < 0 && as.gn2 > 0) {   /* 定标: 此刻 gA/gB 里只有这一批的出口 KL 梯度 */
+                double gk = 0, sq = 0;
+                for (uint32_t il = c.layer_lo; il <= c.layer_hi; il++) {
+                    if (!ds4_gpu_bwd_sumsq_tensor(r.gA[il], (uint64_t)r.K * DS4_N_EMBD, &sq)) goto out;
+                    gk += sq;
+                    if (!ds4_gpu_bwd_sumsq_tensor(r.gB[il], (uint64_t)r.K * DS4_N_EMBD, &sq)) goto out;
+                    gk += sq;
+                }
+                aw = (double)b.auxw * sqrt(gk / as.gn2);
+                fprintf(stderr, "ds4: [restore-b] 逐层项定标: 出口 KL 梯度 %.4g, 逐层项(w=1)梯度 %.4g ⇒ w = %.4g; 起点段 B 在下游敏感方向上剩 %.4f(不加权 %.4f)\n",
+                        sqrt(gk), sqrt(as.gn2), aw, as.wtgt > 0 ? as.wres / as.wtgt : 0.0, as.tgt > 0 ? as.res / as.tgt : 0.0);
+                if (lf) fprintf(lf, "aux scale gkl %.6g gaux1 %.6g w %.6g\n", sqrt(gk), sqrt(as.gn2), aw);
+            }
+            for (uint32_t il = c.layer_lo; b.freeze && il <= c.layer_hi; il++) {   /* ⑦ 冻秩: 前 n 个秩的梯度行([K][D] 的前 n 行)清零 */
+                const uint64_t fb = (uint64_t)b.freeze * DS4_N_EMBD * 4;
+                ds4_gpu_tensor *va = ds4_gpu_tensor_view(r.gA[il], 0, fb), *vb = ds4_gpu_tensor_view(r.gB[il], 0, fb);
+                const bool zok = va && vb && ds4_gpu_tensor_fill_f32(va, 0.f, fb / 4) && ds4_gpu_tensor_fill_f32(vb, 0.f, fb / 4);
+                if (va) ds4_gpu_tensor_free(va);
+                if (vb) ds4_gpu_tensor_free(vb);
+                if (!zok) goto out;
+            }
+            double apen = 0, agn2 = 0;   /* ⑧ 锚: Adam 之前攒数据梯度的 g²(冻秩清零之后), Adam 之后按位移解耦拉回 */
+            if (!rb_anchor_step(&an, &c, &r, &apen, &agn2)) goto out;
+            double gn = 0; int clipped = 0;
+            if (!pt_opt_step(&c, &r, ++step, &gn, &clipped)) goto out;
+            if (!rb_anchor_pull(&an, &c, &r, &apen, &agn2)) goto out;
+            const double nco = 2.0 * (c.layer_hi - c.layer_lo + 1) * (double)r.K * DS4_N_EMBD;
+            if (an.lam > 0.f && lf) fprintf(lf, "anchor step %u pen %.6g pull %.6g\n", step, apen, sqrt(agn2 / nco));
+            if (an.lam > 0.f && (step <= 3 || step % 10 == 0)) fprintf(stderr, "ds4: [restore-b] 步 %u 锚: Σ F·Δθ² %.4g, 拉回位移 rms %.3g(lr %.2g), 总梯度 %.4g\n", step, apen, sqrt(agn2 / nco), (double)c.lr, gn);
+            double gns = 0;
+            if (rt.on && !rb_route_step(&rt, &c, &r, step, &gns)) goto out;
+            if (rt.on && lf) fprintf(lf, "route step %u gnorm %.4g\n", step, gns);
+            const long mem = pt_mem_mb();
+            if (lf) { fprintf(lf, "step %u ep %u loss %.5f gnorm %.4g t %.0f mem %ld\n", step, ep, nt ? ls / nt : 0.0, gn, now_sec() - t0, mem); fflush(lf); }
+            if (lf && as.tgt > 0) { fprintf(lf, "aux step %u resid %.5f wresid %.5f gaux %.4g\n", step, as.res / as.tgt, as.wtgt > 0 ? as.wres / as.wtgt : 0.0, sqrt(as.gn2)); fflush(lf); }
+            if (ax && (step <= 3 || step % 10 == 0) && as.tgt > 0)
+                fprintf(stderr, "ds4: [restore-b] 步 %u 逐层靶: 敏感方向上剩 %.4f, 不加权剩 %.4f\n", step, as.wtgt > 0 ? as.wres / as.wtgt : 0.0, as.res / as.tgt);
+            if (mem >= 0 && mem < RB_MEM_FLOOR_MB) { fprintf(stderr, "ds4: ★[restore-b] 训练中可用内存 %ld MB 低于 %d MB, 停车★\n", mem, RB_MEM_FLOOR_MB); goto out; }
+        }
+        rb_dec_begin(e, &r);
+        if (!rb_pass(e, &c, &r, w, &d, eo, nev, gw, 0, &kl1)) goto out;
+        fprintf(stderr, "ds4: [restore-b] ★轮 %u 末: 全料逐位 KL %.4f(第 0 步 %.4f), %u 步, %.0f s★\n", ep, kl1, kl0, step, now_sec() - t0);
+        if (lf) { fprintf(lf, "epoch %u eval_kl 0.00000 train_kl %.5f hold_kl 0.00000 gain 0.00000 se 0.00000 nq %u rows 0\n", ep, kl1, ntr); fflush(lf); }
+        char et[16]; snprintf(et, sizeof et, "e%02u", ep);
+        rb_dec_log(&r, et, lf);
+        if (ax && !rb_aux_log(ax, &c, &r, amask, et, lf)) goto out;
+        char ck[1200]; snprintf(ck, sizeof ck, "%s/ckpt_e%02u", c.out, ep);
+        if (!pt_save_amp(&c, &r, ck) || (rt.on && !rb_route_save(&c, &r, ck)) || !rb_anchor_save(&an, &c, ck)) goto out;
+    }
+    fprintf(stderr, "ds4: [restore-b] 段 B 已落 %s/ckpt_eNN(amp_L%02u..L%02u.bin + base.fnv)\n", c.out, c.layer_lo, c.layer_hi);
+    rc = 0;
+out:
+    if (lf) fclose(lf);
+    rb_aux_close(ax); free(amask); rb_route_free(&rt); rb_anchor_free(&an);
+    for (uint32_t i = 0; i < d.ns; i++) free(gw[i]);
+    free(gw); free(ord); free(ev);
+    if (w) ds4_gpu_tensor_free(w);
+    pt_run_free(&r); pt_data_free(&d);
+    return rc;
+}
+#else
+int ds4_engine_restoreb(ds4_engine *e, const char *spec) { (void)e; (void)spec; return 1; }
+#endif /* !DS4_NO_GPU */

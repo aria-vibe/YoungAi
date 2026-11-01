@@ -232,6 +232,31 @@ static void test_amp_misc_bwd(void) {
       for (uint64_t i = 0; i < M; i++) { const float gi = g[i] * gs, mi = b1 * m[i] + (1.f - b1) * gi, vi = b2 * v[i] + (1.f - b2) * gi * gi; pr[i] = p[i] - lr * (mi / c1) / (sqrtf(vi / c2) + eps); }
       test_v41_cmp("bwd adam p", got, pr, M, 1e-6f, 1e-3f);
       TEST_ASSERT(test_v41_read(tg, got, M * 4)); for (uint64_t i = 0; i < M; i++) pr[i] = 0.f; test_v41_cmp("bwd adam g=0", got, pr, M, 0.f, 1e-3f);
+      /* 参数锚(10-31): facc += g²; g += lam·F·(p − p0); 两个和。先带 F, 再 F=NULL(只攒) */
+      { float *g2 = malloc(M * 4), *fa = malloc(M * 4), *F = malloc(M * 4), *q0 = malloc(M * 4), *pn = malloc(M * 4), *r1 = malloc(M * 4), *r2 = malloc(M * 4);
+        for (uint64_t i = 0; i < M; i++) { g2[i] = test_v41_randf(); fa[i] = 0.25f * fabsf(test_v41_randf()); F[i] = fabsf(test_v41_randf()); q0[i] = test_v41_randf(); }
+        TEST_ASSERT(test_v41_read(tp, pn, M * 4));
+        ds4_gpu_tensor *tg2 = test_v41_tensor(g2, M * 4), *tfa = test_v41_tensor(fa, M * 4), *tF = test_v41_tensor(F, M * 4), *tq0 = test_v41_tensor(q0, M * 4);
+        const float lam = 0.7f; double pen = 0, gn2 = 0, rp = 0, rg = 0;
+        TEST_ASSERT(ds4_gpu_bwd_anchor_tensor(tg2, tfa, tp, tq0, tF, M, lam, &pen, &gn2) != 0);
+        for (uint64_t i = 0; i < M; i++) { const float d = pn[i] - q0[i], fd = F[i] * d, a = lam * fd; r1[i] = g2[i] + a; r2[i] = fa[i] + g2[i] * g2[i]; rp += (double)fd * d; rg += (double)a * a; }
+        TEST_ASSERT(test_v41_read(tg2, got, M * 4)); test_v41_cmp("bwd anchor g", got, r1, M, 1e-6f, 1e-3f);
+        TEST_ASSERT(test_v41_read(tfa, got, M * 4)); test_v41_cmp("bwd anchor facc", got, r2, M, 1e-6f, 1e-3f);
+        fprintf(stderr, "ds4: [v41-test] anchor pen gpu %.8g cpu %.8g gn2 gpu %.8g cpu %.8g\n", pen, rp, gn2, rg);
+        TEST_ASSERT(fabs(pen - rp) < 1e-4 * rp && fabs(gn2 - rg) < 1e-4 * rg);
+        double pen0 = 0, gn0 = 0;   /* F=NULL: g 不动, facc 再加一次 g²(此时 g = r1), 两个和为 0 */
+        TEST_ASSERT(ds4_gpu_bwd_anchor_tensor(tg2, tfa, tp, tq0, NULL, M, lam, &pen0, &gn0) != 0 && pen0 == 0.0 && gn0 == 0.0);
+        TEST_ASSERT(test_v41_read(tg2, got, M * 4)); test_v41_cmp("bwd anchor g(F=NULL)", got, r1, M, 0.f, 1e-3f);
+        for (uint64_t i = 0; i < M; i++) r2[i] += r1[i] * r1[i];
+        TEST_ASSERT(test_v41_read(tfa, got, M * 4)); test_v41_cmp("bwd anchor facc(F=NULL)", got, r2, M, 1e-6f, 1e-3f);
+        /* 解耦拉回: p -= coef·F·(p − p0); 两个和 */
+        { double pp = 0, pg = 0, rpp = 0, rpg = 0; const float coef = 1.3f;   /* coef·F 有一部分 > 1, 顺带验封顶 */
+          TEST_ASSERT(test_v41_read(tp, pn, M * 4) && ds4_gpu_bwd_pull_tensor(tp, tq0, tF, M, coef, &pp, &pg) != 0);
+          for (uint64_t i = 0; i < M; i++) { const float d = pn[i] - q0[i], fd = F[i] * d, k = coef * F[i] > 1.f ? 1.f : coef * F[i], s = k * d; r1[i] = pn[i] - s; rpp += (double)fd * d; rpg += (double)s * s; }
+          TEST_ASSERT(test_v41_read(tp, got, M * 4)); test_v41_cmp("bwd pull p", got, r1, M, 1e-6f, 1e-3f);
+          fprintf(stderr, "ds4: [v41-test] pull pen gpu %.8g cpu %.8g gn2 gpu %.8g cpu %.8g\n", pp, rpp, pg, rpg);
+          TEST_ASSERT(fabs(pp - rpp) < 1e-4 * rpp && fabs(pg - rpg) < 1e-4 * rpg); }
+        free(g2); free(fa); free(F); free(q0); free(pn); free(r1); free(r2); }
       TEST_ASSERT(ds4_gpu_bwd_axpy_tensor(tp, tm, 2.0f, M) != 0 && test_v41_read(tp, got, M * 4) && test_v41_read(tm, m, M * 4));
       for (uint64_t i = 0; i < M; i++) pr[i] = pr[i] * 0.f + 0.f;   /* 下面重算 */
       { float *p2 = malloc(M * 4); TEST_ASSERT(test_v41_read(tp, p2, M * 4)); (void)p2; free(p2); }

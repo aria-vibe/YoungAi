@@ -31,6 +31,8 @@ typedef struct { uint32_t IN, MID, OUT, K, v3, has_gov, n_tok, n_act; float clam
 typedef struct { uint32_t IN, MID, OUT, K, n_expert, cur_view, pad0, pad1; float clamp_v; float pad2, pad3, pad4; } v41_mtp_args;
 typedef struct { uint32_t row0, V, K, has_w; float scale; float pad0, pad1, pad2; } v41_kl_args;
 typedef struct { uint64_t n; float lr, b1, b2, eps, gs, c1, c2, pad; } v41_adam_args;
+typedef struct { uint64_t n; float lam; uint32_t has_f, pad; } v41_anchor_args;
+typedef struct { uint64_t n; float coef; uint32_t pad0, pad1; } v41_pull_args;
 typedef struct { uint32_t window, ng, topk, n_head, hd, has_comp, has_gcomp, pad; float scale; float pad1, pad2, pad3; } v41_battn_args;
 typedef struct { uint32_t n_tok, hc, iters, mh, dim, has_gpre, has_gpost, has_gcomb; float eps, norm_eps, pad0, pad1; } v41_bhc_args;
 typedef struct { uint32_t NE, K, pad0, pad1; float rs; float pad2, pad3, pad4; } v41_brt_args;

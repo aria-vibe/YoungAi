@@ -18,7 +18,7 @@ static void pt_dtab_free(pt_dtab *t) { free(t->id); free(t->p); free(t->rest); m
 static bool pt_diag_student(ds4_engine *e, const pt_cfg *c, pt_run *r, const pt_sample *s, pt_dtab *o) {
     ds4_v41_state *st = &r->st;
     const uint32_t TK = c->topk, m = s->m;
-    pt_state_reset(st);
+    pt_state_reset(st); r->cont_s = NULL;
     st->ced_skip = 0; st->head_last_only = 0;
     if (!v41_forward(e, st, s->sids, s->sn)) return false;
     if (!ds4_gpu_bwd_topk_tensor(r->tid, r->tp, r->trest, st->logits, s->sa0 - 1u, m, DS4_N_VOCAB, TK)) return false;

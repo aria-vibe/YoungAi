@@ -363,10 +363,10 @@ endif
 # 个人助理(src/assistant/, 方案 docs/assistant.md): 住 ds4-train 主进程; 每次工具调用 fork 子进程先上内核沙盒
 # (Linux = Landlock+seccomp, macOS = Seatbelt; 两个平台文件在对方平台上编成空对象)。纯主机 C, 不链引擎。
 src/studio/studio_main.o src/studio/studio_phone.o: src/assistant/asst_internal.h
-src/assistant/%.o: src/assistant/%.c src/assistant/asst_internal.h src/common/ds4_json.h src/office/ds4_office.h src/video/ds4_video.h
+src/assistant/%.o: src/assistant/%.c src/assistant/asst_internal.h src/assistant/asst_verify.h src/common/ds4_json.h src/office/ds4_office.h src/video/ds4_video.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 # 工具执行点(注册表 asst_tools.c 每行一个): 子目录要自己的规则, 落到默认规则上能编过但不跟头文件, 改了头不重编
-src/assistant/tools/%.o: src/assistant/tools/%.c src/assistant/tools/tool_image.h src/image/ds4_image.h src/assistant/asst_internal.h src/common/ds4_json.h src/office/ds4_office.h src/video/ds4_video.h src/tts/ds4_tts.h src/web/web_internal.h
+src/assistant/tools/%.o: src/assistant/tools/%.c src/assistant/tools/tool_image.h src/image/ds4_image.h src/assistant/asst_internal.h src/assistant/asst_verify.h src/common/ds4_json.h src/office/ds4_office.h src/video/ds4_video.h src/tts/ds4_tts.h src/web/web_internal.h
 	$(CC) $(CFLAGS) -c -o $@ $<
 src/sandbox/%.o: src/sandbox/%.c src/assistant/asst_internal.h src/common/ds4_json.h
 	$(CC) $(CFLAGS) -c -o $@ $<
@@ -378,8 +378,8 @@ tests/asst/fake/ds4-server: tests/asst/fake_model.c
 asst-e2e: ds4-train tests/asst/fake/ds4-server
 	node tests/asst/e2e_device.mjs
 # 沙盒逃逸单测 + 纯逻辑单测 + 工作台登录单测(不要模型, 秒级; make test 里跑)
-ds4_asst_test: tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c tests/asst/t_asst_db.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o
-	$(CC) $(CFLAGS) -o $@ tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c tests/asst/t_asst_db.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o $(LDLIBS)
+ds4_asst_test: tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c tests/asst/t_asst_db.c tests/asst/t_asst_verify.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o
+	$(CC) $(CFLAGS) -o $@ tests/asst/t_asst_sbx.c tests/asst/t_asst_logic.c tests/asst/t_asst_video.c tests/asst/t_studio_auth.c tests/asst/t_studio_net.c tests/asst/t_studio_models.c tests/asst/t_asst_phone.c tests/asst/t_asst_pay.c tests/asst/t_asst_task.c tests/asst/t_asst_push.c tests/asst/t_asst_plan.c tests/asst/t_asst_memory.c tests/asst/t_asst_image.c tests/asst/t_asst_preview.c tests/asst/t_asst_market.c tests/asst/t_asst_lottery.c tests/asst/t_asst_db.c tests/asst/t_asst_verify.c $(ASST_OBJS) $(SANDBOX_OBJS) $(SKILL_OBJS) $(MODEL_CLIENT_OBJS) $(PUSH_OBJS) $(DB_OBJS) $(OFFICE_OBJS) $(IMAGE_OBJS) $(VIDEO_OBJS) $(TTS_LINK) $(WEB_OBJS) $(MODEL_OBJS) $(STUDIO_AUTH_OBJS) $(STUDIO_NET_OBJS) src/common/ds4_json.o $(LDLIBS)
 
 
 # Standalone capability modules (self-contained, no engine coupling): z 隐变量

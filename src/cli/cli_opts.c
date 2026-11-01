@@ -354,8 +354,8 @@ cli_config parse_options(int argc, char **argv) {
         } else if (!strcmp(arg, "--vision-golden")) { c.gen.vision_golden = need_arg(&i, argc, argv, arg);
         } else if (!strcmp(arg, "--ptrain")) {
             c.gen.ptrain_spec = need_arg(&i, argc, argv, arg);
-        } else if (!strcmp(arg, "--draft-train")) {
-            c.gen.draft_train_spec = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--draft-train")) { c.gen.draft_train_spec = need_arg(&i, argc, argv, arg);
+        } else if (!strcmp(arg, "--restore-b")) { c.gen.restoreb_spec = need_arg(&i, argc, argv, arg);   /* 反修段 B 还原训练(core_restoreb.c) */
         } else if (!strcmp(arg, "--multi-probe")) {
             c.gen.multi_probe = parse_int(need_arg(&i, argc, argv, arg), arg);
         } else if (!strcmp(arg, "--no-lanes")) {

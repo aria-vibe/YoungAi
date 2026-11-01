@@ -72,16 +72,23 @@ int ds4_gpu_bwd_hc_post_tensor(ds4_gpu_tensor *gy, ds4_gpu_tensor *gres, ds4_gpu
 int ds4_gpu_bwd_amp_tensor(ds4_gpu_tensor *gA, ds4_gpu_tensor *gB, ds4_gpu_tensor *gx, const ds4_gpu_tensor *gy,
                            const ds4_gpu_tensor *x, const ds4_gpu_tensor *A, const ds4_gpu_tensor *B,
                            ds4_gpu_tensor *T, ds4_gpu_tensor *gT, uint32_t n_tok, uint32_t D, uint32_t K);
+/* 带路由的放大器(ds4_gpu_v41_amp_route_apply_tensor)的反向: 同上, 外加 gS [NE][K] += 逐专家秩系数的梯度(原子累加); rw 当常数。 */
+int ds4_gpu_bwd_amp_route_tensor(ds4_gpu_tensor *gA, ds4_gpu_tensor *gB, ds4_gpu_tensor *gS, ds4_gpu_tensor *gx, const ds4_gpu_tensor *gy,
+                                 const ds4_gpu_tensor *x, const ds4_gpu_tensor *A, const ds4_gpu_tensor *B, const ds4_gpu_tensor *S,
+                                 const ds4_gpu_tensor *sel, const ds4_gpu_tensor *rw, ds4_gpu_tensor *T, ds4_gpu_tensor *gT,
+                                 uint32_t n_tok, uint32_t D, uint32_t K, uint32_t NU, uint32_t NE);
 
 /* ---- 第二阶段: 逐层反传(穿过注意力 / MoE / mHC 混合系数 / 压缩器 / engram), 实现在 cuda_bwd_attn / hc / moe / comp ---- */
 
-/* 稀疏注意力(窗口 + 选中的压缩行, sink 只进分母, 值 = 键)的反向。只接"一题一块、从位置 0 起"的形态: 窗口缓冲第 window+i 行 =
- * 第 i 个位置的 kvn; 压缩行(kv_comp/idx)与前向同一份。出 gq[n][H][D](覆盖)、gkv[n][D](覆盖, 键与值两种身份合计);
+/* 稀疏注意力(窗口 + 选中的压缩行, sink 只进分母, 值 = 键)的反向。形态 = 一题一块, 块首位的绝对位置 pos0: 窗口缓冲第 window+i 行 =
+ * 位置 pos0+i 的 kvn(块区), 第 [0, window) 行是环头 —— 位置 a < pos0 的键住在 a % window 格(与前向 v41_win_row 同一映射; pos0 = 0 时
+ * 环头永远读不到, 就是 10-01 起的老形态)。压缩行(kv_comp/idx)与前向同一份, 组号绝对。出 gq[n][H][D](覆盖)、gkv[n][D](覆盖, 键与值两种
+ * 身份合计, 只有块区的键有行: 环头里的前缀键是常量, 对它们的梯度丢掉 —— 这就是后训练"前缀只预填、尾窗才反传"的截断语义, 2026-10-25);
  * gcomp 非 NULL 时把对压缩行的梯度**累加**进 gcomp[组][D](源层在训练段里才要; NULL = 压缩行当常量)。 */
 int ds4_gpu_bwd_sparse_attn_tensor(ds4_gpu_tensor *gq, ds4_gpu_tensor *gkv, ds4_gpu_tensor *gcomp, const ds4_gpu_tensor *go, const ds4_gpu_tensor *o,
                                    const ds4_gpu_tensor *q, const ds4_gpu_tensor *kv_win, const ds4_gpu_tensor *kv_comp,
                                    const ds4_gpu_tensor *idx, const void *model_map, uint64_t model_size, uint64_t sink_offset,
-                                   uint32_t n_tok, uint32_t window, uint32_t ng, uint32_t topk, uint32_t n_head, uint32_t head_dim, float scale);
+                                   uint32_t n_tok, uint32_t pos0, uint32_t window, uint32_t ng, uint32_t topk, uint32_t n_head, uint32_t head_dim, float scale);
 /* RoPE 反向 = 反方向旋转、不舍 bf16。参数与前向 ds4_gpu_v41_rope_tensor 同, inverse 传"前向那一发取反"。就地改 x。 */
 int ds4_gpu_bwd_rope_tensor(ds4_gpu_tensor *x, const ds4_gpu_tensor *pos, uint32_t n_tok, uint32_t n_head, uint32_t head_dim,
                             uint32_t n_rot, float theta, uint32_t original_seq_len, float factor, float beta_fast, float beta_slow, bool inverse);
@@ -167,6 +174,16 @@ int ds4_gpu_bwd_sumsq_tensor(const ds4_gpu_tensor *g, uint64_t n, double *out);
  * gs = 全局裁剪的缩放(不裁 = 1)。step 从 1 起。 */
 int ds4_gpu_bwd_adam_tensor(ds4_gpu_tensor *p, ds4_gpu_tensor *g, ds4_gpu_tensor *m, ds4_gpu_tensor *v, uint64_t n,
                             float lr, float beta1, float beta2, float eps, float gs, uint32_t step);
+
+/* 参数锚(EWC, 2026-10-31, core_restoreb_init.c): 先 facc += g²(本步数据梯度的二阶矩, 攒成下一轮的重要度 F), 再 g += lam·F·(p − p0)
+ * (把参数往起点 p0 拉, 拉力按上一轮在乎的坐标加权)。F 为 NULL = 只攒不拉。*pen += Σ F·(p−p0)²(罚项 ×2), *gn2 += Σ (lam·F·(p−p0))²
+ * (锚梯度范数², 定标/日志用), 都在主机累加。要在 Adam 之前调: Adam 会把 g 清零。 */
+int ds4_gpu_bwd_anchor_tensor(ds4_gpu_tensor *g, ds4_gpu_tensor *facc, const ds4_gpu_tensor *p, const ds4_gpu_tensor *p0,
+                              const ds4_gpu_tensor *F, uint64_t n, float lam, double *pen, double *gn2);
+/* 参数锚的解耦拉回(10-31 晚): Adam 之后直接按位移拉 p −= min(coef·F, 1)·(p − p0), 不经过 Adam 的逐坐标归一化(走梯度的那条路 λ 翻倍位移几乎不变: Adam 把锚梯度
+ * 和数据梯度一起归一掉了, t006→t007 实撞)。系数封顶 1 = 最多拉回全部位移(F 重尾, 不封顶一步拉过头下一步更过头, t008 炸)。
+ * *pen += Σ F·(p−p0)²(拉回前), *gn2 += Σ 拉回位移²。 */
+int ds4_gpu_bwd_pull_tensor(ds4_gpu_tensor *p, const ds4_gpu_tensor *p0, const ds4_gpu_tensor *F, uint64_t n, float coef, double *pen, double *gn2);
 
 #ifdef __cplusplus
 }

@@ -21,6 +21,16 @@ tags:
 pipeline_tag: text-generation
 ---
 
+> **Why it is built this way**
+>
+> There is no free lunch. Whatever size quantization saves is paid for somewhere else.
+>
+> I quantize every domain with equal weight so that every person, every industry and every country starts from the same,
+> consistent base; specialised abilities are added as plug-ins (sidecars, post-training files), by whoever needs them.
+> Making the numbers look good at the cost of the model's marginal abilities is not what I want.
+>
+> Next goal: self-evolving restoration.
+
 <p align="center">
   <img src="web/logo.jpg" width="96" alt="YoungAi logo">
 </p>
@@ -34,11 +44,42 @@ pipeline_tag: text-generation
 </p>
 
 <p align="center">
+  <a href="https://github.com/fodelf/YoungAi"><b>GitHub repository · fodelf/YoungAi</b></a> ·
   <a href="https://fodelf.github.io/YoungAi/"><b>Website · user guide</b></a> ·
   <b>English</b> · <a href="https://github.com/fodelf/YoungAi/blob/restructure/README.zh-CN.md">中文</a> ·
   <a href="https://huggingface.co/wenzhouwu/YoungAi-DeepSeek-V4.1-Flash-1017">Hugging Face</a> ·
   <a href="https://github.com/fodelf/YoungAi/blob/restructure/docs/TECHNICAL.md">Technical notes</a>
 </p>
+
+![1-bit quants of DeepSeek V4.1 Flash 1017 compared on Unsloth's benchmarks: this project vs Unsloth UD-IQ1_S / IQ1_M and ISTA-DASLab GSQ-RCO IQ1_M](docs/img/quant_compare-en.png)
+
+**Our dataset here is small: read the magnitudes, not a ranking.** Each benchmark got 50 minutes on one serial lane, so our
+rows are random subsets with one sample per item: 205 answers in all (AIME25 18, HMMT 11, GPQA 27, MMLU-Pro 73, IFEval 61,
+LiveCodeBench 15). Unsloth's numbers use every item, up to 16 samples each. Our error bars run from ±3.5 to ±13.4 points.
+Avg of 6 is 82.5 ± 3.6, against 81.8 for GSQ-RCO, 83.5 for UD-IQ1_S and 85.6 for UD-IQ1_M. AIME25 reads low (77.8 ± 9.8
+against 92–95) and HMMT reads high (72.7 ± 13.4 against 54–63); neither is settled at this size. Aider Polyglot was not run:
+its official harness needs Docker, which our Spark lacks.
+
+**These scores do not stand for what the model can actually do.** The pelican test below shows it: same model, same task,
+benchmark scores barely move, and the drawings are a step apart.
+
+Same prompt ("create an HTML page with a 2D SVG animation of a pelican riding a bicycle"), same agent flow (dsh):
+
+| Official DeepSeek V4.1 Flash (510 GB original, official API) | This project, Oct 27: restore sidecar before self-learning | This project, Oct 30: after 8 kept rounds of self-learning |
+|:---:|:---:|:---:|
+| ![Official](docs/img/pelican-official.png) | ![This project, Oct 27](docs/img/pelican-local.png) | ![This project, Oct 30](docs/img/pelican-local-1030.png) |
+
+Both local runs use the 113.6 GB equal-weight base plus the restore sidecar on one machine; only the sidecar's correction
+changed in between. One run each, not hand-picked.
+
+- **Oct 27.** A frame from the first draft while the model reviewed its own screenshot; we stopped the run there. The
+  pouch comes out as a round ball under a short bill, and body, wings and neck merge into one lump.
+- **Oct 30.** The final page: the model wrote it, looked at its own screenshot, fixed what it saw and stopped by itself
+  after 72 tool calls (38 minutes). The long bill and the pouch hanging along it are there now. The gap is still
+  visible: the neck does not stand up, the pouch is small, and the body reads more like a duck.
+
+Between the two, on the same rulers: code Same top 84.3% → 85.0% (KL 0.252 → 0.230), general English 81.4% → 82.0%
+(KL 0.621 → 0.586). How the sidecar learns is under [The model](#the-model).
 
 ![YoungAi Studio: the assistant hunting for the cheapest DGX Spark](docs/img/studio-agent-en.png)
 
@@ -48,18 +89,20 @@ Spark, Metal on the Mac, one Makefile, no third-party libraries linked.
 
 ## The model
 
-A 113.6 GB base plus a 41 MB sidecar and a 101 MB post-training file picks the same next token as the 510 GB original
-weights (Same top) **84.8%** of the time:
+A 113.6 GB base plus a 145 MB restore sidecar picks the same next token as the 510 GB original weights (Same top)
+**85.1%** of the time on code:
 
 | | Size | Code | General English |
 |---|---:|---:|---:|
 | ① base | 113.6 GB | 78.4% | 76.8% |
 | ① + ② code sidecar | + 41 MB | 82.0% | 79.7% |
-| **① + ② + ③ post-training** | **+ 101 MB** | **84.8%** | **82.4%** |
+| ① + ② + ③ post-training | + 101 MB | 84.8% | 82.4% |
+| **① + restore sidecar (default on the Spark)** | **+ 145 MB** | **85.1%** | **82.2%** |
 
 "Same" means that on the same text, our model and the original rank the same token first. Code is 15,360 held-out tokens
-across 30 languages; general English is WikiText-2. Mean KL falls with it: code 0.446 → 0.318 → 0.230, general English
-0.803 → 0.673 → 0.574.
+across 30 languages; general English is WikiText-2. Mean KL by row: code 0.446 → 0.318 → 0.230 → 0.227, general English
+0.803 → 0.673 → 0.574 → 0.590. Against ② + ③ the restore sidecar is ahead on code Same top and level on code KL; on general
+English it is 0.2 points lower (1 of 512 tokens), above the 80% floor we hold it to.
 
 **Three things get 113.6 GB this far:**
 
@@ -71,15 +114,14 @@ across 30 languages; general English is WikiText-2. Mean KL falls with it: code 
    original weights. One per domain (finance / code / law / medicine / science), switched from the chat box in under a
    second.
 3. **A 101 MB post-training file.** A rank-64 correction on the output of every MoE layer, taught by the 510 GB original
-   itself: it learns the original's next-token distribution at every position. The data is 330 whole public documents
-   (code, law, medicine, science) and 282 reasoning passages from the official API, trained in 67 minutes on one Spark.
-   The code used for scoring shares not a single 24-token stretch with the training data, and general English rises
-   2.7 points as well: it fixes the quantization error itself rather than memorizing. It also moves the two habits
-   quantization left behind: the extra question marks in decision questions drop from 2× the original's to 1.2–1.3×, and
-   thinking that would not stop now stops, slightly too eagerly (see [Limits](#limits)).
+   itself: it learns the original's next-token distribution at every position. The code used for scoring shares not a
+   single 24-token stretch with the training data, and general English rises 2.7 points as well: it fixes the quantization
+   error itself rather than memorizing.
 
-There is more room in post-training. This file used about 600 samples of under 1,000 tokens each; the amount of data, the
-length and the rank have not been pushed yet.
+**The restore sidecar** puts both pieces in one directory: gains and router biases like ② (40 MB), a rank-64 correction
+like ③ (105 MB). Its correction keeps learning from source files the official API writes fresh. No training text shares a
+16-token stretch with either ruler, apart from two lines of Dockerfile boilerplate. Pass the directory to
+`ds4-server --zchain`.
 
 Context is 1M tokens; the full KV cache is 0.89 GB. Method and full tables: [technical notes §5](docs/TECHNICAL.md#5-results);
 how the post-training file is made: [§4.3](docs/TECHNICAL.md#43-the-post-training-file).
@@ -177,6 +219,7 @@ recognition also runs on the machine's GPU, so the audio never leaves it.
 Ubuntu on the Spark ships.
 
 ```sh
+# YoungAi — GitHub repository fodelf/YoungAi
 git clone https://github.com/fodelf/YoungAi.git ~/ds4-main && cd ~/ds4-main
 make cuda-spark
 ./ds4-train --host 0.0.0.0 --port 8000      # open http://<host>:8000/
@@ -197,6 +240,7 @@ How every tab and every tool works, and what happens when something goes wrong: 
 *Load* buttons have only been run on the Spark.
 
 ```sh
+# YoungAi — GitHub repository fodelf/YoungAi
 git clone https://github.com/fodelf/YoungAi.git ~/ds4-main && cd ~/ds4-main
 make                                                            # Metal build
 bash gguf-tools/scripts/hf_install.sh download --dir ~/youngai   # ~317 GB, resumable
@@ -240,7 +284,8 @@ bash install.sh --posttrain          # also load the post-training file (pairs w
   16 GB, so on it we only run the GPU kernel tests.
 - One machine, one model: background tasks and your chat take turns rather than running in parallel.
 - Sites behind a login or a captcha stay closed to the assistant; it says what it could not open instead of guessing.
-- Sidecars and the post-training file are scored on held-out text, not on end-to-end tasks.
+- The per-domain sidecars and the post-training file are scored on held-out text only. The restore sidecar has also run
+  the task benchmarks at the top of this page, on small subsets.
 - The post-training file makes long reasoning stop earlier than the original: on two real reasoning runs of 10–30k
   tokens, the chance of stopping is 1.6–2× the original's, so hard problems may get a few steps less thought. Leave it
   off if that matters (`install.sh` without `--posttrain`, or no `--posttrain` on `ds4-server`).
@@ -279,7 +324,7 @@ your browser), and `/api/phone/*` is a plain REST API that the page, the model a
 ## Author · acknowledgements · license
 
 Wenzhou Wu (吴文周) · 310066827@qq.com. Questions, reproduction reports and collaboration are welcome; bugs and pull
-requests go to [GitHub](https://github.com/fodelf/YoungAi).
+requests go to [GitHub repository · fodelf/YoungAi](https://github.com/fodelf/YoungAi).
 
 YoungAi started as a fork of [antirez/ds4](https://github.com/antirez/ds4) (DwarfStar, Salvatore Sanfilippo's DeepSeek V4
 engine). GGUF, layouts such as q4_K and much kernel know-how come from [llama.cpp and GGML](https://github.com/ggml-org/llama.cpp);

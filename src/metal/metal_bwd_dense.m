@@ -117,6 +117,41 @@ int ds4_gpu_bwd_adam_tensor(ds4_gpu_tensor *p, ds4_gpu_tensor *g, ds4_gpu_tensor
     v41_bind b[] = { V41_A(a), V41_T(p), V41_T(g), V41_T(m), V41_T(v) };
     return v41_launch_1d("kernel_v41_bwd_adam", b, 5, n);
 }
+int ds4_gpu_bwd_anchor_tensor(ds4_gpu_tensor *g, ds4_gpu_tensor *facc, const ds4_gpu_tensor *p, const ds4_gpu_tensor *p0,
+                              const ds4_gpu_tensor *F, uint64_t n, float lam, double *pen, double *gn2) {
+    if (!g || !facc || !p || !p0 || !pen || !gn2) return 0;
+    uint64_t ntg = (n + 511u) / 512u;
+    if (ntg > 256u) ntg = 256u;
+    if (ntg == 0) return 1;
+    id<MTLBuffer> part = v41_grow(&g_bwd_part, ntg * 8, "bwd anchor");
+    if (!part) return 0;
+    v41_anchor_args a = { n, lam, F ? 1u : 0u, 0 };
+    v41_bind b[] = { V41_A(a), V41_B(part, 0), V41_T(g), V41_T(facc), V41_T(p), V41_T(p0), V41_T(F) };
+    if (!v41_launch("kernel_v41_bwd_anchor", b, 7, MTLSizeMake((NSUInteger)ntg, 1, 1), MTLSizeMake(512, 1, 1))) return 0;
+    if (!v41_host_sync()) return 0;
+    const float *q = [part contents];
+    double sp = 0.0, sg = 0.0;
+    for (uint64_t i = 0; i < ntg; i++) { sp += (double)q[2 * i]; sg += (double)q[2 * i + 1]; }
+    *pen += sp; *gn2 += sg;
+    return 1;
+}
+int ds4_gpu_bwd_pull_tensor(ds4_gpu_tensor *p, const ds4_gpu_tensor *p0, const ds4_gpu_tensor *F, uint64_t n, float coef, double *pen, double *gn2) {
+    if (!p || !p0 || !F || !pen || !gn2) return 0;
+    uint64_t ntg = (n + 511u) / 512u;
+    if (ntg > 256u) ntg = 256u;
+    if (ntg == 0) return 1;
+    id<MTLBuffer> part = v41_grow(&g_bwd_part, ntg * 8, "bwd pull");
+    if (!part) return 0;
+    v41_pull_args a = { n, coef, 0, 0 };
+    v41_bind b[] = { V41_A(a), V41_B(part, 0), V41_T(p), V41_T(p0), V41_T(F) };
+    if (!v41_launch("kernel_v41_bwd_pull", b, 5, MTLSizeMake((NSUInteger)ntg, 1, 1), MTLSizeMake(512, 1, 1))) return 0;
+    if (!v41_host_sync()) return 0;
+    const float *q = [part contents];
+    double sp = 0.0, sg = 0.0;
+    for (uint64_t i = 0; i < ntg; i++) { sp += (double)q[2 * i]; sg += (double)q[2 * i + 1]; }
+    *pen += sp; *gn2 += sg;
+    return 1;
+}
 int ds4_gpu_bwd_axpy_tensor(ds4_gpu_tensor *y, const ds4_gpu_tensor *x, float a, uint64_t n) {
     if (!y || !x || n == 0) return 0;
     v41_bind b[] = { V41_T(y), V41_T(x), V41_A(n), V41_A(a) };
