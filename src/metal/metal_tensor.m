@@ -94,16 +94,18 @@ int ds4_gpu_tensor_fill_f32(ds4_gpu_tensor *tensor, float value, uint64_t count)
 /* C worker threads have no outer autorelease pool. Buffer property getters
  * may autorelease retained MTLBuffer references; drain them at each API call
  * while command buffers / transient_buffers keep in-flight uploads alive. */
-int ds4_gpu_tensor_write(ds4_gpu_tensor *tensor, uint64_t offset, const void *data, uint64_t bytes) {
-    @autoreleasepool {
-        if (!tensor || (!data && bytes != 0)) return 0;
-        DS4MetalTensor *obj = ds4_gpu_tensor_obj(tensor);
-        if (offset > obj.bytes || bytes > obj.bytes - offset) return 0;
-        if (bytes != 0) {
-            memcpy((uint8_t *)[obj.buffer contents] + obj.offset + offset, data, (size_t)bytes);
-        }
-        return 1;
+static int tensor_write_impl(ds4_gpu_tensor *tensor, uint64_t offset, const void *data, uint64_t bytes) {
+    if (!tensor || (!data && bytes != 0)) return 0;
+    DS4MetalTensor *obj = ds4_gpu_tensor_obj(tensor);
+    if (offset > obj.bytes || bytes > obj.bytes - offset) return 0;
+    if (bytes != 0) {
+        memcpy((uint8_t *)[obj.buffer contents] + obj.offset + offset, data, (size_t)bytes);
     }
+    return 1;
+}
+
+int ds4_gpu_tensor_write(ds4_gpu_tensor *tensor, uint64_t offset, const void *data, uint64_t bytes) {
+    @autoreleasepool { return tensor_write_impl(tensor, offset, data, bytes); }
 }
 
 int ds4_gpu_tensor_read(const ds4_gpu_tensor *tensor, uint64_t offset, void *data, uint64_t bytes) {
