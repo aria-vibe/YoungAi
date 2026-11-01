@@ -381,8 +381,8 @@ int ds4_engine_v41_generate_argmax(ds4_engine *e, const int *prompt, int n_promp
             }
             uint32_t a = 0;
             while (a < k && want[a] == batch[a + 1u]) a++;   /* 接受最长前缀(采样下 want 已按"接受 ⇒ 草稿 / 拒绝 ⇒ 残差"拼好, 同一句) */
-            /* Only emitted tokens may enter the end checkpoint. Keeping an
-             * accepted suffix past max_tokens prevents the next turn matching it. */
+            /* Clamp the committed prefix before rollback: an accepted suffix
+             * past max_tokens is never emitted and prevents the next cache match. */
             const uint32_t remaining = (uint32_t)(n_predict - produced);
             if (a > remaining) a = remaining;
             /* 每个出过草稿的轮都观测首位(k=0 的轮看吐出的 token 是否就是草稿首位), 否则校准会死锁在 ρ=0(见 core_v41.h) */

@@ -66,6 +66,24 @@ rounded/unrounded outputs and output strides. Attention checks ratios 1/2/4/128,
 early/split/compressor boundaries, long positions and both precision settings.
 Existing primitives also compare against scalar reference math and finite differences.
 
+## Output-limit checkpoint regression
+
+Verification may accept more tokens than the remaining output budget. Previously
+all accepted tokens entered KV even though emission stopped at `max_tokens`; the
+end checkpoint then contained an un-emitted suffix and the next turn fell back to
+the prompt checkpoint. On Metal this also selected different prefill arithmetic.
+Cap the retained prefix before rollback and checkpoint bookkeeping. This logical
+limit applies to both backends; it does not change already emitted tokens.
+
+Against a running DSpark-enabled server, the short regression fits the baseline:
+
+```sh
+python3 tests/repro/metal_cache_limit.py --url http://127.0.0.1:19010 --out /tmp/cache-limits
+```
+
+It checks limits 1–8, 15, 16 and 31, requiring the follow-up to reuse exactly the
+prompt plus emitted tokens. Run it on CUDA as well; local execution used Metal.
+
 ## Performance and full-model gates
 
 Build the same bounded microbenchmark on each revision and run sequentially on an
